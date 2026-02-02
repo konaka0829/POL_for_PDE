@@ -184,7 +184,8 @@ print('preprocessing finished, time used:', t2-t1)
 device = torch.device('cuda')
 
 # load model
-model = torch.load('model/ns_fourier_V1e-4_T20_N9800_ep200_m12_w32')
+# PyTorch 2.6+ defaults to weights_only=True; set False to load full module from trusted checkpoints.
+model = torch.load('model/ns_fourier_V1e-4_T20_N9800_ep200_m12_w32', weights_only=False)
 
 print(model.count_params())
 
@@ -208,6 +209,5 @@ print(test_l2/ntest)
 
 path = 'eval'
 scipy.io.savemat('pred/'+path+'.mat', mdict={'pred': pred.cpu().numpy(), 'u': test_u.cpu().numpy()})
-
 
 
