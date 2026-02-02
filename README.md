@@ -21,10 +21,17 @@ Examples of applications:
 - [Carbon capture and storage](https://arxiv.org/pdf/2210.17051.pdf)
 
 ## Requirements
-- We have updated the files to support [PyTorch 1.8.0](https://pytorch.org/). 
-Pytorch 1.8.0 starts to support complex numbers and it has a new implementation of FFT. 
-As a result the code is about 30% faster.
-- Previous version for [PyTorch 1.6.0](https://pytorch.org/) is avaiable at `FNO-torch.1.6`.
+- The current scripts target modern PyTorch with native complex/FFT support and are tested on
+  Python 3.10+ with PyTorch 2.1+.
+- Recommended versions:
+  - Python: 3.10+
+  - torch: 2.1+
+  - torchvision: 0.16+ (only needed for `scripts/fourier_on_images.py`)
+- Minimum versions:
+  - Python: 3.10
+  - torch: 2.0
+  - torchvision: 0.15 (only needed for `scripts/fourier_on_images.py`)
+- Legacy PyTorch 1.6 scripts have been removed from this repository.
 
 ## Major Updates:
 - Dec 2022: Add an MLP per layer. Add InstanceNorm layers for fourier_2d_time. Add Cosine Annealing scheduler.
