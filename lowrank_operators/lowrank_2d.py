@@ -85,25 +85,25 @@ class MyNet(torch.nn.Module):
         v1 = self.net1(v, a)
         v2 = self.w1(v)
         v = v1+v2
-        v = self.bn1(v.reshape(-1, self.width)).view(batch_size,n,self.width)
+        v = self.bn1(v.reshape(-1, self.width)).reshape(batch_size, n, self.width)
         v = F.relu(v)
 
         v1 = self.net2(v, a)
         v2 = self.w2(v)
         v = v1+v2
-        v = self.bn2(v.reshape(-1, self.width)).view(batch_size,n,self.width)
+        v = self.bn2(v.reshape(-1, self.width)).reshape(batch_size, n, self.width)
         v = F.relu(v)
 
         v1 = self.net3(v, a)
         v2 = self.w3(v)
         v = v1+v2
-        v = self.bn3(v.reshape(-1, self.width)).view(batch_size,n,self.width)
+        v = self.bn3(v.reshape(-1, self.width)).reshape(batch_size, n, self.width)
         v = F.relu(v)
 
         v1 = self.net4(v, a)
         v2 = self.w4(v)
         v = v1+v2
-        v = self.bn4(v.reshape(-1, self.width)).view(batch_size,n,self.width)
+        v = self.bn4(v.reshape(-1, self.width)).reshape(batch_size, n, self.width)
 
 
         v = self.fc1(v)
@@ -186,12 +186,12 @@ for ep in range(epochs):
         optimizer.zero_grad()
         out = model(x).reshape(batch_size, s*s)
 
-        mse = F.mse_loss(out.view(batch_size, -1), y.view(batch_size, -1), reduction='mean')
+        mse = F.mse_loss(out.reshape(batch_size, -1), y.reshape(batch_size, -1), reduction='mean')
         mse.backward()
 
         out = y_normalizer.decode(out)
         y = y_normalizer.decode(y)
-        loss = myloss(out.view(batch_size,-1), y.view(batch_size,-1))
+        loss = myloss(out.reshape(batch_size, -1), y.reshape(batch_size, -1))
         # loss.backward()
 
         optimizer.step()
@@ -208,7 +208,7 @@ for ep in range(epochs):
 
             out = model(x).reshape(batch_size, s*s)
             out = y_normalizer.decode(out)
-            test_l2 += myloss(out.view(batch_size, -1), y.view(batch_size, -1)).item()
+            test_l2 += myloss(out.reshape(batch_size, -1), y.reshape(batch_size, -1)).item()
 
     train_mse /= len(train_loader)
     train_l2 /= ntrain

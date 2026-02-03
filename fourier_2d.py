@@ -230,7 +230,7 @@ for ep in range(epochs):
         out = y_normalizer.decode(out)
         y = y_normalizer.decode(y)
 
-        loss = myloss(out.view(batch_size,-1), y.view(batch_size,-1))
+        loss = myloss(out.reshape(batch_size, -1), y.reshape(batch_size, -1))
         loss.backward()
 
         optimizer.step()
@@ -246,7 +246,7 @@ for ep in range(epochs):
             out = model(x).reshape(batch_size, s, s)
             out = y_normalizer.decode(out)
 
-            test_l2 += myloss(out.view(batch_size,-1), y.view(batch_size,-1)).item()
+            test_l2 += myloss(out.reshape(batch_size, -1), y.reshape(batch_size, -1)).item()
 
     train_l2/= ntrain
     test_l2 /= ntest
@@ -289,7 +289,7 @@ try:
             out_i = model(x_i).reshape(1, s, s)
             out_i = y_normalizer.decode(out_i)
             # y_test is already in physical space
-            per_sample_err.append(rel_l2(out_i.view(-1), y_i.view(-1)))
+            per_sample_err.append(rel_l2(out_i.reshape(-1), y_i.reshape(-1)))
 
             if i in sample_ids:
                 # input coeff is normalized; decode for visualization
