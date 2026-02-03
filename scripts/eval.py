@@ -17,6 +17,26 @@ def compl_mul3d(a, b):
     # (batch, in_channel, x,y,t), (in_channel, out_channel, x,y,t) -> (batch, out_channel, x,y,t)
     return torch.einsum("bixyz,ioxyz->boxyz", a, b)
 
+def convert_spectral_weights(module):
+    converted = 0
+    for name in ("weights1", "weights2", "weights3", "weights4"):
+        if not hasattr(module, name):
+            continue
+        param = getattr(module, name)
+        if torch.is_complex(param):
+            continue
+        if param.dim() == 6 and param.size(-1) == 2:
+            complex_param = torch.view_as_complex(param.contiguous())
+            setattr(module, name, nn.Parameter(complex_param, requires_grad=param.requires_grad))
+            converted += 1
+    return converted
+
+def normalize_spectral_weights(model):
+    total_converted = 0
+    for module in model.modules():
+        total_converted += convert_spectral_weights(module)
+    return total_converted
+
 class SpectralConv3d_fast(nn.Module):
     def __init__(self, in_channels, out_channels, modes1, modes2, modes3):
         super(SpectralConv3d_fast, self).__init__()
@@ -186,6 +206,9 @@ device = torch.device('cuda')
 # load model
 # PyTorch 2.6+ defaults to weights_only=True; set False to load full module from trusted checkpoints.
 model = torch.load('model/ns_fourier_V1e-4_T20_N9800_ep200_m12_w32', weights_only=False)
+converted = normalize_spectral_weights(model)
+if converted:
+    print(f"converted stacked real/imag spectral weights: {converted}")
 
 print(model.count_params())
 
@@ -209,5 +232,3 @@ print(test_l2/ntest)
 
 path = 'eval'
 scipy.io.savemat('pred/'+path+'.mat', mdict={'pred': pred.cpu().numpy(), 'u': test_u.cpu().numpy()})
-
-
