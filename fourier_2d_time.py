@@ -4,9 +4,11 @@ This file is the Fourier Neural Operator for 2D problem such as the Navier-Stoke
 which uses a recurrent structure to propagates in time.
 """
 
+import argparse
 import torch.nn.functional as F
 from utilities3 import *
 from timeit import default_timer
+from cli_utils import add_data_mode_args, add_split_args, validate_data_mode_args
 
 # ------------------------------------------------------------
 # Visualization helpers (PNG/PDF/SVG)
@@ -159,22 +161,54 @@ class FNO2d(nn.Module):
         gridy = gridy.reshape(1, 1, size_y, 1).repeat([batchsize, size_x, 1, 1])
         return torch.cat((gridx, gridy), dim=-1).to(device)
 
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Fourier Neural Operator 2D Time")
+    add_data_mode_args(
+        parser,
+        default_data_mode="separate_files",
+        default_data_file="data/ns_data_V100_N1000_T50_1.mat",
+        default_train_file="data/ns_data_V100_N1000_T50_1.mat",
+        default_test_file="data/ns_data_V100_N1000_T50_2.mat",
+    )
+    parser.add_argument("--ntrain", type=int, default=1000, help="Number of training samples.")
+    parser.add_argument("--ntest", type=int, default=200, help="Number of test samples.")
+    parser.add_argument("--modes", type=int, default=12, help="Number of Fourier modes.")
+    parser.add_argument("--width", type=int, default=20, help="Model width.")
+    parser.add_argument("--batch-size", type=int, default=20, help="Batch size.")
+    parser.add_argument("--learning-rate", type=float, default=0.001, help="Learning rate.")
+    parser.add_argument("--epochs", type=int, default=500, help="Number of epochs.")
+    parser.add_argument("--sub", type=int, default=1, help="Downsampling rate.")
+    parser.add_argument("--S", type=int, default=64, help="Spatial grid size.")
+    parser.add_argument("--T-in", type=int, default=10, help="Number of input timesteps.")
+    parser.add_argument("--T", type=int, default=40, help="Number of prediction timesteps.")
+    parser.add_argument("--step", type=int, default=1, help="Autoregressive step size.")
+    add_split_args(parser, default_train_split=0.8, default_seed=0)
+    return parser
+
+
+def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    validate_data_mode_args(args, parser)
+
+
 ################################################################
 # configs
 ################################################################
+parser = _build_parser()
+args = parser.parse_args()
+_validate_args(args, parser)
 
-TRAIN_PATH = 'data/ns_data_V100_N1000_T50_1.mat'
-TEST_PATH = 'data/ns_data_V100_N1000_T50_2.mat'
+torch.manual_seed(args.seed)
+np.random.seed(args.seed)
 
-ntrain = 1000
-ntest = 200
+ntrain = args.ntrain
+ntest = args.ntest
 
-modes = 12
-width = 20
+modes = args.modes
+width = args.width
 
-batch_size = 20
-learning_rate = 0.001
-epochs = 500
+batch_size = args.batch_size
+learning_rate = args.learning_rate
+epochs = args.epochs
 iterations = epochs*(ntrain//batch_size)
 
 path = 'ns_fourier_2d_time_N'+str(ntrain)+'_ep' + str(epochs) + '_m' + str(modes) + '_w' + str(width)
@@ -192,23 +226,48 @@ hist_train_full: list[float] = []
 hist_test_step: list[float] = []
 hist_test_full: list[float] = []
 
-sub = 1
-S = 64
-T_in = 10
-T = 40 # T=40 for V1e-3; T=20 for V1e-4; T=10 for V1e-5;
-step = 1
+sub = args.sub
+S = args.S
+T_in = args.T_in
+T = args.T # T=40 for V1e-3; T=20 for V1e-4; T=10 for V1e-5;
+step = args.step
 
 ################################################################
 # load data
 ################################################################
 
-reader = MatReader(TRAIN_PATH)
-train_a = reader.read_field('u')[:ntrain,::sub,::sub,:T_in]
-train_u = reader.read_field('u')[:ntrain,::sub,::sub,T_in:T+T_in]
+if args.data_mode == "single_split":
+    reader = MatReader(args.data_file)
+    full_u = reader.read_field('u')
+    total = full_u.shape[0]
+    indices = np.arange(total)
+    if args.shuffle:
+        np.random.shuffle(indices)
+    split_idx = int(total * args.train_split)
+    train_idx = indices[:split_idx]
+    test_idx = indices[split_idx:]
 
-reader = MatReader(TEST_PATH)
-test_a = reader.read_field('u')[-ntest:,::sub,::sub,:T_in]
-test_u = reader.read_field('u')[-ntest:,::sub,::sub,T_in:T+T_in]
+    if ntrain > len(train_idx) or ntest > len(test_idx):
+        raise ValueError(
+            f"Not enough samples for ntrain={ntrain}, ntest={ntest} with train split "
+            f"{args.train_split} (total={total})."
+        )
+
+    train_idx = train_idx[:ntrain]
+    test_idx = test_idx[:ntest]
+
+    train_a = full_u[train_idx,::sub,::sub,:T_in]
+    train_u = full_u[train_idx,::sub,::sub,T_in:T+T_in]
+    test_a = full_u[test_idx,::sub,::sub,:T_in]
+    test_u = full_u[test_idx,::sub,::sub,T_in:T+T_in]
+else:
+    reader = MatReader(args.train_file)
+    train_a = reader.read_field('u')[:ntrain,::sub,::sub,:T_in]
+    train_u = reader.read_field('u')[:ntrain,::sub,::sub,T_in:T+T_in]
+
+    reader = MatReader(args.test_file)
+    test_a = reader.read_field('u')[-ntest:,::sub,::sub,:T_in]
+    test_u = reader.read_field('u')[-ntest:,::sub,::sub,T_in:T+T_in]
 
 print(train_u.shape)
 print(test_u.shape)
@@ -373,4 +432,3 @@ try:
     )
 except Exception as e:
     print(f"[viz] failed: {e}")
-
