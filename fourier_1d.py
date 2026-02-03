@@ -7,6 +7,18 @@ import torch.nn.functional as F
 from timeit import default_timer
 from utilities3 import *
 
+# ------------------------------------------------------------
+# Visualization helpers (PNG/PDF/SVG)
+# ------------------------------------------------------------
+import os
+from viz_utils import (
+    LearningCurve,
+    plot_error_histogram,
+    plot_learning_curve,
+    plot_1d_prediction,
+    rel_l2,
+)
+
 torch.manual_seed(0)
 np.random.seed(0)
 
@@ -185,6 +197,14 @@ optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=iterations)
 
 myloss = LpLoss(size_average=False)
+
+# --- Visualization bookkeeping
+viz_dir = os.path.join("visualizations", "fourier_1d")
+os.makedirs(viz_dir, exist_ok=True)
+hist_epochs: list[int] = []
+hist_train_mse: list[float] = []
+hist_train_rel_l2: list[float] = []
+hist_test_rel_l2: list[float] = []
 for ep in range(epochs):
     model.train()
     t1 = default_timer()
@@ -218,8 +238,48 @@ for ep in range(epochs):
     train_l2 /= ntrain
     test_l2 /= ntest
 
+    # store history for plotting
+    hist_epochs.append(ep)
+    hist_train_mse.append(train_mse)
+    hist_train_rel_l2.append(train_l2)
+    hist_test_rel_l2.append(test_l2)
+
     t2 = default_timer()
     print(ep, t2-t1, train_mse, train_l2, test_l2)
+
+# ------------------------------------------------------------
+# Visualize learning curves
+# ------------------------------------------------------------
+try:
+    plot_learning_curve(
+        LearningCurve(
+            epochs=hist_epochs,
+            train=hist_train_rel_l2,
+            test=hist_test_rel_l2,
+            train_label="train (relL2)",
+            test_label="test (relL2)",
+            metric_name="relative L2",
+        ),
+        out_path_no_ext=os.path.join(viz_dir, "learning_curve_relL2"),
+        logy=True,
+        title="fourier_1d: relative L2",
+    )
+    # MSE does not have a test curve here; plot train only (reuse API)
+    plot_learning_curve(
+        LearningCurve(
+            epochs=hist_epochs,
+            train=hist_train_mse,
+            test=[np.nan] * len(hist_epochs),
+            train_label="train (MSE)",
+            test_label="",
+            metric_name="MSE",
+        ),
+        out_path_no_ext=os.path.join(viz_dir, "learning_curve_mse"),
+        logy=True,
+        title="fourier_1d: train MSE",
+    )
+except Exception as e:
+    print(f"[viz] failed to plot learning curves: {e}")
 
 # torch.save(model, 'model/ns_fourier_burgers')
 pred = torch.zeros(y_test.shape)
@@ -231,10 +291,33 @@ with torch.no_grad():
         x, y = x.cuda(), y.cuda()
 
         out = model(x).view(-1)
-        pred[index] = out
+        pred[index] = out.detach().cpu()
 
         test_l2 += myloss(out.view(1, -1), y.view(1, -1)).item()
         print(index, test_l2)
         index = index + 1
 
 # scipy.io.savemat('pred/burger_test.mat', mdict={'pred': pred.cpu().numpy()})
+
+# ------------------------------------------------------------
+# Visualize predictions on a few test samples
+# ------------------------------------------------------------
+try:
+    # Per-sample relative L2 histogram
+    per_sample_err = [rel_l2(pred[i], y_test[i]) for i in range(pred.shape[0])]
+    plot_error_histogram(per_sample_err, os.path.join(viz_dir, "test_relL2_hist"))
+
+    # Representative samples
+    sample_ids = [0, min(1, ntest - 1), min(2, ntest - 1)]
+    x_grid = np.linspace(0.0, 1.0, s)
+    for i in sample_ids:
+        plot_1d_prediction(
+            x=x_grid,
+            gt=y_test[i],
+            pred=pred[i],
+            input_u0=x_test[i].view(-1),
+            out_path_no_ext=os.path.join(viz_dir, f"sample_{i:03d}"),
+            title_prefix=f"sample {i}: ",
+        )
+except Exception as e:
+    print(f"[viz] failed to plot sample predictions: {e}")

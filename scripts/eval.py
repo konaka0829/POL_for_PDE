@@ -10,6 +10,22 @@ from functools import reduce
 from timeit import default_timer
 import scipy.io
 
+# ------------------------------------------------------------
+# Visualization helpers (PNG/PDF/SVG)
+# ------------------------------------------------------------
+import os
+import sys
+
+# Ensure repo root is on PYTHONPATH even when running from inside scripts/
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+
+from viz_utils import (
+    plot_2d_time_slices,
+    plot_error_histogram,
+    plot_rel_l2_over_time,
+    rel_l2,
+)
+
 torch.manual_seed(0)
 np.random.seed(0)
 
@@ -223,7 +239,8 @@ with torch.no_grad():
         x, y = x.cuda(), y.cuda()
 
         out = model(x)
-        pred[index] = out
+        # pred lives on CPU; move outputs back to CPU for storage
+        pred[index] = out.detach().cpu()
         loss = myloss(out.view(1, -1), y.view(1, -1)).item()
         test_l2 += loss
         print(index, loss)
@@ -232,3 +249,33 @@ print(test_l2/ntest)
 
 path = 'eval'
 scipy.io.savemat('pred/'+path+'.mat', mdict={'pred': pred.cpu().numpy(), 'u': test_u.cpu().numpy()})
+
+# ------------------------------------------------------------
+# Visualize a few samples + error histogram
+# ------------------------------------------------------------
+try:
+    viz_dir = os.path.join("visualizations", "scripts_eval")
+    os.makedirs(viz_dir, exist_ok=True)
+
+    # histogram over all test samples
+    per_sample_err = [rel_l2(pred[i], test_u[i]) for i in range(ntest)]
+    plot_error_histogram(per_sample_err, os.path.join(viz_dir, "relL2_hist"))
+
+    # qualitative plots
+    sample_ids = [0, min(1, ntest - 1), min(2, ntest - 1)]
+    t_indices = [0, T // 2, T - 1]
+    for i in sample_ids:
+        plot_2d_time_slices(
+            gt=test_u[i],
+            pred=pred[i],
+            t_indices=t_indices,
+            out_path_no_ext=os.path.join(viz_dir, f"sample_{i:03d}_slices"),
+            suptitle=f"sample {i}  full relL2={rel_l2(pred[i], test_u[i]):.3g}",
+        )
+        plot_rel_l2_over_time(
+            gt=test_u[i],
+            pred=pred[i],
+            out_path_no_ext=os.path.join(viz_dir, f"sample_{i:03d}_relL2_over_time"),
+        )
+except Exception as e:
+    print(f"[viz] failed: {e}")

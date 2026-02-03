@@ -9,6 +9,19 @@ import torch.nn.functional as F
 from utilities3 import *
 from timeit import default_timer
 
+# ------------------------------------------------------------
+# Visualization helpers (PNG/PDF/SVG)
+# ------------------------------------------------------------
+import os
+from viz_utils import (
+    LearningCurve,
+    plot_2d_time_slices,
+    plot_error_histogram,
+    plot_learning_curve,
+    plot_rel_l2_over_time,
+    rel_l2,
+)
+
 torch.manual_seed(0)
 np.random.seed(0)
 
@@ -181,6 +194,14 @@ path_train_err = 'results/'+path+'train.txt'
 path_test_err = 'results/'+path+'test.txt'
 path_image = 'image/'+path
 
+# --- Visualization bookkeeping
+viz_dir = path_image
+os.makedirs(viz_dir, exist_ok=True)
+hist_epochs: list[int] = []
+hist_train_mse: list[float] = []
+hist_train_rel_l2: list[float] = []
+hist_test_rel_l2: list[float] = []
+
 runtime = np.zeros(2, )
 t1 = default_timer()
 
@@ -273,9 +294,48 @@ for ep in range(epochs):
     train_l2 /= ntrain
     test_l2 /= ntest
 
+    # store history for plotting
+    hist_epochs.append(ep)
+    hist_train_mse.append(train_mse)
+    hist_train_rel_l2.append(train_l2)
+    hist_test_rel_l2.append(test_l2)
+
     t2 = default_timer()
     print(ep, t2-t1, train_mse, train_l2, test_l2)
 # torch.save(model, path_model)
+
+# ------------------------------------------------------------
+# Visualize learning curves
+# ------------------------------------------------------------
+try:
+    plot_learning_curve(
+        LearningCurve(
+            epochs=hist_epochs,
+            train=hist_train_rel_l2,
+            test=hist_test_rel_l2,
+            train_label="train (relL2)",
+            test_label="test (relL2)",
+            metric_name="relative L2",
+        ),
+        out_path_no_ext=os.path.join(viz_dir, "learning_curve_relL2"),
+        logy=True,
+        title="fourier_3d: relative L2",
+    )
+    plot_learning_curve(
+        LearningCurve(
+            epochs=hist_epochs,
+            train=hist_train_mse,
+            test=[np.nan] * len(hist_epochs),
+            train_label="train (MSE)",
+            test_label="",
+            metric_name="MSE",
+        ),
+        out_path_no_ext=os.path.join(viz_dir, "learning_curve_mse"),
+        logy=True,
+        title="fourier_3d: train MSE",
+    )
+except Exception as e:
+    print(f"[viz] failed to plot learning curves: {e}")
 
 pred = torch.zeros(test_u.shape)
 index = 0
@@ -285,15 +345,43 @@ with torch.no_grad():
         test_l2 = 0
         x, y = x.cuda(), y.cuda()
 
-        out = model(x)
+        out = model(x).view(1, S, S, T)
         out = y_normalizer.decode(out)
-        pred[index] = out
+        pred[index] = out.squeeze(0).detach().cpu()
 
         test_l2 += myloss(out.view(1, -1), y.view(1, -1)).item()
         print(index, test_l2)
         index = index + 1
 
-scipy.io.savemat('pred/'+path+'.mat', mdict={'pred': pred.cpu().numpy()})
+# Save predictions (and ground truth for convenience)
+scipy.io.savemat('pred/'+path+'.mat', mdict={'pred': pred.cpu().numpy(), 'u': test_u.cpu().numpy()})
+
+# ------------------------------------------------------------
+# Qualitative visualization on a few test samples
+# ------------------------------------------------------------
+try:
+    # Per-sample histogram (full trajectory)
+    per_sample_err = [rel_l2(pred[i], test_u[i]) for i in range(min(ntest, pred.shape[0]))]
+    plot_error_histogram(per_sample_err, os.path.join(viz_dir, "test_full_relL2_hist"))
+
+    # Time slices + error-over-time plots
+    sample_ids = [0, min(1, ntest - 1), min(2, ntest - 1)]
+    t_indices = [0, T // 2, T - 1]
+    for i in sample_ids:
+        plot_2d_time_slices(
+            gt=test_u[i],
+            pred=pred[i],
+            t_indices=t_indices,
+            out_path_no_ext=os.path.join(viz_dir, f"sample_{i:03d}_slices"),
+            suptitle=f"sample {i}  full relL2={rel_l2(pred[i], test_u[i]):.3g}",
+        )
+        plot_rel_l2_over_time(
+            gt=test_u[i],
+            pred=pred[i],
+            out_path_no_ext=os.path.join(viz_dir, f"sample_{i:03d}_relL2_over_time"),
+        )
+except Exception as e:
+    print(f"[viz] failed to plot qualitative results: {e}")
 
 
 

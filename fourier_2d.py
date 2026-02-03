@@ -7,6 +7,18 @@ import torch.nn.functional as F
 from timeit import default_timer
 from utilities3 import *
 
+# ------------------------------------------------------------
+# Visualization helpers (PNG/PDF/SVG)
+# ------------------------------------------------------------
+import os
+from viz_utils import (
+    LearningCurve,
+    plot_2d_comparison,
+    plot_error_histogram,
+    plot_learning_curve,
+    rel_l2,
+)
+
 torch.manual_seed(0)
 np.random.seed(0)
 
@@ -199,6 +211,13 @@ scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=iteratio
 
 myloss = LpLoss(size_average=False)
 y_normalizer.cuda()
+
+# --- Visualization bookkeeping
+viz_dir = os.path.join("visualizations", "fourier_2d")
+os.makedirs(viz_dir, exist_ok=True)
+hist_epochs: list[int] = []
+hist_train_rel_l2: list[float] = []
+hist_test_rel_l2: list[float] = []
 for ep in range(epochs):
     model.train()
     t1 = default_timer()
@@ -232,5 +251,58 @@ for ep in range(epochs):
     train_l2/= ntrain
     test_l2 /= ntest
 
+    # store history for plotting
+    hist_epochs.append(ep)
+    hist_train_rel_l2.append(train_l2)
+    hist_test_rel_l2.append(test_l2)
+
     t2 = default_timer()
     print(ep, t2-t1, train_l2, test_l2)
+
+# ------------------------------------------------------------
+# Visualize learning curve and a few predictions
+# ------------------------------------------------------------
+try:
+    plot_learning_curve(
+        LearningCurve(
+            epochs=hist_epochs,
+            train=hist_train_rel_l2,
+            test=hist_test_rel_l2,
+            train_label="train (relL2)",
+            test_label="test (relL2)",
+            metric_name="relative L2",
+        ),
+        out_path_no_ext=os.path.join(viz_dir, "learning_curve_relL2"),
+        logy=True,
+        title="fourier_2d: relative L2",
+    )
+
+    # Compute predictions for a few test samples (decoded to physical space)
+    model.eval()
+    sample_ids = [0, min(1, ntest - 1), min(2, ntest - 1)]
+    per_sample_err: list[float] = []
+
+    with torch.no_grad():
+        for i in range(ntest):
+            x_i = x_test[i : i + 1].cuda()
+            y_i = y_test[i : i + 1].cuda()
+            out_i = model(x_i).reshape(1, s, s)
+            out_i = y_normalizer.decode(out_i)
+            # y_test is already in physical space
+            per_sample_err.append(rel_l2(out_i.view(-1), y_i.view(-1)))
+
+            if i in sample_ids:
+                # input coeff is normalized; decode for visualization
+                # x_test has shape (s, s, 1); squeeze the channel dim before decoding
+                coeff_i = x_normalizer.decode(x_test[i].squeeze(-1)).squeeze()
+                plot_2d_comparison(
+                    gt=y_i.squeeze().cpu(),
+                    pred=out_i.squeeze().cpu(),
+                    input_field=coeff_i.cpu(),
+                    out_path_no_ext=os.path.join(viz_dir, f"sample_{i:03d}"),
+                    suptitle=f"sample {i}  relL2={per_sample_err[-1]:.3g}",
+                )
+
+    plot_error_histogram(per_sample_err, os.path.join(viz_dir, "test_relL2_hist"))
+except Exception as e:
+    print(f"[viz] failed: {e}")

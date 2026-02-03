@@ -8,6 +8,19 @@ import torch.nn.functional as F
 from utilities3 import *
 from timeit import default_timer
 
+# ------------------------------------------------------------
+# Visualization helpers (PNG/PDF/SVG)
+# ------------------------------------------------------------
+import os
+from viz_utils import (
+    LearningCurve,
+    plot_2d_time_slices,
+    plot_error_histogram,
+    plot_learning_curve,
+    plot_rel_l2_over_time,
+    rel_l2,
+)
+
 torch.manual_seed(0)
 np.random.seed(0)
 
@@ -170,6 +183,15 @@ path_train_err = 'results/'+path+'train.txt'
 path_test_err = 'results/'+path+'test.txt'
 path_image = 'image/'+path
 
+# --- Visualization bookkeeping
+viz_dir = path_image
+os.makedirs(viz_dir, exist_ok=True)
+hist_epochs: list[int] = []
+hist_train_step: list[float] = []
+hist_train_full: list[float] = []
+hist_test_step: list[float] = []
+hist_test_full: list[float] = []
+
 sub = 1
 S = 64
 T_in = 10
@@ -265,5 +287,90 @@ for ep in range(epochs):
     t2 = default_timer()
     print(ep, t2 - t1, train_l2_step / ntrain / (T / step), train_l2_full / ntrain, test_l2_step / ntest / (T / step),
           test_l2_full / ntest)
+
+    # store history for plotting
+    hist_epochs.append(ep)
+    hist_train_step.append(train_l2_step / ntrain / (T / step))
+    hist_train_full.append(train_l2_full / ntrain)
+    hist_test_step.append(test_l2_step / ntest / (T / step))
+    hist_test_full.append(test_l2_full / ntest)
 # torch.save(model, path_model)
+
+# ------------------------------------------------------------
+# Visualize learning curves and a few qualitative rollouts
+# ------------------------------------------------------------
+try:
+    plot_learning_curve(
+        LearningCurve(
+            epochs=hist_epochs,
+            train=hist_train_step,
+            test=hist_test_step,
+            train_label="train (step relL2)",
+            test_label="test (step relL2)",
+            metric_name="relative L2",
+        ),
+        out_path_no_ext=os.path.join(viz_dir, "learning_curve_step_relL2"),
+        logy=True,
+        title="fourier_2d_time: stepwise relative L2",
+    )
+    plot_learning_curve(
+        LearningCurve(
+            epochs=hist_epochs,
+            train=hist_train_full,
+            test=hist_test_full,
+            train_label="train (full relL2)",
+            test_label="test (full relL2)",
+            metric_name="relative L2",
+        ),
+        out_path_no_ext=os.path.join(viz_dir, "learning_curve_full_relL2"),
+        logy=True,
+        title="fourier_2d_time: full-trajectory relative L2",
+    )
+
+    def _rollout_autoregressive(xx0: torch.Tensor) -> torch.Tensor:
+        """Roll out the model autoregressively for T steps (batch, S, S, T)."""
+        xx = xx0.to(device)
+        preds = []
+        for _t in range(0, T, step):
+            im = model(xx)
+            preds.append(im)
+            xx = torch.cat((xx[..., step:], im), dim=-1)
+        return torch.cat(preds, dim=-1)
+
+    model.eval()
+    # Qualitative plots for a few test samples
+    sample_ids = [0, min(1, ntest - 1), min(2, ntest - 1)]
+    t_indices = [0, T // 2, T - 1]
+    with torch.no_grad():
+        for i in sample_ids:
+            gt_i = test_u[i].cpu()
+            pred_i = _rollout_autoregressive(test_a[i : i + 1]).squeeze(0).cpu()
+            e_full = rel_l2(pred_i, gt_i)
+            plot_2d_time_slices(
+                gt=gt_i,
+                pred=pred_i,
+                t_indices=t_indices,
+                out_path_no_ext=os.path.join(viz_dir, f"sample_{i:03d}_slices"),
+                suptitle=f"sample {i}  full relL2={e_full:.3g}",
+            )
+            plot_rel_l2_over_time(
+                gt=gt_i,
+                pred=pred_i,
+                out_path_no_ext=os.path.join(viz_dir, f"sample_{i:03d}_relL2_over_time"),
+            )
+
+    # Optional: histogram of full-trajectory errors on a subset (to keep runtime reasonable)
+    n_hist = min(ntest, 50)
+    per_sample_full = []
+    with torch.no_grad():
+        for i in range(n_hist):
+            pred_i = _rollout_autoregressive(test_a[i : i + 1]).squeeze(0).cpu()
+            per_sample_full.append(rel_l2(pred_i, test_u[i].cpu()))
+    plot_error_histogram(
+        per_sample_full,
+        os.path.join(viz_dir, f"test_full_relL2_hist_first{n_hist}"),
+        title=f"full relL2 histogram (first {n_hist} test samples)",
+    )
+except Exception as e:
+    print(f"[viz] failed: {e}")
 
