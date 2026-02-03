@@ -77,34 +77,34 @@ class MyNet(torch.nn.Module):
     def forward(self, x):
         batch_size = x.shape[0]
         size_x, size_y, size_z = x.shape[1], x.shape[2], x.shape[3]
-        x = x.view(batch_size, size_x*size_y*size_z, -1)
+        x = x.reshape(batch_size, size_x*size_y*size_z, -1)
 
         x = self.fc0(x)
 
         x1 = self.conv0(x)
         x2 = self.w0(x)
         x = x1 + x2
-        x = self.bn0(x.reshape(-1, self.width)).view(batch_size, size_x*size_y*size_z, self.width)
+        x = self.bn0(x.reshape(-1, self.width)).reshape(batch_size, size_x*size_y*size_z, self.width)
         x = F.relu(x)
         x1 = self.conv1(x)
         x2 = self.w1(x)
         x = x1 + x2
-        x = self.bn1(x.reshape(-1, self.width)).view(batch_size, size_x*size_y*size_z, self.width)
+        x = self.bn1(x.reshape(-1, self.width)).reshape(batch_size, size_x*size_y*size_z, self.width)
         x = F.relu(x)
         x1 = self.conv2(x)
         x2 = self.w2(x)
         x = x1 + x2
-        x = self.bn2(x.reshape(-1, self.width)).view(batch_size, size_x*size_y*size_z, self.width)
+        x = self.bn2(x.reshape(-1, self.width)).reshape(batch_size, size_x*size_y*size_z, self.width)
         x = F.relu(x)
         x1 = self.conv3(x)
         x2 = self.w3(x)
         x = x1 + x2
-        x = self.bn3(x.reshape(-1, self.width)).view(batch_size, size_x*size_y*size_z, self.width)
+        x = self.bn3(x.reshape(-1, self.width)).reshape(batch_size, size_x*size_y*size_z, self.width)
 
         x = self.fc1(x)
         x = F.relu(x)
         x = self.fc2(x)
-        x = x.view(batch_size, size_x, size_y, size_z)
+        x = x.reshape(batch_size, size_x, size_y, size_z)
         return x
 
 class Net2d(nn.Module):
@@ -244,7 +244,7 @@ for ep in range(epochs):
 
         y = y_normalizer.decode(y)
         out = y_normalizer.decode(out)
-        l2 = myloss(out.view(batch_size, -1), y.view(batch_size, -1))
+        l2 = myloss(out.reshape(batch_size, -1), y.reshape(batch_size, -1))
         l2.backward()
 
         optimizer.step()
@@ -261,7 +261,7 @@ for ep in range(epochs):
 
             out = model(x)
             out = y_normalizer.decode(out)
-            test_l2 += myloss(out.view(batch_size, -1), y.view(batch_size, -1)).item()
+            test_l2 += myloss(out.reshape(batch_size, -1), y.reshape(batch_size, -1)).item()
 
     train_mse /= len(train_loader)
     train_l2 /= ntrain
@@ -284,12 +284,11 @@ with torch.no_grad():
         out = y_normalizer.decode(out)
         pred[index] = out
 
-        test_l2 += myloss(out.view(1, -1), y.view(1, -1)).item()
+        test_l2 += myloss(out.reshape(1, -1), y.reshape(1, -1)).item()
         print(index, test_l2)
         index = index + 1
 
 # scipy.io.savemat('pred/'+path+'.mat', mdict={'pred': pred.cpu().numpy()})
-
 
 
 

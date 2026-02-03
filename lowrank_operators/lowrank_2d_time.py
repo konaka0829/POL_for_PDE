@@ -78,34 +78,34 @@ class MyNet(torch.nn.Module):
     def forward(self, x):
         batch_size = x.shape[0]
         size_x, size_y = x.shape[1], x.shape[2]
-        x = x.view(batch_size, size_x*size_y, -1)
+        x = x.reshape(batch_size, size_x*size_y, -1)
 
         x = self.fc0(x)
 
         x1 = self.conv0(x)
         x2 = self.w0(x)
         x = x1 + x2
-        x = self.bn0(x.reshape(-1, self.width)).view(batch_size, size_x*size_y, self.width)
+        x = self.bn0(x.reshape(-1, self.width)).reshape(batch_size, size_x*size_y, self.width)
         x = F.relu(x)
         x1 = self.conv1(x)
         x2 = self.w1(x)
         x = x1 + x2
-        x = self.bn1(x.reshape(-1, self.width)).view(batch_size, size_x*size_y, self.width)
+        x = self.bn1(x.reshape(-1, self.width)).reshape(batch_size, size_x*size_y, self.width)
         x = F.relu(x)
         x1 = self.conv2(x)
         x2 = self.w2(x)
         x = x1 + x2
-        x = self.bn2(x.reshape(-1, self.width)).view(batch_size, size_x*size_y, self.width)
+        x = self.bn2(x.reshape(-1, self.width)).reshape(batch_size, size_x*size_y, self.width)
         x = F.relu(x)
         x1 = self.conv3(x)
         x2 = self.w3(x)
         x = x1 + x2
-        x = self.bn3(x.reshape(-1, self.width)).view(batch_size, size_x*size_y, self.width)
+        x = self.bn3(x.reshape(-1, self.width)).reshape(batch_size, size_x*size_y, self.width)
 
         x = self.fc1(x)
         x = F.relu(x)
         x = self.fc2(x)
-        x = x.view(batch_size, size_x, size_y, -1)
+        x = x.reshape(batch_size, size_x, size_y, -1)
         return x
 
 class Net2d(nn.Module):
@@ -302,4 +302,3 @@ for ep in range(epochs):
 #         index = index + 1
 
 # scipy.io.savemat('pred/'+path+'.mat', mdict={'pred': pred.cpu().numpy()})
-

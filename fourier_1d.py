@@ -216,8 +216,8 @@ for ep in range(epochs):
         optimizer.zero_grad()
         out = model(x)
 
-        mse = F.mse_loss(out.view(batch_size, -1), y.view(batch_size, -1), reduction='mean')
-        l2 = myloss(out.view(batch_size, -1), y.view(batch_size, -1))
+        mse = F.mse_loss(out.reshape(batch_size, -1), y.reshape(batch_size, -1), reduction='mean')
+        l2 = myloss(out.reshape(batch_size, -1), y.reshape(batch_size, -1))
         l2.backward() # use the l2 relative loss
 
         optimizer.step()
@@ -232,7 +232,7 @@ for ep in range(epochs):
             x, y = x.cuda(), y.cuda()
 
             out = model(x)
-            test_l2 += myloss(out.view(batch_size, -1), y.view(batch_size, -1)).item()
+            test_l2 += myloss(out.reshape(batch_size, -1), y.reshape(batch_size, -1)).item()
 
     train_mse /= len(train_loader)
     train_l2 /= ntrain
@@ -290,10 +290,10 @@ with torch.no_grad():
         test_l2 = 0
         x, y = x.cuda(), y.cuda()
 
-        out = model(x).view(-1)
+        out = model(x).reshape(-1)
         pred[index] = out.detach().cpu()
 
-        test_l2 += myloss(out.view(1, -1), y.view(1, -1)).item()
+        test_l2 += myloss(out.reshape(1, -1), y.reshape(1, -1)).item()
         print(index, test_l2)
         index = index + 1
 
@@ -315,7 +315,7 @@ try:
             x=x_grid,
             gt=y_test[i],
             pred=pred[i],
-            input_u0=x_test[i].view(-1),
+            input_u0=x_test[i].reshape(-1),
             out_path_no_ext=os.path.join(viz_dir, f"sample_{i:03d}"),
             title_prefix=f"sample {i}: ",
         )

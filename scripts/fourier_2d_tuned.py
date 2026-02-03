@@ -98,28 +98,28 @@ class SimpleBlock2d(nn.Module):
 
         x = torch.cat((x, grid), dim=1)
         x1 = self.conv0(x, size_list[1])
-        x2 = self.w0(x.view(batchsize, self.width_list[0]+self.grid_dim, size_list[0]**2)).view(batchsize, self.width_list[1], size_list[0], size_list[0])
+        x2 = self.w0(x.reshape(batchsize, self.width_list[0]+self.grid_dim, size_list[0]**2)).reshape(batchsize, self.width_list[1], size_list[0], size_list[0])
         # x2 = F.interpolate(x2, size=size_list[1], mode='trilinear')
         x = x1 + x2
         x = F.selu(x)
 
         x = torch.cat((x, grid), dim=1)
         x1 = self.conv1(x, size_list[2])
-        x2 = self.w1(x.view(batchsize, self.width_list[1]+self.grid_dim, size_list[1]**2)).view(batchsize, self.width_list[2], size_list[1], size_list[1])
+        x2 = self.w1(x.reshape(batchsize, self.width_list[1]+self.grid_dim, size_list[1]**2)).reshape(batchsize, self.width_list[2], size_list[1], size_list[1])
         # x2 = F.interpolate(x2, size=size_list[2], mode='trilinear')
         x = x1 + x2
         x = F.selu(x)
 
         x = torch.cat((x, grid), dim=1)
         x1 = self.conv2(x, size_list[3])
-        x2 = self.w2(x.view(batchsize, self.width_list[2]+self.grid_dim, size_list[2]**2)).view(batchsize, self.width_list[3], size_list[2], size_list[2])
+        x2 = self.w2(x.reshape(batchsize, self.width_list[2]+self.grid_dim, size_list[2]**2)).reshape(batchsize, self.width_list[3], size_list[2], size_list[2])
         # x2 = F.interpolate(x2, size=size_list[3], mode='trilinear')
         x = x1 + x2
         x = F.selu(x)
 
         x = torch.cat((x, grid), dim=1)
         x1 = self.conv3(x, size_list[4])
-        x2 = self.w3(x.view(batchsize, self.width_list[3]+self.grid_dim, size_list[3]**2)).view(batchsize, self.width_list[4], size_list[3], size_list[3])
+        x2 = self.w3(x.reshape(batchsize, self.width_list[3]+self.grid_dim, size_list[3]**2)).reshape(batchsize, self.width_list[4], size_list[3], size_list[3])
         # x2 = F.interpolate(x2, size=size_list[4], mode='trilinear')
         x = x1 + x2
 
@@ -316,7 +316,6 @@ for ep in range(epochs):
 #
 #
 # scipy.io.savemat('pred/'+path+'.mat', mdict={'pred': pred.cpu().numpy()})
-
 
 
 

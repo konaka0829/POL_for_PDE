@@ -87,7 +87,7 @@ class SimpleBlock2d(nn.Module):
         x = self.conv3(x)
         x = self.pool(x)
 
-        x = x.view(-1, 64 * 14 * 14)
+        x = x.reshape(-1, 64 * 14 * 14)
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         x = self.fc3(x)
@@ -172,7 +172,7 @@ class ResNet(nn.Module):
         out = self.layer4(out)
         out = F.avg_pool2d(out, 4)
         # print(out.shape)
-        out = out.view(out.size(0), -1)
+        out = out.reshape(out.size(0), -1)
         out = self.linear1(out)
         # out = F.relu(out)
         # out = self.linear2(out)

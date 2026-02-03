@@ -121,19 +121,19 @@ class SimpleBlock2d(nn.Module):
         x = x.permute(0, 4, 1, 2, 3)
 
         x1 = self.conv0(x)
-        x2 = self.w0(x.view(batchsize, self.width, -1)).view(batchsize, self.width, size_x, size_y, size_z)
+        x2 = self.w0(x.reshape(batchsize, self.width, -1)).reshape(batchsize, self.width, size_x, size_y, size_z)
         x = self.bn0(x1 + x2)
         x = F.relu(x)
         x1 = self.conv1(x)
-        x2 = self.w1(x.view(batchsize, self.width, -1)).view(batchsize, self.width, size_x, size_y, size_z)
+        x2 = self.w1(x.reshape(batchsize, self.width, -1)).reshape(batchsize, self.width, size_x, size_y, size_z)
         x = self.bn1(x1 + x2)
         x = F.relu(x)
         x1 = self.conv2(x)
-        x2 = self.w2(x.view(batchsize, self.width, -1)).view(batchsize, self.width, size_x, size_y, size_z)
+        x2 = self.w2(x.reshape(batchsize, self.width, -1)).reshape(batchsize, self.width, size_x, size_y, size_z)
         x = self.bn2(x1 + x2)
         x = F.relu(x)
         x1 = self.conv3(x)
-        x2 = self.w3(x.view(batchsize, self.width, -1)).view(batchsize, self.width, size_x, size_y, size_z)
+        x2 = self.w3(x.reshape(batchsize, self.width, -1)).reshape(batchsize, self.width, size_x, size_y, size_z)
         x = self.bn3(x1 + x2)
 
         x = x.permute(0, 2, 3, 4, 1)
@@ -219,7 +219,7 @@ with torch.no_grad():
         out = model(x)
         # pred lives on CPU; move outputs back to CPU for storage
         pred[index] = out.detach().cpu()
-        loss = myloss(out.view(1, -1), y.view(1, -1)).item()
+        loss = myloss(out.reshape(1, -1), y.reshape(1, -1)).item()
         test_l2 += loss
         print(index, loss)
         index = index + 1
@@ -255,6 +255,5 @@ try:
         )
 except Exception as e:
     print(f"[viz] failed: {e}")
-
 
 

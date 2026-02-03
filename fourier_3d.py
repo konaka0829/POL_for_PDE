@@ -265,14 +265,14 @@ for ep in range(epochs):
         x, y = x.cuda(), y.cuda()
 
         optimizer.zero_grad()
-        out = model(x).view(batch_size, S, S, T)
+        out = model(x).reshape(batch_size, S, S, T)
 
         mse = F.mse_loss(out, y, reduction='mean')
         # mse.backward()
 
         y = y_normalizer.decode(y)
         out = y_normalizer.decode(out)
-        l2 = myloss(out.view(batch_size, -1), y.view(batch_size, -1))
+        l2 = myloss(out.reshape(batch_size, -1), y.reshape(batch_size, -1))
         l2.backward()
 
         optimizer.step()
@@ -286,9 +286,9 @@ for ep in range(epochs):
         for x, y in test_loader:
             x, y = x.cuda(), y.cuda()
 
-            out = model(x).view(batch_size, S, S, T)
+            out = model(x).reshape(batch_size, S, S, T)
             out = y_normalizer.decode(out)
-            test_l2 += myloss(out.view(batch_size, -1), y.view(batch_size, -1)).item()
+            test_l2 += myloss(out.reshape(batch_size, -1), y.reshape(batch_size, -1)).item()
 
     train_mse /= len(train_loader)
     train_l2 /= ntrain
@@ -345,11 +345,11 @@ with torch.no_grad():
         test_l2 = 0
         x, y = x.cuda(), y.cuda()
 
-        out = model(x).view(1, S, S, T)
+        out = model(x).reshape(1, S, S, T)
         out = y_normalizer.decode(out)
         pred[index] = out.squeeze(0).detach().cpu()
 
-        test_l2 += myloss(out.view(1, -1), y.view(1, -1)).item()
+        test_l2 += myloss(out.reshape(1, -1), y.reshape(1, -1)).item()
         print(index, test_l2)
         index = index + 1
 
@@ -382,7 +382,5 @@ try:
         )
 except Exception as e:
     print(f"[viz] failed to plot qualitative results: {e}")
-
-
 
 
