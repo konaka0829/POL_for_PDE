@@ -48,6 +48,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dt", type=float, default=0.03, help="Heat smoothing dt.")
     parser.add_argument("--heat-steps", type=int, default=34, help="Heat smoothing steps.")
     parser.add_argument("--f-const", type=float, default=1.0, help="Darcy forcing constant.")
+    parser.add_argument("--feature-chunk", type=int, default=32, help="Feature chunk size for Poisson solves.")
     parser.add_argument("--rf-seed", type=int, default=0, help="Random feature seed.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for shuffling.")
     parser.add_argument("--device", type=str, default=None, help="Device (e.g. cuda or cpu).")
@@ -132,6 +133,7 @@ def main() -> None:
         dt=args.dt,
         heat_steps=args.heat_steps,
         f_const=args.f_const,
+        feature_chunk_size=args.feature_chunk,
     )
 
     t0 = default_timer()
@@ -222,6 +224,7 @@ def main() -> None:
                 "dt": float(args.dt),
                 "heat_steps": float(args.heat_steps),
                 "f_const": float(args.f_const),
+                "feature_chunk_size": float(args.feature_chunk),
             },
         )
         print(f"Saved model to {args.model_out}")
