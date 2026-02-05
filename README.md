@@ -222,6 +222,74 @@ python rfm_2d.py --data-mode single_split --data-file data/darcy_data.mat
 - `--save-model`：学習済みRFMを保存（デフォルト: `False`）
 - `--model-out`：保存先（デフォルト: `model/rfm_2d.pt`）
 
+## RFM ハイパーパラメータ最適化（HPO）のやり方（日本語）
+このリポジトリでは、RFM 用の HPO スクリプト `tune_rfm_1d.py` / `tune_rfm_2d.py` を追加しています。
+**データは変更せず**（同じ `.mat` を使ったまま）、train/val/test に分割して **validation の平均 relative L2（`utilities3.LpLoss` と同等）** を最小化するハイパーパラメータを探索します。
+
+### 1. 全体の流れ
+1. **データ読み込み**: 既存の RFM スクリプトと同じ `MatReader` を使って `a,u`（1D）や `coeff,sol`（2D）を読みます。
+2. **train/val/test 分割**:
+   - `single_split` の場合は元データから train/test を分け、その train からさらに val を取り出します。
+   - `separate_files` の場合は train ファイルから val を取り出し、test ファイルはそのまま test に使います。
+3. **HPO の探索**:
+   - デフォルトは **random search**（`--search random`）です。
+   - `--rf-seeds 0,1,2` のように **複数 seed** を指定すると、**val の平均（必要なら標準偏差）**で比較できます。
+4. **best を選択**:
+   - 最小の validation error を持つ設定を best として記録します。
+5. **必要なら再学習（refit）**:
+   - `--refit-best` を指定すると **train+val で再学習**して test を評価します。
+6. **結果保存**:
+   - `--save-results` で JSON または CSV で trial 結果と best を保存します。
+   - `--save-best-model` を指定すれば best を保存可能です。
+
+### 2. 使い方例
+**1D (Burgers)**
+```bash
+python tune_rfm_1d.py --data-mode single_split --data-file data/burgers_data_R10.mat \
+  --ntrain 1000 --ntest 200 --sub 8 --batch-size 20 --m 1024 \
+  --val-split 0.2 --max-trials 40 --search random --rf-seeds 0,1,2 --device cuda \
+  --refit-best --save-best-model --model-out model/rfm_1d_best.pt \
+  --save-results results/hpo_rfm_1d.json
+```
+
+**2D (Darcy)**
+```bash
+python tune_rfm_2d.py --data-mode single_split --data-file data/darcy_data.mat \
+  --ntrain 1000 --ntest 100 --r 2 --grid-size 421 --batch-size 2 --m 350 \
+  --val-split 0.2 --max-trials 30 --rf-seeds 0 --device cpu \
+  --refit-best --save-results results/hpo_rfm_2d.json
+```
+
+### 3. 主要オプションの意味（共通）
+- `--val-split`：train データから val を取り出す割合（例: 0.2）。
+- `--max-trials`：ランダムサーチ試行回数。
+- `--search`：`random` / `grid`。
+- `--rf-seeds`：ランダム特徴の seed をカンマ区切りで指定（平均値で比較）。
+- `--save-results`：JSON/CSV の出力先。
+- `--refit-best`：best で train+val 再学習して test 評価。
+- `--save-best-model` / `--model-out`：best モデルの保存。
+
+### 4. 1D で探索するハイパーパラメータ（デフォルト範囲）
+- `lam`：`[0, 1e-12, 1e-10, 1e-8, 1e-6, 1e-4]`（choice）
+- `delta`：log-uniform `[1e-4, 1.0]`
+- `beta`：uniform `[0.05, 8.0]`
+- `tau_theta`：log-uniform `[1.0, 30.0]`
+- `alpha_theta`：uniform `[1.0, 5.0]`
+
+### 5. 2D で探索するハイパーパラメータ（デフォルト範囲）
+- `lam`：`[1e-12, 1e-10, 1e-8, 1e-6, 1e-4]`（choice）
+- `tau_theta`：log-uniform `[1.0, 30.0]`
+- `alpha_theta`：uniform `[1.0, 5.0]`
+- `delta_sig`：log-uniform `[0.03, 0.5]`
+- `s_plus`：log-uniform `[0.01, 0.5]`（正）
+- `s_minus`：log-uniform `[0.01, 0.5]`（負として扱われ、`s_plus > s_minus` を満たすよう制約）
+- `eta`：log-uniform `[1e-6, 1e-3]`
+
+### 6. 計算コスト・再現性の注意
+- 2D の HPO は **GPU OOM が起きやすい**ため、`--device cpu` を推奨します。
+- `--batch-size` を小さめにするとメモリ負荷が下がります。
+- `--seed`（データ split 用）と `--rf-seeds`（特徴生成用）を固定すると再現性が上がります。
+
 ### scripts/eval.py
 **実行例**
 ```bash
