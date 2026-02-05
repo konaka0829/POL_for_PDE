@@ -112,6 +112,7 @@ class DarcyRFFeatures:
     dt: float
     heat_steps: int
     f_const: float
+    feature_chunk_size: int = 32
 
     def __call__(self, a_batch: torch.Tensor) -> torch.Tensor:
         device = a_batch.device
@@ -119,27 +120,37 @@ class DarcyRFFeatures:
 
         theta1 = self.theta1.to(device)
         theta2 = self.theta2.to(device)
-        sigma1 = thresholded_sigmoid(theta1, self.s_plus, self.s_minus, self.delta_sig)
-        sigma2 = thresholded_sigmoid(theta2, self.s_plus, self.s_minus, self.delta_sig)
+        m = theta1.shape[0]
 
         a_eps = heat_smooth_neumann(a_batch, self.eta, self.dt, self.heat_steps)
         log_a = torch.log(a_eps + 1e-6)
         grad_log_a = gradient_centered(log_a)
+        f_over_a = self.f_const / a_batch
 
-        rhs0 = self.f_const / a_batch[:, None, :, :] + sigma1[None, :, :, :]
-        rhs0 = rhs0.reshape(batch_size * theta1.shape[0], s, s)
-        p0 = poisson_solve_dirichlet(rhs0, s)
-        p0 = p0.reshape(batch_size, theta1.shape[0], s, s)
+        p1 = torch.empty((batch_size, m, s, s), device=device, dtype=a_batch.dtype)
+        chunk_size = max(1, min(self.feature_chunk_size, m))
+        for j0 in range(0, m, chunk_size):
+            j1 = min(j0 + chunk_size, m)
+            chunk = j1 - j0
+            sigma1_chunk = thresholded_sigmoid(theta1[j0:j1], self.s_plus, self.s_minus, self.delta_sig)
+            sigma2_chunk = thresholded_sigmoid(theta2[j0:j1], self.s_plus, self.s_minus, self.delta_sig)
 
-        grad_p0 = gradient_centered(p0.reshape(batch_size * theta1.shape[0], s, s))
-        grad_p0 = (grad_p0[0].reshape(batch_size, theta1.shape[0], s, s),
-                   grad_p0[1].reshape(batch_size, theta1.shape[0], s, s))
+            rhs0_chunk = f_over_a[:, None, :, :] + sigma1_chunk[None, :, :, :]
+            rhs0_chunk = rhs0_chunk.reshape(batch_size * chunk, s, s)
+            p0_chunk = poisson_solve_dirichlet(rhs0_chunk, s)
+            p0_chunk = p0_chunk.reshape(batch_size, chunk, s, s)
 
-        dot_term = grad_log_a[0][:, None, :, :] * grad_p0[0] + grad_log_a[1][:, None, :, :] * grad_p0[1]
-        rhs1 = self.f_const / a_batch[:, None, :, :] + sigma2[None, :, :, :] + dot_term
-        rhs1 = rhs1.reshape(batch_size * theta2.shape[0], s, s)
-        p1 = poisson_solve_dirichlet(rhs1, s)
-        p1 = p1.reshape(batch_size, theta2.shape[0], s, s)
+            grad_p0_chunk = gradient_centered(p0_chunk.reshape(batch_size * chunk, s, s))
+            grad_p0_chunk = (
+                grad_p0_chunk[0].reshape(batch_size, chunk, s, s),
+                grad_p0_chunk[1].reshape(batch_size, chunk, s, s),
+            )
+
+            dot_term = grad_log_a[0][:, None, :, :] * grad_p0_chunk[0] + grad_log_a[1][:, None, :, :] * grad_p0_chunk[1]
+            rhs1_chunk = f_over_a[:, None, :, :] + sigma2_chunk[None, :, :, :] + dot_term
+            rhs1_chunk = rhs1_chunk.reshape(batch_size * chunk, s, s)
+            p1_chunk = poisson_solve_dirichlet(rhs1_chunk, s)
+            p1_chunk = p1_chunk.reshape(batch_size, chunk, s, s)
+            p1[:, j0:j1] = p1_chunk
 
         return p1
-
