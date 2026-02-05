@@ -157,6 +157,71 @@ python fourier_3d.py --data-mode single_split --data-file data/ns_data_V100_N100
 - `--T-in`（デフォルト: `10`）
 - `--T`（デフォルト: `40`）
 
+## RFM（Random Feature Model）実行方法と引数（日本語）
+FNOと同様のデータ読み込み・評価・可視化に合わせたRFMの実行例と主要ハイパーパラメータです。
+
+### rfm_1d.py（Burgers 1D）
+**実行例**
+```bash
+python rfm_1d.py --data-mode single_split --data-file data/burgers_data_R10.mat
+python rfm_1d.py --data-mode separate_files --train-file data/burgers_train.mat --test-file data/burgers_test.mat
+```
+
+**引数とデフォルト値**
+- `--data-mode`：`single_split` / `separate_files`（デフォルト: `single_split`）
+- `--data-file`：単一ファイル読み込み時のデータパス（デフォルト: `data/burgers_data_R10.mat`）
+- `--train-file` / `--test-file`：分割済みファイルのパス（デフォルト: `None`）
+- `--train-split`：単一ファイル時の学習割合（デフォルト: `0.8`）
+- `--seed`：データ分割用シード（デフォルト: `0`）
+- `--shuffle`：分割前にシャッフル（デフォルト: `False`）
+- `--ntrain`（デフォルト: `1000`）、`--ntest`（デフォルト: `100`）
+- `--sub`：間引き率（デフォルト: `8`）
+- `--batch-size`（デフォルト: `20`）
+- `--m`：ランダム特徴数（デフォルト: `1024`）
+- `--lam`：リッジ回帰正則化係数（デフォルト: `0.0`）
+- `--delta`：Burgersのフィルタ幅δ（デフォルト: `0.0025`）
+- `--beta`：Burgersのフィルタ指数β（デフォルト: `4.0`）
+- `--tau-theta`：GRFフィルタのτ（デフォルト: `5.0`）
+- `--alpha-theta`：GRFフィルタのα（デフォルト: `2.0`）
+- `--rf-seed`：ランダム特徴用シード（デフォルト: `0`）
+- `--device`：`cpu` / `cuda` 指定（デフォルト: 自動）
+- `--save-model`：学習済みRFMを保存（デフォルト: `False`）
+- `--model-out`：保存先（デフォルト: `model/rfm_1d.pt`）
+
+### rfm_2d.py（Darcy 2D）
+**実行例**
+```bash
+python rfm_2d.py --data-mode separate_files \
+  --train-file data/piececonst_r421_N1024_smooth1.mat \
+  --test-file data/piececonst_r421_N1024_smooth2.mat
+python rfm_2d.py --data-mode single_split --data-file data/darcy_data.mat
+```
+
+**引数とデフォルト値**
+- `--data-mode`（デフォルト: `single_split`）
+- `--data-file`（デフォルト: `data/darcy_data.mat`）
+- `--train-file` / `--test-file`：分割済みファイルのパス（デフォルト: `None`）
+- `--ntrain`（デフォルト: `1000`）、`--ntest`（デフォルト: `100`）
+- `--batch-size`（デフォルト: `10`）
+- `--r`：空間の間引き率（デフォルト: `1`）
+- `--grid-size`：元の格子サイズ（デフォルト: `421`）
+- `--m`：ランダム特徴数（デフォルト: `350`）
+- `--lam`：リッジ回帰正則化係数（デフォルト: `1e-8`）
+- `--tau-theta`：GRFフィルタのτ（デフォルト: `7.5`）
+- `--alpha-theta`：GRFフィルタのα（デフォルト: `2.0`）
+- `--s-plus`：σ_γ の上限（デフォルト: `1/12`）
+- `--s-minus`：σ_γ の下限（デフォルト: `-1/3`）
+- `--delta-sig`：σ_γ の遷移幅δ（デフォルト: `0.15`）
+- `--eta`：heat smoothing の拡散係数η（デフォルト: `1e-4`）
+- `--dt`：heat smoothing の時間刻み（デフォルト: `0.03`）
+- `--heat-steps`：heat smoothing の反復回数（デフォルト: `34`）
+- `--f-const`：右辺定数f（デフォルト: `1.0`）
+- `--rf-seed`：ランダム特徴用シード（デフォルト: `0`）
+- `--seed`：データ分割や乱数のシード（デフォルト: `0`）
+- `--device`：`cpu` / `cuda` 指定（デフォルト: 自動）
+- `--save-model`：学習済みRFMを保存（デフォルト: `False`）
+- `--model-out`：保存先（デフォルト: `model/rfm_2d.pt`）
+
 ### scripts/eval.py
 **実行例**
 ```bash
