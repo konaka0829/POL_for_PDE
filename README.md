@@ -100,6 +100,39 @@ python fourier_2d.py --data-mode single_split --data-file data/piececonst_r421_N
 - `--r`（デフォルト: `5`）
 - `--grid-size`（デフォルト: `421`）
 
+### rfm_1d.py
+**実行例**
+```bash
+python rfm_1d.py --data-mode single_split --data-file data/burgers_data_R10.mat \
+  --ntrain 1000 --ntest 200 --sub 8 --m 1024 --lambda 0.0
+python rfm_1d.py --data-mode separate_files \
+  --train-file data/burgers_data_R10_train.mat \
+  --test-file  data/burgers_data_R10_test.mat \
+  --ntrain 1000 --ntest 200 --sub 8 --m 1024 --lambda 0.0
+```
+
+**引数（主要なもの）**
+- `--m`：ランダム特徴数（デフォルト: `1024`）
+- `--lambda`：リッジ正則化（デフォルト: `0.0`）
+- `--delta` / `--beta`：特徴マップのフィルタ形状（論文デフォルト: `delta=0.0025`, `beta=4`）
+- `--alpha-g` / `--tau-g`：ガウス乱数場のハイパーパラメータ（論文デフォルト: `alpha'=2`, `tau'=5`）
+
+### rfm_2d.py
+**実行例**
+```bash
+python rfm_2d.py --data-mode separate_files \
+  --train-file data/piececonst_r421_N1024_smooth1.mat \
+  --test-file  data/piececonst_r421_N1024_smooth2.mat \
+  --ntrain 1000 --ntest 100 --r 5 --grid-size 421 --m 256 --lambda 1e-8
+```
+
+**引数（主要なもの）**
+- `--m`：ランダム特徴数（デフォルト: `256`）
+- `--lambda`：リッジ正則化（論文デフォルト: `1e-8`）
+- `--alpha-g` / `--tau-g`：ガウス乱数場（論文デフォルト: `alpha'=2`, `tau'=7.5`）
+- `--s-plus` / `--s-minus` / `--delta-sig`：σ_γ の範囲と傾き（論文デフォルト）
+- `--smooth-dt` / `--smooth-eta` / `--smooth-steps`：係数場の平滑化（論文デフォルト: dt=0.03, eta=1e-4, steps=34）
+
 ### fourier_2d_time.py
 **実行例**
 ```bash
