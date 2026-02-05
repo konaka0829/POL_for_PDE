@@ -58,11 +58,19 @@ def solve_alpha(gram: torch.Tensor, b: torch.Tensor, m: int, lam: float) -> torc
     dtype = gram.dtype
     eye = torch.eye(m, device=device, dtype=dtype)
     gram_reg = gram / m + lam * eye
+    linalg_error = getattr(torch.linalg, "LinAlgError", RuntimeError)
     if lam > 0:
-        alpha = torch.linalg.solve(gram_reg, b)
-    else:
-        alpha = torch.linalg.pinv(gram_reg) @ b
-    return alpha
+        try:
+            return torch.linalg.solve(gram_reg, b)
+        except (RuntimeError, linalg_error):
+            pass
+    jitter_levels = [1e-10, 1e-8, 1e-6, 1e-4]
+    for jitter in jitter_levels:
+        try:
+            return torch.linalg.solve(gram_reg + jitter * eye, b)
+        except (RuntimeError, linalg_error):
+            continue
+    return torch.linalg.pinv(gram_reg) @ b
 
 
 def fit_rfm(
