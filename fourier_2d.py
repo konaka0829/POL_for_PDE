@@ -3,9 +3,11 @@
 This file is the Fourier Neural Operator for 2D problem such as the Darcy Flow discussed in Section 5.2 in the [paper](https://arxiv.org/pdf/2010.08895.pdf).
 """
 
+import argparse
 import torch.nn.functional as F
 from timeit import default_timer
 from utilities3 import *
+from cli_utils import add_data_mode_args, validate_data_mode_args
 
 # ------------------------------------------------------------
 # Visualization helpers (PNG/PDF/SVG)
@@ -155,37 +157,73 @@ class FNO2d(nn.Module):
         gridy = gridy.reshape(1, 1, size_y, 1).repeat([batchsize, size_x, 1, 1])
         return torch.cat((gridx, gridy), dim=-1).to(device)
 
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Fourier Neural Operator 2D")
+    add_data_mode_args(
+        parser,
+        default_data_mode="separate_files",
+        default_data_file="data/piececonst_r421_N1024_smooth1.mat",
+        default_train_file="data/piececonst_r421_N1024_smooth1.mat",
+        default_test_file="data/piececonst_r421_N1024_smooth2.mat",
+    )
+    parser.add_argument("--ntrain", type=int, default=1000, help="Number of training samples.")
+    parser.add_argument("--ntest", type=int, default=100, help="Number of test samples.")
+    parser.add_argument("--batch-size", type=int, default=20, help="Batch size.")
+    parser.add_argument("--learning-rate", type=float, default=0.001, help="Learning rate.")
+    parser.add_argument("--epochs", type=int, default=500, help="Number of epochs.")
+    parser.add_argument("--modes", type=int, default=12, help="Number of Fourier modes.")
+    parser.add_argument("--width", type=int, default=32, help="Model width.")
+    parser.add_argument("--r", type=int, default=5, help="Downsampling rate.")
+    parser.add_argument("--grid-size", type=int, default=421, help="Original grid size (before downsampling).")
+    return parser
+
+
+def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    validate_data_mode_args(args, parser)
+
+
 ################################################################
 # configs
 ################################################################
-TRAIN_PATH = 'data/piececonst_r421_N1024_smooth1.mat'
-TEST_PATH = 'data/piececonst_r421_N1024_smooth2.mat'
+parser = _build_parser()
+args = parser.parse_args()
+_validate_args(args, parser)
 
-ntrain = 1000
-ntest = 100
+ntrain = args.ntrain
+ntest = args.ntest
 
-batch_size = 20
-learning_rate = 0.001
-epochs = 500
+batch_size = args.batch_size
+learning_rate = args.learning_rate
+epochs = args.epochs
 iterations = epochs*(ntrain//batch_size)
 
-modes = 12
-width = 32
+modes = args.modes
+width = args.width
 
-r = 5
-h = int(((421 - 1)/r) + 1)
+r = args.r
+h = int(((args.grid_size - 1) / r) + 1)
 s = h
 
 ################################################################
 # load data and data normalization
 ################################################################
-reader = MatReader(TRAIN_PATH)
-x_train = reader.read_field('coeff')[:ntrain,::r,::r][:,:s,:s]
-y_train = reader.read_field('sol')[:ntrain,::r,::r][:,:s,:s]
+if args.data_mode == "single_split":
+    reader = MatReader(args.data_file)
+    x_data = reader.read_field('coeff')[:,::r,::r][:,:s,:s]
+    y_data = reader.read_field('sol')[:,::r,::r][:,:s,:s]
 
-reader.load_file(TEST_PATH)
-x_test = reader.read_field('coeff')[:ntest,::r,::r][:,:s,:s]
-y_test = reader.read_field('sol')[:ntest,::r,::r][:,:s,:s]
+    x_train = x_data[:ntrain]
+    y_train = y_data[:ntrain]
+    x_test = x_data[-ntest:]
+    y_test = y_data[-ntest:]
+else:
+    reader = MatReader(args.train_file)
+    x_train = reader.read_field('coeff')[:ntrain,::r,::r][:,:s,:s]
+    y_train = reader.read_field('sol')[:ntrain,::r,::r][:,:s,:s]
+
+    reader.load_file(args.test_file)
+    x_test = reader.read_field('coeff')[:ntest,::r,::r][:,:s,:s]
+    y_test = reader.read_field('sol')[:ntest,::r,::r][:,:s,:s]
 
 x_normalizer = UnitGaussianNormalizer(x_train)
 x_train = x_normalizer.encode(x_train)

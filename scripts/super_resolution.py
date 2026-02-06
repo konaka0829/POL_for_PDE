@@ -1,3 +1,4 @@
+import argparse
 import torch
 import numpy as np
 import torch.nn as nn
@@ -159,20 +160,44 @@ class Net2d(nn.Module):
         return c
 
 
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Evaluate super-resolution model")
+    parser.add_argument(
+        "--data-file",
+        default="data/ns_data_V1e-4_N20_T50_test.mat",
+        help="Path to evaluation .mat file.",
+    )
+    parser.add_argument(
+        "--model-file",
+        default="model/ns_fourier_V1e-4_T20_N9800_ep200_m12_w32",
+        help="Path to pretrained model checkpoint.",
+    )
+    parser.add_argument("--ntest", type=int, default=20, help="Number of test samples.")
+    parser.add_argument("--sub", type=int, default=1, help="Spatial subsampling.")
+    parser.add_argument("--sub-t", type=int, default=1, help="Temporal subsampling.")
+    parser.add_argument("--S", type=int, default=64, help="Base spatial grid size.")
+    parser.add_argument("--T-in", type=int, default=10, help="Number of input timesteps.")
+    parser.add_argument("--T", type=int, default=20, help="Number of predicted timesteps.")
+    parser.add_argument("--indent", type=int, default=1, help="Temporal offset for slicing.")
+    return parser
+
+
 t1 = default_timer()
 
-TEST_PATH = 'data/ns_data_V1e-4_N20_T50_test.mat'
+parser = _build_parser()
+args = parser.parse_args()
 
+TEST_PATH = args.data_file
 
-ntest = 20
+ntest = args.ntest
 
-sub = 1
-sub_t = 1
-S = 64
-T_in = 10
-T = 20
+sub = args.sub
+sub_t = args.sub_t
+S = args.S
+T_in = args.T_in
+T = args.T
 
-indent = 1
+indent = args.indent
 
 # load data
 reader = MatReader(TEST_PATH)
@@ -202,7 +227,7 @@ print('preprocessing finished, time used:', t2-t1)
 device = torch.device('cuda')
 
 # load model
-model = torch.load('model/ns_fourier_V1e-4_T20_N9800_ep200_m12_w32')
+model = torch.load(args.model_file)
 
 print(model.count_params())
 
@@ -255,5 +280,4 @@ try:
         )
 except Exception as e:
     print(f"[viz] failed: {e}")
-
 
