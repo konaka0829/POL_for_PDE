@@ -100,6 +100,42 @@ python fourier_2d.py --data-mode single_split --data-file data/piececonst_r421_N
 - `--r`（デフォルト: `5`）
 - `--grid-size`（デフォルト: `421`）
 
+### rno_2d.py
+**実行例**
+```bash
+python rno_2d.py --data-mode separate_files \
+  --train-file data/piececonst_r421_N1024_smooth1.mat \
+  --test-file data/piececonst_r421_N1024_smooth2.mat \
+  --fit-mode supervised_sgd
+python rno_2d.py --data-mode single_split --data-file data/piececonst_r421_N1024_smooth1.mat --fit-mode pde_ridge
+```
+
+**引数とデフォルト値（主要）**
+- `--data-mode`（デフォルト: `separate_files`）
+- `--data-file`（デフォルト: `data/piececonst_r421_N1024_smooth1.mat`）
+- `--train-file`（デフォルト: `data/piececonst_r421_N1024_smooth1.mat`）
+- `--test-file`（デフォルト: `data/piececonst_r421_N1024_smooth2.mat`）
+- `--ntrain`（デフォルト: `1000`）、`--ntest`（デフォルト: `100`）
+- `--batch-size`（デフォルト: `20`）
+- `--learning-rate`（デフォルト: `0.001`）
+- `--epochs`（デフォルト: `500`）
+- `--width`（デフォルト: `32`）
+- `--r`（デフォルト: `5`）
+- `--grid-size`（デフォルト: `421`）
+- `--fit-mode`：`supervised_sgd` / `supervised_ridge` / `pde_ridge` / `pde_rls`（デフォルト: `supervised_sgd`）
+- `--reservoir-layers`（デフォルト: `4`）
+- `--mask-modes`（デフォルト: `12`）
+- `--alpha`（デフォルト: `1.0`）
+- `--beta`（デフォルト: `1.0`）
+- `--nonlinearity`：`tanh` / `gelu` / `relu` / `identity`（デフォルト: `tanh`）
+- `--ridge-lam`（デフォルト: `1e-6`）
+- `--pde-samples`（デフォルト: `2048`）
+- `--rls-rho`（デフォルト: `0.999`）
+- `--rls-delta`（デフォルト: `1.0`）
+- `--smoke`（デフォルト: `False`、有効時は合成データで動作確認）
+
+`rno_2d.py` の可視化は `visualizations/rno_2d/` に `png/pdf/svg` で保存されます。
+
 ### fourier_2d_time.py
 **実行例**
 ```bash
