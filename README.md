@@ -102,6 +102,7 @@ python fourier_2d.py --data-mode single_split --data-file data/piececonst_r421_N
 
 ### Reservoir-FNO 比較（Darcy 2D）
 通常FNO（学習あり）と Reservoir-FNO（バックボーン固定 + readoutをridge閉形式学習）を同一条件で比較するスクリプトです。
+既定の `--data-source` は `mat`（既存データ利用）です。
 
 **スモーク実行（必須）**
 ```bash
@@ -178,6 +179,18 @@ python scripts/compare_darcy_fno_vs_reservoir.py --config configs/compare_darcy_
   --psrsdno-eps-norm 1e-12
 ```
 
+**PSRSDNOグリッドサーチ例**
+```bash
+python scripts/compare_darcy_fno_vs_reservoir.py --run psrsdno --no-viz \
+  --data-source generate --ntrain 20 --ntest 5 --gen-grid-size 32 --epochs 2 \
+  --psrsdno-grid-search \
+  --psrsdno-grid-modes 8,12 \
+  --psrsdno-grid-widths 16,32 \
+  --psrsdno-grid-dict-sizes 16,32 \
+  --psrsdno-grid-seeds 0,1 \
+  --psrsdno-grid-complex-mixings true,false
+```
+
 **compare_darcy_fno_vs_reservoir.py の主な追加CLI（PSRSDNO関連）**
 - `--run`：`both` / `fno` / `rfno` / `psrsdno` / `all`（デフォルト: `both`）
 - `--psrsdno-dict-size`（デフォルト: `32`）
@@ -188,6 +201,20 @@ python scripts/compare_darcy_fno_vs_reservoir.py --config configs/compare_darcy_
 - `--psrsdno-seed`（デフォルト: `0`）
 - `--psrsdno-complex-mixing` / `--no-psrsdno-complex-mixing`（デフォルト: `有効`）
 - `--psrsdno-eps-norm`（デフォルト: `1e-12`）
+- `--psrsdno-grid-search`（PSRSDNOのグリッドサーチ有効化）
+- `--psrsdno-grid-modes`
+- `--psrsdno-grid-widths`
+- `--psrsdno-grid-paddings`
+- `--psrsdno-grid-spectral-gains`
+- `--psrsdno-grid-skip-gains`
+- `--psrsdno-grid-activations`
+- `--psrsdno-grid-dict-sizes`
+- `--psrsdno-grid-alpha-mins`
+- `--psrsdno-grid-alpha-maxs`
+- `--psrsdno-grid-beta-mins`
+- `--psrsdno-grid-beta-maxs`
+- `--psrsdno-grid-seeds`
+- `--psrsdno-grid-complex-mixings`（`true/false` のカンマ区切り）
 
 主な出力:
 - `results/<run_name>/metrics.json`

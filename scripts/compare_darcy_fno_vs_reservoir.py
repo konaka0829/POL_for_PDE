@@ -84,6 +84,23 @@ def parse_choice_list(text: str, arg_name: str, allowed: set[str]) -> list[str]:
     return vals
 
 
+def parse_bool_list(text: str, arg_name: str) -> list[bool]:
+    vals: list[bool] = []
+    for item in text.split(","):
+        item = item.strip().lower()
+        if not item:
+            continue
+        if item in {"1", "true", "t", "yes", "y", "on"}:
+            vals.append(True)
+        elif item in {"0", "false", "f", "no", "n", "off"}:
+            vals.append(False)
+        else:
+            raise ValueError(f"{arg_name} contains unsupported boolean value: {item}")
+    if not vals:
+        raise ValueError(f"{arg_name} must contain at least one value.")
+    return vals
+
+
 def resolve_device(device: str) -> torch.device:
     if device == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -280,8 +297,8 @@ def build_model_kwargs(args: argparse.Namespace, overrides: dict[str, Any] | Non
     return kwargs
 
 
-def build_psrsdno_kwargs(args: argparse.Namespace) -> dict[str, Any]:
-    return {
+def build_psrsdno_kwargs(args: argparse.Namespace, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+    kwargs = {
         "psrsdno_dict_size": args.psrsdno_dict_size,
         "psrsdno_alpha_min": args.psrsdno_alpha_min,
         "psrsdno_alpha_max": args.psrsdno_alpha_max,
@@ -291,6 +308,9 @@ def build_psrsdno_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "psrsdno_complex_mixing": args.psrsdno_complex_mixing,
         "psrsdno_eps_norm": args.psrsdno_eps_norm,
     }
+    if overrides:
+        kwargs.update(overrides)
+    return kwargs
 
 
 def train_standard_fno(
@@ -597,7 +617,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
 
-    parser.add_argument("--data-source", type=str, default="generate", choices=["mat", "generate"])
+    parser.add_argument("--data-source", type=str, default="mat", choices=["mat", "generate"])
     parser.add_argument("--data-mode", type=str, default="separate_files", choices=["single_split", "separate_files"])
     parser.add_argument("--data-file", type=str, default="data/piececonst_r421_N1024_smooth1.mat")
     parser.add_argument("--train-file", type=str, default="data/piececonst_r421_N1024_smooth1.mat")
@@ -661,6 +681,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--psrsdno-seed", type=int, default=0)
     parser.add_argument("--psrsdno-complex-mixing", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--psrsdno-eps-norm", type=float, default=1e-12)
+    parser.add_argument("--psrsdno-grid-search", action="store_true")
+    parser.add_argument("--psrsdno-grid-modes", type=str, default="")
+    parser.add_argument("--psrsdno-grid-widths", type=str, default="")
+    parser.add_argument("--psrsdno-grid-paddings", type=str, default="")
+    parser.add_argument("--psrsdno-grid-spectral-gains", type=str, default="")
+    parser.add_argument("--psrsdno-grid-skip-gains", type=str, default="")
+    parser.add_argument("--psrsdno-grid-activations", type=str, default="")
+    parser.add_argument("--psrsdno-grid-dict-sizes", type=str, default="")
+    parser.add_argument("--psrsdno-grid-alpha-mins", type=str, default="")
+    parser.add_argument("--psrsdno-grid-alpha-maxs", type=str, default="")
+    parser.add_argument("--psrsdno-grid-beta-mins", type=str, default="")
+    parser.add_argument("--psrsdno-grid-beta-maxs", type=str, default="")
+    parser.add_argument("--psrsdno-grid-seeds", type=str, default="")
+    parser.add_argument("--psrsdno-grid-complex-mixings", type=str, default="")
 
     parser.add_argument("--results-root", type=str, default="results")
     parser.add_argument("--run-name", type=str, default="")
@@ -686,6 +720,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("ntrain/ntest must be positive.")
     if args.rfno_grid_search and args.run not in ("rfno", "both", "all"):
         parser.error("--rfno-grid-search requires --run to include rfno (rfno/both/all).")
+    if args.psrsdno_grid_search and args.run not in ("psrsdno", "all"):
+        parser.error("--psrsdno-grid-search requires --run to include psrsdno (psrsdno/all).")
     return args
 
 
@@ -738,6 +774,7 @@ def main() -> None:
     psrsdno_best_eval: ModelEval | None = None
     psrsdno_selected_hparams: dict[str, Any] | None = None
     psrsdno_selected_dict_hparams: dict[str, Any] | None = None
+    psrsdno_grid_trials: list[dict[str, Any]] = []
 
     if do_fno:
         fno_model, epochs_hist, train_rel_hist, test_rel_hist, fno_train_eval, fno_test_eval = train_standard_fno(
@@ -890,29 +927,183 @@ def main() -> None:
             rfno_selected_hparams = build_model_kwargs(args)
 
     if do_psrsdno:
-        psrsdno_selected_hparams = build_model_kwargs(args)
-        psrsdno_selected_dict_hparams = build_psrsdno_kwargs(args)
-        psrsdno_backbone, _, psrsdno_ridge_models = fit_psrsdno_readout(
-            args=args,
-            device=device,
-            s=s,
-            x_train_n=x_train_n,
-            y_train_n=y_train_n,
-            model_kwargs=psrsdno_selected_hparams,
-            psrsdno_kwargs=psrsdno_selected_dict_hparams,
-        )
-        psrsdno_results, psrsdno_best_lambda, psrsdno_best_eval = evaluate_psrsdno_lambdas(
-            args=args,
-            device=device,
-            s=s,
-            backbone=psrsdno_backbone,
-            ridge_models=psrsdno_ridge_models,
-            x_train_n=x_train_n,
-            y_train=y_train,
-            x_test_n=x_test_n,
-            y_test=y_test,
-            y_normalizer=y_normalizer,
-        )
+        if args.psrsdno_grid_search:
+            modes_list = (
+                parse_int_list(args.psrsdno_grid_modes, "--psrsdno-grid-modes")
+                if args.psrsdno_grid_modes
+                else [args.modes]
+            )
+            width_list = (
+                parse_int_list(args.psrsdno_grid_widths, "--psrsdno-grid-widths")
+                if args.psrsdno_grid_widths
+                else [args.width]
+            )
+            padding_list = (
+                parse_int_list(args.psrsdno_grid_paddings, "--psrsdno-grid-paddings")
+                if args.psrsdno_grid_paddings
+                else [args.padding]
+            )
+            spectral_gains = (
+                parse_float_list(args.psrsdno_grid_spectral_gains, "--psrsdno-grid-spectral-gains")
+                if args.psrsdno_grid_spectral_gains
+                else [args.spectral_gain]
+            )
+            skip_gains = (
+                parse_float_list(args.psrsdno_grid_skip_gains, "--psrsdno-grid-skip-gains")
+                if args.psrsdno_grid_skip_gains
+                else [args.skip_gain]
+            )
+            activations = (
+                parse_choice_list(args.psrsdno_grid_activations, "--psrsdno-grid-activations", {"gelu", "tanh", "relu", "silu"})
+                if args.psrsdno_grid_activations
+                else [args.activation]
+            )
+            dict_sizes = (
+                parse_int_list(args.psrsdno_grid_dict_sizes, "--psrsdno-grid-dict-sizes")
+                if args.psrsdno_grid_dict_sizes
+                else [args.psrsdno_dict_size]
+            )
+            alpha_mins = (
+                parse_float_list(args.psrsdno_grid_alpha_mins, "--psrsdno-grid-alpha-mins")
+                if args.psrsdno_grid_alpha_mins
+                else [args.psrsdno_alpha_min]
+            )
+            alpha_maxs = (
+                parse_float_list(args.psrsdno_grid_alpha_maxs, "--psrsdno-grid-alpha-maxs")
+                if args.psrsdno_grid_alpha_maxs
+                else [args.psrsdno_alpha_max]
+            )
+            beta_mins = (
+                parse_float_list(args.psrsdno_grid_beta_mins, "--psrsdno-grid-beta-mins")
+                if args.psrsdno_grid_beta_mins
+                else [args.psrsdno_beta_min]
+            )
+            beta_maxs = (
+                parse_float_list(args.psrsdno_grid_beta_maxs, "--psrsdno-grid-beta-maxs")
+                if args.psrsdno_grid_beta_maxs
+                else [args.psrsdno_beta_max]
+            )
+            seeds = (
+                parse_int_list(args.psrsdno_grid_seeds, "--psrsdno-grid-seeds")
+                if args.psrsdno_grid_seeds
+                else [args.psrsdno_seed]
+            )
+            complex_mixings = (
+                parse_bool_list(args.psrsdno_grid_complex_mixings, "--psrsdno-grid-complex-mixings")
+                if args.psrsdno_grid_complex_mixings
+                else [args.psrsdno_complex_mixing]
+            )
+
+            combos = list(
+                itertools.product(
+                    modes_list,
+                    width_list,
+                    padding_list,
+                    spectral_gains,
+                    skip_gains,
+                    activations,
+                    dict_sizes,
+                    alpha_mins,
+                    alpha_maxs,
+                    beta_mins,
+                    beta_maxs,
+                    seeds,
+                    complex_mixings,
+                )
+            )
+            print(f"[info] PSRSDNO grid search: {len(combos)} trials")
+
+            for idx, (m, w, p, sg, kg, act, dsz, amin, amax, bmin, bmax, sd, cmx) in enumerate(combos, start=1):
+                if amin > amax:
+                    raise ValueError(f"Invalid PSRSDNO alpha range in trial {idx}: min({amin}) > max({amax})")
+                if bmin > bmax:
+                    raise ValueError(f"Invalid PSRSDNO beta range in trial {idx}: min({bmin}) > max({bmax})")
+
+                trial_hparams = {
+                    "modes": int(m),
+                    "width": int(w),
+                    "padding": int(p),
+                    "spectral_gain": float(sg),
+                    "skip_gain": float(kg),
+                    "activation": act,
+                    "spectral_init": args.spectral_init,
+                    "spectral_init_scale": args.spectral_init_scale,
+                }
+                trial_dict_hparams = {
+                    "psrsdno_dict_size": int(dsz),
+                    "psrsdno_alpha_min": float(amin),
+                    "psrsdno_alpha_max": float(amax),
+                    "psrsdno_beta_min": float(bmin),
+                    "psrsdno_beta_max": float(bmax),
+                    "psrsdno_seed": int(sd),
+                    "psrsdno_complex_mixing": bool(cmx),
+                    "psrsdno_eps_norm": args.psrsdno_eps_norm,
+                }
+                print(f"[PSRSDNO grid {idx}/{len(combos)}] model={trial_hparams} dict={trial_dict_hparams}")
+
+                trial_backbone, _, trial_ridge_models = fit_psrsdno_readout(
+                    args=args,
+                    device=device,
+                    s=s,
+                    x_train_n=x_train_n,
+                    y_train_n=y_train_n,
+                    model_kwargs=trial_hparams,
+                    psrsdno_kwargs=trial_dict_hparams,
+                )
+                trial_results, trial_best_lambda, trial_best_eval = evaluate_psrsdno_lambdas(
+                    args=args,
+                    device=device,
+                    s=s,
+                    backbone=trial_backbone,
+                    ridge_models=trial_ridge_models,
+                    x_train_n=x_train_n,
+                    y_train=y_train,
+                    x_test_n=x_test_n,
+                    y_test=y_test,
+                    y_normalizer=y_normalizer,
+                )
+                psrsdno_grid_trials.append(
+                    {
+                        **trial_hparams,
+                        **trial_dict_hparams,
+                        "best_lambda": trial_best_lambda,
+                        "best_test_mean_rel_l2": trial_best_eval.mean_rel_l2,
+                        "best_test_median_rel_l2": trial_best_eval.median_rel_l2,
+                    }
+                )
+
+                if psrsdno_best_eval is None or trial_best_eval.mean_rel_l2 < psrsdno_best_eval.mean_rel_l2:
+                    psrsdno_best_eval = trial_best_eval
+                    psrsdno_best_lambda = trial_best_lambda
+                    psrsdno_results = trial_results
+                    psrsdno_backbone = trial_backbone
+                    psrsdno_ridge_models = trial_ridge_models
+                    psrsdno_selected_hparams = trial_hparams
+                    psrsdno_selected_dict_hparams = trial_dict_hparams
+        else:
+            psrsdno_selected_hparams = build_model_kwargs(args)
+            psrsdno_selected_dict_hparams = build_psrsdno_kwargs(args)
+            psrsdno_backbone, _, psrsdno_ridge_models = fit_psrsdno_readout(
+                args=args,
+                device=device,
+                s=s,
+                x_train_n=x_train_n,
+                y_train_n=y_train_n,
+                model_kwargs=psrsdno_selected_hparams,
+                psrsdno_kwargs=psrsdno_selected_dict_hparams,
+            )
+            psrsdno_results, psrsdno_best_lambda, psrsdno_best_eval = evaluate_psrsdno_lambdas(
+                args=args,
+                device=device,
+                s=s,
+                backbone=psrsdno_backbone,
+                ridge_models=psrsdno_ridge_models,
+                x_train_n=x_train_n,
+                y_train=y_train,
+                x_test_n=x_test_n,
+                y_test=y_test,
+                y_normalizer=y_normalizer,
+            )
 
     if not args.no_viz:
         sample_id = 0
@@ -1051,6 +1242,15 @@ def main() -> None:
                 "best_lambda": psrsdno_best_lambda,
                 "best_test": asdict(psrsdno_best_eval),
                 "all": psrsdno_results,
+                "grid_search": (
+                    {
+                        "enabled": True,
+                        "num_trials": len(psrsdno_grid_trials),
+                        "trials": psrsdno_grid_trials,
+                    }
+                    if args.psrsdno_grid_search
+                    else {"enabled": False}
+                ),
             }
             if do_psrsdno and psrsdno_best_eval is not None
             else None
