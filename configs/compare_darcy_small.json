@@ -1,0 +1,23 @@
+{
+  "seed": 0,
+  "device": "auto",
+  "data_source": "generate",
+  "ntrain": 20,
+  "ntest": 5,
+  "gen_grid_size": 32,
+  "gen_map_type": "piecewise",
+  "gen_a_pos": 12.0,
+  "gen_a_neg": 3.0,
+  "gen_alpha": 2.0,
+  "gen_tau": 3.0,
+  "gen_forcing": 1.0,
+  "gen_solver": "spsolve",
+  "batch_size": 5,
+  "learning_rate": 0.001,
+  "epochs": 2,
+  "modes": 12,
+  "width": 32,
+  "ridge_lambdas": "0,1e-6,1e-4,1e-2",
+  "results_root": "results",
+  "run_name": "compare_darcy_small"
+}

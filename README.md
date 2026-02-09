@@ -100,6 +100,39 @@ python fourier_2d.py --data-mode single_split --data-file data/piececonst_r421_N
 - `--r`（デフォルト: `5`）
 - `--grid-size`（デフォルト: `421`）
 
+### Reservoir-FNO 比較（Darcy 2D）
+通常FNO（学習あり）と Reservoir-FNO（バックボーン固定 + readoutをridge閉形式学習）を同一条件で比較するスクリプトです。
+
+**スモーク実行（必須）**
+```bash
+python scripts/compare_darcy_fno_vs_reservoir.py --config configs/compare_darcy_small.json
+```
+
+**生成データで実行**
+```bash
+python scripts/compare_darcy_fno_vs_reservoir.py \
+  --data-source generate \
+  --ntrain 20 --ntest 5 \
+  --gen-grid-size 32 \
+  --epochs 2
+```
+
+**既存 .mat データで実行**
+```bash
+python scripts/compare_darcy_fno_vs_reservoir.py \
+  --data-source mat \
+  --data-mode separate_files \
+  --train-file data/piececonst_r421_N1024_smooth1.mat \
+  --test-file data/piececonst_r421_N1024_smooth2.mat \
+  --ntrain 1000 --ntest 100 \
+  --epochs 500 \
+  --ridge-lambdas 0,1e-6,1e-4,1e-2
+```
+
+主な出力:
+- `results/<run_name>/metrics.json`
+- `results/<run_name>/` 配下に学習曲線・サンプル比較・誤差ヒストグラム（png/pdf/svg）
+
 ### fourier_2d_time.py
 **実行例**
 ```bash
