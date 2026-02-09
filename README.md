@@ -129,6 +129,34 @@ python scripts/compare_darcy_fno_vs_reservoir.py \
   --ridge-lambdas 0,1e-6,1e-4,1e-2
 ```
 
+**RFNOだけ実行**
+```bash
+python scripts/compare_darcy_fno_vs_reservoir.py --config configs/compare_darcy_small.json --run rfno
+```
+
+**RFNOハイパーパラメータ指定例**
+```bash
+python scripts/compare_darcy_fno_vs_reservoir.py --config configs/compare_darcy_small.json --run rfno \
+  --modes 16 --width 64 --padding 9 \
+  --spectral-gain 2.0 --skip-gain 0.1 \
+  --spectral-init normal --spectral-init-scale 0.5 \
+  --activation tanh
+```
+
+**RFNOグリッドサーチ例**
+```bash
+python scripts/compare_darcy_fno_vs_reservoir.py --config configs/compare_darcy_small.json --run rfno --no-viz \
+  --rfno-grid-search \
+  --rfno-grid-modes 8,12,16 \
+  --rfno-grid-widths 16,32,64 \
+  --rfno-grid-paddings 6,9 \
+  --rfno-grid-spectral-gains 0.5,1.0,2.0 \
+  --rfno-grid-skip-gains 0.1,1.0 \
+  --rfno-grid-spectral-inits uniform,normal \
+  --rfno-grid-spectral-init-scales 0.5,1.0 \
+  --rfno-grid-activations gelu,tanh
+```
+
 主な出力:
 - `results/<run_name>/metrics.json`
 - `results/<run_name>/` 配下に学習曲線・サンプル比較・誤差ヒストグラム（png/pdf/svg）

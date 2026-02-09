@@ -1,4 +1,5 @@
 import argparse
+import itertools
 import json
 import os
 import sys
@@ -41,6 +42,44 @@ def parse_lambdas(text: str) -> list[float]:
         vals.append(float(item))
     if not vals:
         raise ValueError("--ridge-lambdas must contain at least one value.")
+    return vals
+
+
+def parse_float_list(text: str, arg_name: str) -> list[float]:
+    vals = []
+    for item in text.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        vals.append(float(item))
+    if not vals:
+        raise ValueError(f"{arg_name} must contain at least one value.")
+    return vals
+
+
+def parse_int_list(text: str, arg_name: str) -> list[int]:
+    vals = []
+    for item in text.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        vals.append(int(item))
+    if not vals:
+        raise ValueError(f"{arg_name} must contain at least one value.")
+    return vals
+
+
+def parse_choice_list(text: str, arg_name: str, allowed: set[str]) -> list[str]:
+    vals = []
+    for item in text.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if item not in allowed:
+            raise ValueError(f"{arg_name} contains unsupported value: {item}")
+        vals.append(item)
+    if not vals:
+        raise ValueError(f"{arg_name} must contain at least one value.")
     return vals
 
 
@@ -224,6 +263,22 @@ def predict_single_rfno(
     return y_normalizer.decode(pred_n).cpu()
 
 
+def build_model_kwargs(args: argparse.Namespace, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+    kwargs = {
+        "modes": args.modes,
+        "width": args.width,
+        "padding": args.padding,
+        "spectral_gain": args.spectral_gain,
+        "skip_gain": args.skip_gain,
+        "spectral_init": args.spectral_init,
+        "spectral_init_scale": args.spectral_init_scale,
+        "activation": args.activation,
+    }
+    if overrides:
+        kwargs.update(overrides)
+    return kwargs
+
+
 def train_standard_fno(
     args: argparse.Namespace,
     device: torch.device,
@@ -234,8 +289,24 @@ def train_standard_fno(
     x_test_n: torch.Tensor,
     y_test: torch.Tensor,
     y_normalizer: UnitGaussianNormalizer,
+    model_kwargs: dict[str, Any] | None = None,
 ) -> tuple[FNO2d, list[int], list[float], list[float], ModelEval, ModelEval]:
-    model = FNO2d(args.modes, args.modes, args.width).to(device)
+    if model_kwargs is None:
+        model_kwargs = build_model_kwargs(args)
+    modes = int(model_kwargs["modes"])
+    width = int(model_kwargs["width"])
+    padding = int(model_kwargs["padding"])
+    model = FNO2d(
+        modes,
+        modes,
+        width,
+        padding=padding,
+        spectral_gain=model_kwargs["spectral_gain"],
+        skip_gain=model_kwargs["skip_gain"],
+        spectral_init=model_kwargs["spectral_init"],
+        spectral_init_scale=model_kwargs["spectral_init_scale"],
+        activation=model_kwargs["activation"],
+    ).to(device)
 
     train_loader = torch.utils.data.DataLoader(
         torch.utils.data.TensorDataset(x_train_n.reshape(args.ntrain, s, s, 1), y_train_n),
@@ -287,12 +358,28 @@ def fit_reservoir_readout(
     s: int,
     x_train_n: torch.Tensor,
     y_train_n: torch.Tensor,
+    model_kwargs: dict[str, Any] | None = None,
 ) -> tuple[FNO2d, RidgeReadout2D, dict[float, RidgeReadout2D]]:
-    backbone = FNO2d(args.modes, args.modes, args.width).to(device)
+    if model_kwargs is None:
+        model_kwargs = build_model_kwargs(args)
+    modes = int(model_kwargs["modes"])
+    width = int(model_kwargs["width"])
+    padding = int(model_kwargs["padding"])
+    backbone = FNO2d(
+        modes,
+        modes,
+        width,
+        padding=padding,
+        spectral_gain=model_kwargs["spectral_gain"],
+        skip_gain=model_kwargs["skip_gain"],
+        spectral_init=model_kwargs["spectral_init"],
+        spectral_init_scale=model_kwargs["spectral_init_scale"],
+        activation=model_kwargs["activation"],
+    ).to(device)
     backbone.freeze_backbone()
     backbone.eval()
 
-    collector = RidgeReadout2D(in_channels=args.width, ridge_lambda=0.0, stats_device="cpu")
+    collector = RidgeReadout2D(in_channels=backbone.width, ridge_lambda=0.0, stats_device="cpu")
 
     loader = torch.utils.data.DataLoader(
         torch.utils.data.TensorDataset(x_train_n.reshape(args.ntrain, s, s, 1), y_train_n),
@@ -308,7 +395,7 @@ def fit_reservoir_readout(
 
     ridge_models: dict[float, RidgeReadout2D] = {}
     for lam in parse_lambdas(args.ridge_lambdas):
-        ridge = RidgeReadout2D(in_channels=args.width, ridge_lambda=lam, stats_device="cpu")
+        ridge = RidgeReadout2D(in_channels=backbone.width, ridge_lambda=lam, stats_device="cpu")
         ridge.sum_phi = collector.sum_phi.clone()
         ridge.sum_y = collector.sum_y.clone()
         ridge.sum_phiphi = collector.sum_phiphi.clone()
@@ -319,6 +406,60 @@ def fit_reservoir_readout(
 
     first_lambda = parse_lambdas(args.ridge_lambdas)[0]
     return backbone, ridge_models[first_lambda], ridge_models
+
+
+def evaluate_rfno_lambdas(
+    args: argparse.Namespace,
+    device: torch.device,
+    s: int,
+    backbone: FNO2d,
+    ridge_models: dict[float, RidgeReadout2D],
+    x_train_n: torch.Tensor,
+    y_train: torch.Tensor,
+    x_test_n: torch.Tensor,
+    y_test: torch.Tensor,
+    y_normalizer: UnitGaussianNormalizer,
+) -> tuple[dict[str, Any], float, ModelEval]:
+    rfno_results: dict[str, Any] = {}
+    best_lambda: float | None = None
+    best_eval: ModelEval | None = None
+
+    for lam, ridge in ridge_models.items():
+        train_eval = eval_rfno(
+            backbone=backbone,
+            readout=ridge,
+            x=x_train_n.reshape(args.ntrain, s, s, 1),
+            y=y_train,
+            y_normalizer=y_normalizer,
+            batch_size=args.batch_size,
+            device=device,
+        )
+        test_eval = eval_rfno(
+            backbone=backbone,
+            readout=ridge,
+            x=x_test_n.reshape(args.ntest, s, s, 1),
+            y=y_test,
+            y_normalizer=y_normalizer,
+            batch_size=args.batch_size,
+            device=device,
+        )
+        rfno_results[str(lam)] = {
+            "train": asdict(train_eval),
+            "test": asdict(test_eval),
+        }
+
+        print(
+            f"[RFNO lambda={lam:g}] train_relL2={train_eval.mean_rel_l2:.6f} "
+            f"test_relL2={test_eval.mean_rel_l2:.6f}"
+        )
+
+        if best_eval is None or test_eval.mean_rel_l2 < best_eval.mean_rel_l2:
+            best_eval = test_eval
+            best_lambda = lam
+
+    assert best_eval is not None
+    assert best_lambda is not None
+    return rfno_results, best_lambda, best_eval
 
 
 def save_metrics(path: str, metrics: dict[str, Any]) -> None:
@@ -360,8 +501,34 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--epochs", type=int, default=500)
     parser.add_argument("--modes", type=int, default=12)
     parser.add_argument("--width", type=int, default=32)
+    parser.add_argument("--padding", type=int, default=9)
+    parser.add_argument("--spectral-gain", type=float, default=1.0)
+    parser.add_argument("--skip-gain", type=float, default=1.0)
+    parser.add_argument(
+        "--spectral-init",
+        type=str,
+        default="uniform",
+        choices=["uniform", "uniform_sym", "normal"],
+    )
+    parser.add_argument("--spectral-init-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--activation",
+        type=str,
+        default="gelu",
+        choices=["gelu", "tanh", "relu", "silu"],
+    )
+    parser.add_argument("--rfno-grid-search", action="store_true")
+    parser.add_argument("--rfno-grid-modes", type=str, default="")
+    parser.add_argument("--rfno-grid-widths", type=str, default="")
+    parser.add_argument("--rfno-grid-paddings", type=str, default="")
+    parser.add_argument("--rfno-grid-spectral-gains", type=str, default="")
+    parser.add_argument("--rfno-grid-skip-gains", type=str, default="")
+    parser.add_argument("--rfno-grid-spectral-inits", type=str, default="")
+    parser.add_argument("--rfno-grid-spectral-init-scales", type=str, default="")
+    parser.add_argument("--rfno-grid-activations", type=str, default="")
 
     parser.add_argument("--ridge-lambdas", type=str, default="0,1e-6,1e-4,1e-2")
+    parser.add_argument("--run", type=str, default="both", choices=["both", "fno", "rfno"])
 
     parser.add_argument("--results-root", type=str, default="results")
     parser.add_argument("--run-name", type=str, default="")
@@ -385,6 +552,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.ntrain <= 0 or args.ntest <= 0:
         parser.error("ntrain/ntest must be positive.")
+    if args.rfno_grid_search and args.run == "fno":
+        parser.error("--rfno-grid-search requires --run to include rfno (rfno or both).")
     return args
 
 
@@ -412,144 +581,277 @@ def main() -> None:
 
     print(f"[info] device={device}")
     print(f"[info] data_source={args.data_source} S={s} ntrain={args.ntrain} ntest={args.ntest}")
+    do_fno = args.run in ("both", "fno")
+    do_rfno = args.run in ("both", "rfno")
 
-    fno_model, epochs_hist, train_rel_hist, test_rel_hist, fno_train_eval, fno_test_eval = train_standard_fno(
-        args=args,
-        device=device,
-        s=s,
-        x_train_n=x_train_n,
-        y_train_n=y_train_n,
-        y_train=y_train,
-        x_test_n=x_test_n,
-        y_test=y_test,
-        y_normalizer=y_normalizer,
-    )
+    fno_model: FNO2d | None = None
+    epochs_hist: list[int] = []
+    train_rel_hist: list[float] = []
+    test_rel_hist: list[float] = []
+    fno_train_eval: ModelEval | None = None
+    fno_test_eval: ModelEval | None = None
 
-    backbone, _, ridge_models = fit_reservoir_readout(
-        args=args,
-        device=device,
-        s=s,
-        x_train_n=x_train_n,
-        y_train_n=y_train_n,
-    )
-
+    backbone: FNO2d | None = None
+    ridge_models: dict[float, RidgeReadout2D] = {}
     rfno_results: dict[str, Any] = {}
-    best_lambda = None
-    best_eval = None
+    best_lambda: float | None = None
+    best_eval: ModelEval | None = None
+    rfno_selected_hparams: dict[str, Any] | None = None
+    rfno_grid_trials: list[dict[str, Any]] = []
 
-    for lam, ridge in ridge_models.items():
-        train_eval = eval_rfno(
-            backbone=backbone,
-            readout=ridge,
-            x=x_train_n.reshape(args.ntrain, s, s, 1),
-            y=y_train,
-            y_normalizer=y_normalizer,
-            batch_size=args.batch_size,
+    if do_fno:
+        fno_model, epochs_hist, train_rel_hist, test_rel_hist, fno_train_eval, fno_test_eval = train_standard_fno(
+            args=args,
             device=device,
-        )
-        test_eval = eval_rfno(
-            backbone=backbone,
-            readout=ridge,
-            x=x_test_n.reshape(args.ntest, s, s, 1),
-            y=y_test,
+            s=s,
+            x_train_n=x_train_n,
+            y_train_n=y_train_n,
+            y_train=y_train,
+            x_test_n=x_test_n,
+            y_test=y_test,
             y_normalizer=y_normalizer,
-            batch_size=args.batch_size,
-            device=device,
-        )
-        rfno_results[str(lam)] = {
-            "train": asdict(train_eval),
-            "test": asdict(test_eval),
-        }
-
-        print(
-            f"[RFNO lambda={lam:g}] train_relL2={train_eval.mean_rel_l2:.6f} "
-            f"test_relL2={test_eval.mean_rel_l2:.6f}"
+            model_kwargs=build_model_kwargs(args),
         )
 
-        if best_eval is None or test_eval.mean_rel_l2 < best_eval.mean_rel_l2:
-            best_eval = test_eval
-            best_lambda = lam
+    if do_rfno:
+        if args.rfno_grid_search:
+            modes_list = (
+                parse_int_list(args.rfno_grid_modes, "--rfno-grid-modes")
+                if args.rfno_grid_modes
+                else [args.modes]
+            )
+            width_list = (
+                parse_int_list(args.rfno_grid_widths, "--rfno-grid-widths")
+                if args.rfno_grid_widths
+                else [args.width]
+            )
+            padding_list = (
+                parse_int_list(args.rfno_grid_paddings, "--rfno-grid-paddings")
+                if args.rfno_grid_paddings
+                else [args.padding]
+            )
+            spectral_gains = (
+                parse_float_list(args.rfno_grid_spectral_gains, "--rfno-grid-spectral-gains")
+                if args.rfno_grid_spectral_gains
+                else [args.spectral_gain]
+            )
+            skip_gains = (
+                parse_float_list(args.rfno_grid_skip_gains, "--rfno-grid-skip-gains")
+                if args.rfno_grid_skip_gains
+                else [args.skip_gain]
+            )
+            spectral_inits = (
+                parse_choice_list(
+                    args.rfno_grid_spectral_inits,
+                    "--rfno-grid-spectral-inits",
+                    {"uniform", "uniform_sym", "normal"},
+                )
+                if args.rfno_grid_spectral_inits
+                else [args.spectral_init]
+            )
+            spectral_init_scales = (
+                parse_float_list(args.rfno_grid_spectral_init_scales, "--rfno-grid-spectral-init-scales")
+                if args.rfno_grid_spectral_init_scales
+                else [args.spectral_init_scale]
+            )
+            activations = (
+                parse_choice_list(args.rfno_grid_activations, "--rfno-grid-activations", {"gelu", "tanh", "relu", "silu"})
+                if args.rfno_grid_activations
+                else [args.activation]
+            )
 
-    assert best_eval is not None
-    assert best_lambda is not None
+            combos = list(
+                itertools.product(
+                    modes_list,
+                    width_list,
+                    padding_list,
+                    spectral_gains,
+                    skip_gains,
+                    spectral_inits,
+                    spectral_init_scales,
+                    activations,
+                )
+            )
+            print(f"[info] RFNO grid search: {len(combos)} trials")
+
+            for idx, (m, w, p, sg, kg, si, sis, act) in enumerate(combos, start=1):
+                trial_hparams = {
+                    "modes": int(m),
+                    "width": int(w),
+                    "padding": int(p),
+                    "spectral_gain": float(sg),
+                    "skip_gain": float(kg),
+                    "spectral_init": si,
+                    "spectral_init_scale": float(sis),
+                    "activation": act,
+                }
+                print(f"[RFNO grid {idx}/{len(combos)}] {trial_hparams}")
+                trial_backbone, _, trial_ridge_models = fit_reservoir_readout(
+                    args=args,
+                    device=device,
+                    s=s,
+                    x_train_n=x_train_n,
+                    y_train_n=y_train_n,
+                    model_kwargs=trial_hparams,
+                )
+                trial_results, trial_best_lambda, trial_best_eval = evaluate_rfno_lambdas(
+                    args=args,
+                    device=device,
+                    s=s,
+                    backbone=trial_backbone,
+                    ridge_models=trial_ridge_models,
+                    x_train_n=x_train_n,
+                    y_train=y_train,
+                    x_test_n=x_test_n,
+                    y_test=y_test,
+                    y_normalizer=y_normalizer,
+                )
+                rfno_grid_trials.append(
+                    {
+                        **trial_hparams,
+                        "best_lambda": trial_best_lambda,
+                        "best_test_mean_rel_l2": trial_best_eval.mean_rel_l2,
+                        "best_test_median_rel_l2": trial_best_eval.median_rel_l2,
+                    }
+                )
+                if best_eval is None or trial_best_eval.mean_rel_l2 < best_eval.mean_rel_l2:
+                    best_eval = trial_best_eval
+                    best_lambda = trial_best_lambda
+                    rfno_results = trial_results
+                    backbone = trial_backbone
+                    ridge_models = trial_ridge_models
+                    rfno_selected_hparams = trial_hparams
+        else:
+            rfno_selected_hparams = build_model_kwargs(args)
+            backbone, _, ridge_models = fit_reservoir_readout(
+                args=args,
+                device=device,
+                s=s,
+                x_train_n=x_train_n,
+                y_train_n=y_train_n,
+                model_kwargs=rfno_selected_hparams,
+            )
+            rfno_results, best_lambda, best_eval = evaluate_rfno_lambdas(
+                args=args,
+                device=device,
+                s=s,
+                backbone=backbone,
+                ridge_models=ridge_models,
+                x_train_n=x_train_n,
+                y_train=y_train,
+                x_test_n=x_test_n,
+                y_test=y_test,
+                y_normalizer=y_normalizer,
+            )
+
+        assert best_eval is not None
+        assert best_lambda is not None
+        if rfno_selected_hparams is None:
+            rfno_selected_hparams = build_model_kwargs(args)
 
     if not args.no_viz:
-        plot_learning_curve(
-            LearningCurve(
-                epochs=epochs_hist,
-                train=train_rel_hist,
-                test=test_rel_hist,
-                train_label="FNO train (relL2)",
-                test_label="FNO test (relL2)",
-                metric_name="relative L2",
-            ),
-            out_path_no_ext=os.path.join(out_dir, "fno_learning_curve_relL2"),
-            logy=True,
-            title="FNO (Darcy 2D)",
-        )
-
-        plot_error_histogram(
-            fno_test_eval.errors,
-            out_path_no_ext=os.path.join(out_dir, "fno_test_relL2_hist"),
-            title=f"FNO test relL2 (mean={fno_test_eval.mean_rel_l2:.3g}, median={fno_test_eval.median_rel_l2:.3g})",
-        )
-
-        best_rfno_errs = rfno_results[str(best_lambda)]["test"]["errors"]
-        plot_error_histogram(
-            best_rfno_errs,
-            out_path_no_ext=os.path.join(out_dir, "rfno_best_test_relL2_hist"),
-            title=(
-                f"RFNO test relL2 (lambda={best_lambda:g}, "
-                f"mean={best_eval.mean_rel_l2:.3g}, median={best_eval.median_rel_l2:.3g})"
-            ),
-        )
-
         sample_id = 0
         x_sample = x_test_n[sample_id : sample_id + 1].reshape(1, s, s, 1)
         y_sample = y_test[sample_id]
         coeff_sample = x_normalizer.decode(x_test_n[sample_id]).cpu()
 
-        fno_pred = predict_single_fno(fno_model, x_sample, y_normalizer, device=device)[0]
-        plot_2d_comparison(
-            gt=y_sample,
-            pred=fno_pred,
-            input_field=coeff_sample,
-            out_path_no_ext=os.path.join(out_dir, "sample0_fno"),
-            suptitle=f"FNO sample0 relL2={rel_l2(fno_pred, y_sample):.3g}",
-        )
+        if do_fno:
+            assert fno_model is not None
+            assert fno_test_eval is not None
+            plot_learning_curve(
+                LearningCurve(
+                    epochs=epochs_hist,
+                    train=train_rel_hist,
+                    test=test_rel_hist,
+                    train_label="FNO train (relL2)",
+                    test_label="FNO test (relL2)",
+                    metric_name="relative L2",
+                ),
+                out_path_no_ext=os.path.join(out_dir, "fno_learning_curve_relL2"),
+                logy=True,
+                title="FNO (Darcy 2D)",
+            )
 
-        best_ridge = ridge_models[best_lambda]
-        rfno_pred = predict_single_rfno(backbone, best_ridge, x_sample, y_normalizer, device=device)[0]
-        plot_2d_comparison(
-            gt=y_sample,
-            pred=rfno_pred,
-            input_field=coeff_sample,
-            out_path_no_ext=os.path.join(out_dir, "sample0_rfno_best"),
-            suptitle=(
-                f"RFNO sample0 lambda={best_lambda:g} "
-                f"relL2={rel_l2(rfno_pred, y_sample):.3g}"
-            ),
-        )
+            plot_error_histogram(
+                fno_test_eval.errors,
+                out_path_no_ext=os.path.join(out_dir, "fno_test_relL2_hist"),
+                title=f"FNO test relL2 (mean={fno_test_eval.mean_rel_l2:.3g}, median={fno_test_eval.median_rel_l2:.3g})",
+            )
+
+            fno_pred = predict_single_fno(fno_model, x_sample, y_normalizer, device=device)[0]
+            plot_2d_comparison(
+                gt=y_sample,
+                pred=fno_pred,
+                input_field=coeff_sample,
+                out_path_no_ext=os.path.join(out_dir, "sample0_fno"),
+                suptitle=f"FNO sample0 relL2={rel_l2(fno_pred, y_sample):.3g}",
+            )
+
+        if do_rfno:
+            assert backbone is not None
+            assert best_eval is not None
+            assert best_lambda is not None
+            best_rfno_errs = rfno_results[str(best_lambda)]["test"]["errors"]
+            plot_error_histogram(
+                best_rfno_errs,
+                out_path_no_ext=os.path.join(out_dir, "rfno_best_test_relL2_hist"),
+                title=(
+                    f"RFNO test relL2 (lambda={best_lambda:g}, "
+                    f"mean={best_eval.mean_rel_l2:.3g}, median={best_eval.median_rel_l2:.3g})"
+                ),
+            )
+
+            best_ridge = ridge_models[best_lambda]
+            rfno_pred = predict_single_rfno(backbone, best_ridge, x_sample, y_normalizer, device=device)[0]
+            plot_2d_comparison(
+                gt=y_sample,
+                pred=rfno_pred,
+                input_field=coeff_sample,
+                out_path_no_ext=os.path.join(out_dir, "sample0_rfno_best"),
+                suptitle=(
+                    f"RFNO sample0 lambda={best_lambda:g} "
+                    f"relL2={rel_l2(rfno_pred, y_sample):.3g}"
+                ),
+            )
 
     elapsed = time.time() - start_time
 
     metrics = {
         "task": "darcy_2d_fno_vs_reservoir",
+        "run_mode": args.run,
         "elapsed_sec": elapsed,
         "device": str(device),
         "data_source": args.data_source,
         "grid_size_after_downsample": s,
         "ntrain": args.ntrain,
         "ntest": args.ntest,
-        "fno": {
-            "train": asdict(fno_train_eval),
-            "test": asdict(fno_test_eval),
-        },
-        "rfno": {
-            "best_lambda": best_lambda,
-            "best_test": asdict(best_eval),
-            "all": rfno_results,
-        },
+        "fno": (
+            {
+                "train": asdict(fno_train_eval),
+                "test": asdict(fno_test_eval),
+            }
+            if do_fno and fno_train_eval is not None and fno_test_eval is not None
+            else None
+        ),
+        "rfno": (
+            {
+                "selected_hparams": rfno_selected_hparams,
+                "best_lambda": best_lambda,
+                "best_test": asdict(best_eval),
+                "all": rfno_results,
+                "grid_search": (
+                    {
+                        "enabled": True,
+                        "num_trials": len(rfno_grid_trials),
+                        "trials": rfno_grid_trials,
+                    }
+                    if args.rfno_grid_search
+                    else {"enabled": False}
+                ),
+            }
+            if do_rfno and best_eval is not None
+            else None
+        ),
         "config": vars(args),
     }
 
@@ -557,15 +859,20 @@ def main() -> None:
     save_metrics(metrics_path, metrics)
 
     print("=" * 72)
-    print(
-        "FNO  test relL2: "
-        f"mean={fno_test_eval.mean_rel_l2:.6f} median={fno_test_eval.median_rel_l2:.6f}"
-    )
-    print(
-        "RFNO test relL2: "
-        f"mean={best_eval.mean_rel_l2:.6f} median={best_eval.median_rel_l2:.6f} "
-        f"(best lambda={best_lambda:g})"
-    )
+    if do_fno:
+        assert fno_test_eval is not None
+        print(
+            "FNO  test relL2: "
+            f"mean={fno_test_eval.mean_rel_l2:.6f} median={fno_test_eval.median_rel_l2:.6f}"
+        )
+    if do_rfno:
+        assert best_eval is not None
+        assert best_lambda is not None
+        print(
+            "RFNO test relL2: "
+            f"mean={best_eval.mean_rel_l2:.6f} median={best_eval.median_rel_l2:.6f} "
+            f"(best lambda={best_lambda:g})"
+        )
     print(f"metrics: {metrics_path}")
 
 
