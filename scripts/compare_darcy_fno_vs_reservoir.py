@@ -25,6 +25,7 @@ from viz_utils import (
 from rfno.data_utils import MatReader, UnitGaussianNormalizer
 from rfno.darcy_generate import generate_darcy_dataset, save_dataset_to_mat
 from rfno.models_fno2d import FNO2d
+from rfno.models_psrsdno2d import PSRSDNO2d
 from rfno.reservoir_readout import RidgeReadout2D
 
 
@@ -208,7 +209,7 @@ def eval_fno(
 
 @torch.no_grad()
 def eval_rfno(
-    backbone: FNO2d,
+    backbone: torch.nn.Module,
     readout: RidgeReadout2D,
     x: torch.Tensor,
     y: torch.Tensor,
@@ -251,7 +252,7 @@ def predict_single_fno(
 
 @torch.no_grad()
 def predict_single_rfno(
-    backbone: FNO2d,
+    backbone: torch.nn.Module,
     readout: RidgeReadout2D,
     x: torch.Tensor,
     y_normalizer: UnitGaussianNormalizer,
@@ -277,6 +278,19 @@ def build_model_kwargs(args: argparse.Namespace, overrides: dict[str, Any] | Non
     if overrides:
         kwargs.update(overrides)
     return kwargs
+
+
+def build_psrsdno_kwargs(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "psrsdno_dict_size": args.psrsdno_dict_size,
+        "psrsdno_alpha_min": args.psrsdno_alpha_min,
+        "psrsdno_alpha_max": args.psrsdno_alpha_max,
+        "psrsdno_beta_min": args.psrsdno_beta_min,
+        "psrsdno_beta_max": args.psrsdno_beta_max,
+        "psrsdno_seed": args.psrsdno_seed,
+        "psrsdno_complex_mixing": args.psrsdno_complex_mixing,
+        "psrsdno_eps_norm": args.psrsdno_eps_norm,
+    }
 
 
 def train_standard_fno(
@@ -408,6 +422,64 @@ def fit_reservoir_readout(
     return backbone, ridge_models[first_lambda], ridge_models
 
 
+def fit_psrsdno_readout(
+    args: argparse.Namespace,
+    device: torch.device,
+    s: int,
+    x_train_n: torch.Tensor,
+    y_train_n: torch.Tensor,
+    model_kwargs: dict[str, Any] | None = None,
+    psrsdno_kwargs: dict[str, Any] | None = None,
+) -> tuple[PSRSDNO2d, RidgeReadout2D, dict[float, RidgeReadout2D]]:
+    if model_kwargs is None:
+        model_kwargs = build_model_kwargs(args)
+    if psrsdno_kwargs is None:
+        psrsdno_kwargs = build_psrsdno_kwargs(args)
+
+    modes = int(model_kwargs["modes"])
+    width = int(model_kwargs["width"])
+    padding = int(model_kwargs["padding"])
+    backbone = PSRSDNO2d(
+        modes,
+        modes,
+        width,
+        padding=padding,
+        spectral_gain=model_kwargs["spectral_gain"],
+        skip_gain=model_kwargs["skip_gain"],
+        activation=model_kwargs["activation"],
+        **psrsdno_kwargs,
+    ).to(device)
+    backbone.freeze_backbone()
+    backbone.eval()
+
+    collector = RidgeReadout2D(in_channels=backbone.width, ridge_lambda=0.0, stats_device="cpu")
+    loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(x_train_n.reshape(args.ntrain, s, s, 1), y_train_n),
+        batch_size=args.batch_size,
+        shuffle=False,
+    )
+
+    with torch.no_grad():
+        for xb, yb in loader:
+            xb = xb.to(device)
+            feat = backbone.forward_features(xb)
+            collector.update(feat, yb)
+
+    ridge_models: dict[float, RidgeReadout2D] = {}
+    for lam in parse_lambdas(args.ridge_lambdas):
+        ridge = RidgeReadout2D(in_channels=backbone.width, ridge_lambda=lam, stats_device="cpu")
+        ridge.sum_phi = collector.sum_phi.clone()
+        ridge.sum_y = collector.sum_y.clone()
+        ridge.sum_phiphi = collector.sum_phiphi.clone()
+        ridge.sum_phiy = collector.sum_phiy.clone()
+        ridge.count = collector.count
+        ridge.solve()
+        ridge_models[lam] = ridge
+
+    first_lambda = parse_lambdas(args.ridge_lambdas)[0]
+    return backbone, ridge_models[first_lambda], ridge_models
+
+
 def evaluate_rfno_lambdas(
     args: argparse.Namespace,
     device: torch.device,
@@ -460,6 +532,58 @@ def evaluate_rfno_lambdas(
     assert best_eval is not None
     assert best_lambda is not None
     return rfno_results, best_lambda, best_eval
+
+
+def evaluate_psrsdno_lambdas(
+    args: argparse.Namespace,
+    device: torch.device,
+    s: int,
+    backbone: PSRSDNO2d,
+    ridge_models: dict[float, RidgeReadout2D],
+    x_train_n: torch.Tensor,
+    y_train: torch.Tensor,
+    x_test_n: torch.Tensor,
+    y_test: torch.Tensor,
+    y_normalizer: UnitGaussianNormalizer,
+) -> tuple[dict[str, Any], float, ModelEval]:
+    results: dict[str, Any] = {}
+    best_lambda: float | None = None
+    best_eval: ModelEval | None = None
+
+    for lam, ridge in ridge_models.items():
+        train_eval = eval_rfno(
+            backbone=backbone,
+            readout=ridge,
+            x=x_train_n.reshape(args.ntrain, s, s, 1),
+            y=y_train,
+            y_normalizer=y_normalizer,
+            batch_size=args.batch_size,
+            device=device,
+        )
+        test_eval = eval_rfno(
+            backbone=backbone,
+            readout=ridge,
+            x=x_test_n.reshape(args.ntest, s, s, 1),
+            y=y_test,
+            y_normalizer=y_normalizer,
+            batch_size=args.batch_size,
+            device=device,
+        )
+        results[str(lam)] = {
+            "train": asdict(train_eval),
+            "test": asdict(test_eval),
+        }
+        print(
+            f"[PSRSDNO lambda={lam:g}] train_relL2={train_eval.mean_rel_l2:.6f} "
+            f"test_relL2={test_eval.mean_rel_l2:.6f}"
+        )
+        if best_eval is None or test_eval.mean_rel_l2 < best_eval.mean_rel_l2:
+            best_eval = test_eval
+            best_lambda = lam
+
+    assert best_eval is not None
+    assert best_lambda is not None
+    return results, best_lambda, best_eval
 
 
 def save_metrics(path: str, metrics: dict[str, Any]) -> None:
@@ -528,7 +652,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rfno-grid-activations", type=str, default="")
 
     parser.add_argument("--ridge-lambdas", type=str, default="0,1e-6,1e-4,1e-2")
-    parser.add_argument("--run", type=str, default="both", choices=["both", "fno", "rfno"])
+    parser.add_argument("--run", type=str, default="both", choices=["both", "fno", "rfno", "psrsdno", "all"])
+    parser.add_argument("--psrsdno-dict-size", type=int, default=32)
+    parser.add_argument("--psrsdno-alpha-min", type=float, default=1e-1)
+    parser.add_argument("--psrsdno-alpha-max", type=float, default=1e1)
+    parser.add_argument("--psrsdno-beta-min", type=float, default=1e-2)
+    parser.add_argument("--psrsdno-beta-max", type=float, default=1e0)
+    parser.add_argument("--psrsdno-seed", type=int, default=0)
+    parser.add_argument("--psrsdno-complex-mixing", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--psrsdno-eps-norm", type=float, default=1e-12)
 
     parser.add_argument("--results-root", type=str, default="results")
     parser.add_argument("--run-name", type=str, default="")
@@ -552,8 +684,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.ntrain <= 0 or args.ntest <= 0:
         parser.error("ntrain/ntest must be positive.")
-    if args.rfno_grid_search and args.run == "fno":
-        parser.error("--rfno-grid-search requires --run to include rfno (rfno or both).")
+    if args.rfno_grid_search and args.run not in ("rfno", "both", "all"):
+        parser.error("--rfno-grid-search requires --run to include rfno (rfno/both/all).")
     return args
 
 
@@ -581,8 +713,9 @@ def main() -> None:
 
     print(f"[info] device={device}")
     print(f"[info] data_source={args.data_source} S={s} ntrain={args.ntrain} ntest={args.ntest}")
-    do_fno = args.run in ("both", "fno")
-    do_rfno = args.run in ("both", "rfno")
+    do_fno = args.run in ("both", "fno", "all")
+    do_rfno = args.run in ("both", "rfno", "all")
+    do_psrsdno = args.run in ("psrsdno", "all")
 
     fno_model: FNO2d | None = None
     epochs_hist: list[int] = []
@@ -598,6 +731,13 @@ def main() -> None:
     best_eval: ModelEval | None = None
     rfno_selected_hparams: dict[str, Any] | None = None
     rfno_grid_trials: list[dict[str, Any]] = []
+    psrsdno_backbone: PSRSDNO2d | None = None
+    psrsdno_ridge_models: dict[float, RidgeReadout2D] = {}
+    psrsdno_results: dict[str, Any] = {}
+    psrsdno_best_lambda: float | None = None
+    psrsdno_best_eval: ModelEval | None = None
+    psrsdno_selected_hparams: dict[str, Any] | None = None
+    psrsdno_selected_dict_hparams: dict[str, Any] | None = None
 
     if do_fno:
         fno_model, epochs_hist, train_rel_hist, test_rel_hist, fno_train_eval, fno_test_eval = train_standard_fno(
@@ -749,6 +889,31 @@ def main() -> None:
         if rfno_selected_hparams is None:
             rfno_selected_hparams = build_model_kwargs(args)
 
+    if do_psrsdno:
+        psrsdno_selected_hparams = build_model_kwargs(args)
+        psrsdno_selected_dict_hparams = build_psrsdno_kwargs(args)
+        psrsdno_backbone, _, psrsdno_ridge_models = fit_psrsdno_readout(
+            args=args,
+            device=device,
+            s=s,
+            x_train_n=x_train_n,
+            y_train_n=y_train_n,
+            model_kwargs=psrsdno_selected_hparams,
+            psrsdno_kwargs=psrsdno_selected_dict_hparams,
+        )
+        psrsdno_results, psrsdno_best_lambda, psrsdno_best_eval = evaluate_psrsdno_lambdas(
+            args=args,
+            device=device,
+            s=s,
+            backbone=psrsdno_backbone,
+            ridge_models=psrsdno_ridge_models,
+            x_train_n=x_train_n,
+            y_train=y_train,
+            x_test_n=x_test_n,
+            y_test=y_test,
+            y_normalizer=y_normalizer,
+        )
+
     if not args.no_viz:
         sample_id = 0
         x_sample = x_test_n[sample_id : sample_id + 1].reshape(1, s, s, 1)
@@ -814,6 +979,33 @@ def main() -> None:
                 ),
             )
 
+        if do_psrsdno:
+            assert psrsdno_backbone is not None
+            assert psrsdno_best_eval is not None
+            assert psrsdno_best_lambda is not None
+            best_psrsdno_errs = psrsdno_results[str(psrsdno_best_lambda)]["test"]["errors"]
+            plot_error_histogram(
+                best_psrsdno_errs,
+                out_path_no_ext=os.path.join(out_dir, "psrsdno_best_test_relL2_hist"),
+                title=(
+                    f"PSRSDNO test relL2 (lambda={psrsdno_best_lambda:g}, "
+                    f"mean={psrsdno_best_eval.mean_rel_l2:.3g}, median={psrsdno_best_eval.median_rel_l2:.3g})"
+                ),
+            )
+
+            best_ridge = psrsdno_ridge_models[psrsdno_best_lambda]
+            psrsdno_pred = predict_single_rfno(psrsdno_backbone, best_ridge, x_sample, y_normalizer, device=device)[0]
+            plot_2d_comparison(
+                gt=y_sample,
+                pred=psrsdno_pred,
+                input_field=coeff_sample,
+                out_path_no_ext=os.path.join(out_dir, "sample0_psrsdno_best"),
+                suptitle=(
+                    f"PSRSDNO sample0 lambda={psrsdno_best_lambda:g} "
+                    f"relL2={rel_l2(psrsdno_pred, y_sample):.3g}"
+                ),
+            )
+
     elapsed = time.time() - start_time
 
     metrics = {
@@ -852,6 +1044,17 @@ def main() -> None:
             if do_rfno and best_eval is not None
             else None
         ),
+        "psrsdno": (
+            {
+                "selected_hparams": psrsdno_selected_hparams,
+                "selected_dict_hparams": psrsdno_selected_dict_hparams,
+                "best_lambda": psrsdno_best_lambda,
+                "best_test": asdict(psrsdno_best_eval),
+                "all": psrsdno_results,
+            }
+            if do_psrsdno and psrsdno_best_eval is not None
+            else None
+        ),
         "config": vars(args),
     }
 
@@ -872,6 +1075,14 @@ def main() -> None:
             "RFNO test relL2: "
             f"mean={best_eval.mean_rel_l2:.6f} median={best_eval.median_rel_l2:.6f} "
             f"(best lambda={best_lambda:g})"
+        )
+    if do_psrsdno:
+        assert psrsdno_best_eval is not None
+        assert psrsdno_best_lambda is not None
+        print(
+            "PSRSDNO test relL2: "
+            f"mean={psrsdno_best_eval.mean_rel_l2:.6f} median={psrsdno_best_eval.median_rel_l2:.6f} "
+            f"(best lambda={psrsdno_best_lambda:g})"
         )
     print(f"metrics: {metrics_path}")
 

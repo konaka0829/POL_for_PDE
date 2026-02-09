@@ -157,6 +157,38 @@ python scripts/compare_darcy_fno_vs_reservoir.py --config configs/compare_darcy_
   --rfno-grid-activations gelu,tanh
 ```
 
+**PSRSDNO入りスモーク実行（FNO/RFNO/PSRSDNO を一括比較）**
+```bash
+python scripts/compare_darcy_fno_vs_reservoir.py --config configs/compare_darcy_small_psrsdno.json
+```
+
+**PSRSDNOだけ実行**
+```bash
+python scripts/compare_darcy_fno_vs_reservoir.py --config configs/compare_darcy_small_psrsdno.json --run psrsdno
+```
+
+**PSRSDNO辞書ハイパーパラメータ指定例**
+```bash
+python scripts/compare_darcy_fno_vs_reservoir.py --config configs/compare_darcy_small_psrsdno.json --run psrsdno \
+  --psrsdno-dict-size 64 \
+  --psrsdno-alpha-min 1e-2 --psrsdno-alpha-max 1e+2 \
+  --psrsdno-beta-min 1e-3 --psrsdno-beta-max 1e+0 \
+  --psrsdno-seed 7 \
+  --psrsdno-complex-mixing \
+  --psrsdno-eps-norm 1e-12
+```
+
+**compare_darcy_fno_vs_reservoir.py の主な追加CLI（PSRSDNO関連）**
+- `--run`：`both` / `fno` / `rfno` / `psrsdno` / `all`（デフォルト: `both`）
+- `--psrsdno-dict-size`（デフォルト: `32`）
+- `--psrsdno-alpha-min`（デフォルト: `1e-1`）
+- `--psrsdno-alpha-max`（デフォルト: `1e+1`）
+- `--psrsdno-beta-min`（デフォルト: `1e-2`）
+- `--psrsdno-beta-max`（デフォルト: `1e+0`）
+- `--psrsdno-seed`（デフォルト: `0`）
+- `--psrsdno-complex-mixing` / `--no-psrsdno-complex-mixing`（デフォルト: `有効`）
+- `--psrsdno-eps-norm`（デフォルト: `1e-12`）
+
 主な出力:
 - `results/<run_name>/metrics.json`
 - `results/<run_name>/` 配下に学習曲線・サンプル比較・誤差ヒストグラム（png/pdf/svg）
