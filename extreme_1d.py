@@ -122,8 +122,16 @@ def _load_points(args):
         t_tr, y_tr, u_tr = t_tr[: args.ntrain], y_tr[: args.ntrain], u_tr[: args.ntrain]
         t_te, y_te, u_te = t_te[: args.ntest], y_te[: args.ntest], u_te[: args.ntest]
 
-    y_tr = y_tr.unsqueeze(-1) if y_tr.ndim == 2 else y_tr
-    y_te = y_te.unsqueeze(-1) if y_te.ndim == 2 else y_te
+    # External EON datasets store one (t, u) pair per row and y as vector output.
+    # Convert to (B, Q, D) with Q=1 to match the batched query interface used here.
+    if y_tr.ndim == 1:
+        y_tr = y_tr.view(-1, 1, 1)
+    elif y_tr.ndim == 2:
+        y_tr = y_tr.unsqueeze(1)
+    if y_te.ndim == 1:
+        y_te = y_te.view(-1, 1, 1)
+    elif y_te.ndim == 2:
+        y_te = y_te.unsqueeze(1)
 
     xq_tr = t_tr.unsqueeze(1) if t_tr.ndim == 2 else t_tr
     xq_te = t_te.unsqueeze(1) if t_te.ndim == 2 else t_te
@@ -235,8 +243,12 @@ def main() -> None:
     plot_error_histogram(sample_errors, os.path.join(viz_dir, "test_relL2_hist"))
 
     if yq_te.shape[-1] == 1:
-        q = xq_te[0] if xq_te.ndim == 2 else xq_te[0, :, :]
-        x_axis = q[:, 0].cpu().numpy()
+        if xq_te.ndim == 2:
+            x_axis = xq_te[:, 0].cpu().numpy()
+        elif xq_te.ndim == 3:
+            x_axis = xq_te[0, :, 0].cpu().numpy()
+        else:
+            raise ValueError(f"Unexpected xq_te ndim: {xq_te.ndim}")
         order = np.argsort(x_axis)
         for i in [0, min(1, len(sample_errors) - 1), min(2, len(sample_errors) - 1)]:
             plot_1d_prediction(
