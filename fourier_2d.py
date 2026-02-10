@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from timeit import default_timer
 from utilities3 import *
 from cli_utils import add_data_mode_args, validate_data_mode_args
+from operator_data import eon_pkl_to_grid, load_pickle
 
 # ------------------------------------------------------------
 # Visualization helpers (PNG/PDF/SVG)
@@ -78,7 +79,7 @@ class MLP(nn.Module):
         return x
 
 class FNO2d(nn.Module):
-    def __init__(self, modes1, modes2,  width):
+    def __init__(self, modes1, modes2,  width, in_channels=1, out_channels=1):
         super(FNO2d, self).__init__()
 
         """
@@ -99,7 +100,7 @@ class FNO2d(nn.Module):
         self.width = width
         self.padding = 9 # pad the domain if input is non-periodic
 
-        self.p = nn.Linear(3, self.width) # input channel is 3: (a(x, y), x, y)
+        self.p = nn.Linear(in_channels + 2, self.width)
         self.conv0 = SpectralConv2d(self.width, self.width, self.modes1, self.modes2)
         self.conv1 = SpectralConv2d(self.width, self.width, self.modes1, self.modes2)
         self.conv2 = SpectralConv2d(self.width, self.width, self.modes1, self.modes2)
@@ -112,7 +113,7 @@ class FNO2d(nn.Module):
         self.w1 = nn.Conv2d(self.width, self.width, 1)
         self.w2 = nn.Conv2d(self.width, self.width, 1)
         self.w3 = nn.Conv2d(self.width, self.width, 1)
-        self.q = MLP(self.width, 1, self.width * 4) # output channel is 1: u(x, y)
+        self.q = MLP(self.width, out_channels, self.width * 4)
 
     def forward(self, x):
         grid = self.get_grid(x.shape, x.device)
@@ -173,6 +174,32 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--epochs", type=int, default=500, help="Number of epochs.")
     parser.add_argument("--modes", type=int, default=12, help="Number of Fourier modes.")
     parser.add_argument("--width", type=int, default=32, help="Model width.")
+    parser.add_argument(
+        "--dataset-format",
+        choices=("mat", "eon_pkl"),
+        default="mat",
+        help="Input dataset format.",
+    )
+    parser.add_argument(
+        "--eon-data-file",
+        default=None,
+        help="EON pkl file for single_split mode (fallback: --data-file).",
+    )
+    parser.add_argument(
+        "--eon-train-file",
+        default=None,
+        help="EON pkl train file for separate_files mode (fallback: --train-file).",
+    )
+    parser.add_argument(
+        "--eon-test-file",
+        default=None,
+        help="EON pkl test file for separate_files mode (fallback: --test-file).",
+    )
+    parser.add_argument(
+        "--eon-meta-file",
+        default=None,
+        help="Meta pkl file for EON dataset conversion to grid.",
+    )
     parser.add_argument("--r", type=int, default=5, help="Downsampling rate.")
     parser.add_argument("--grid-size", type=int, default=421, help="Original grid size (before downsampling).")
     return parser
@@ -180,6 +207,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     validate_data_mode_args(args, parser)
+    if args.dataset_format == "eon_pkl" and not args.eon_meta_file:
+        parser.error("--eon-meta-file is required when --dataset-format=eon_pkl")
 
 
 ################################################################
@@ -201,29 +230,59 @@ modes = args.modes
 width = args.width
 
 r = args.r
-h = int(((args.grid_size - 1) / r) + 1)
-s = h
+s = int(((args.grid_size - 1) / r) + 1)
 
 ################################################################
 # load data and data normalization
 ################################################################
-if args.data_mode == "single_split":
-    reader = MatReader(args.data_file)
-    x_data = reader.read_field('coeff')[:,::r,::r][:,:s,:s]
-    y_data = reader.read_field('sol')[:,::r,::r][:,:s,:s]
+if args.dataset_format == "mat":
+    if args.data_mode == "single_split":
+        reader = MatReader(args.data_file)
+        x_data = reader.read_field('coeff')[:,::r,::r][:,:s,:s]
+        y_data = reader.read_field('sol')[:,::r,::r][:,:s,:s]
 
-    x_train = x_data[:ntrain]
-    y_train = y_data[:ntrain]
-    x_test = x_data[-ntest:]
-    y_test = y_data[-ntest:]
+        x_train = x_data[:ntrain]
+        y_train = y_data[:ntrain]
+        x_test = x_data[-ntest:]
+        y_test = y_data[-ntest:]
+    else:
+        reader = MatReader(args.train_file)
+        x_train = reader.read_field('coeff')[:ntrain,::r,::r][:,:s,:s]
+        y_train = reader.read_field('sol')[:ntrain,::r,::r][:,:s,:s]
+
+        reader.load_file(args.test_file)
+        x_test = reader.read_field('coeff')[:ntest,::r,::r][:,:s,:s]
+        y_test = reader.read_field('sol')[:ntest,::r,::r][:,:s,:s]
 else:
-    reader = MatReader(args.train_file)
-    x_train = reader.read_field('coeff')[:ntrain,::r,::r][:,:s,:s]
-    y_train = reader.read_field('sol')[:ntrain,::r,::r][:,:s,:s]
+    meta = load_pickle(args.eon_meta_file)
+    if args.data_mode == "single_split":
+        eon_data_file = args.eon_data_file or args.data_file
+        x_data, y_data, _ = eon_pkl_to_grid(load_pickle(eon_data_file), meta)
+        x_train = x_data[:ntrain]
+        y_train = y_data[:ntrain]
+        x_test = x_data[-ntest:]
+        y_test = y_data[-ntest:]
+    else:
+        eon_train_file = args.eon_train_file or args.train_file
+        eon_test_file = args.eon_test_file or args.test_file
+        x_train, y_train, _ = eon_pkl_to_grid(load_pickle(eon_train_file), meta)
+        x_test, y_test, _ = eon_pkl_to_grid(load_pickle(eon_test_file), meta)
+        x_train = x_train[:ntrain]
+        y_train = y_train[:ntrain]
+        x_test = x_test[:ntest]
+        y_test = y_test[:ntest]
 
-    reader.load_file(args.test_file)
-    x_test = reader.read_field('coeff')[:ntest,::r,::r][:,:s,:s]
-    y_test = reader.read_field('sol')[:ntest,::r,::r][:,:s,:s]
+if x_train.ndim == 3:
+    x_train = x_train.unsqueeze(-1)
+if x_test.ndim == 3:
+    x_test = x_test.unsqueeze(-1)
+if y_train.ndim == 4 and y_train.shape[-1] == 1:
+    y_train = y_train.squeeze(-1)
+if y_test.ndim == 4 and y_test.shape[-1] == 1:
+    y_test = y_test.squeeze(-1)
+
+s = x_train.shape[1]
+in_channels = x_train.shape[-1]
 
 x_normalizer = UnitGaussianNormalizer(x_train)
 x_train = x_normalizer.encode(x_train)
@@ -232,16 +291,13 @@ x_test = x_normalizer.encode(x_test)
 y_normalizer = UnitGaussianNormalizer(y_train)
 y_train = y_normalizer.encode(y_train)
 
-x_train = x_train.reshape(ntrain,s,s,1)
-x_test = x_test.reshape(ntest,s,s,1)
-
 train_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(x_train, y_train), batch_size=batch_size, shuffle=True)
 test_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(x_test, y_test), batch_size=batch_size, shuffle=False)
 
 ################################################################
 # training and evaluation
 ################################################################
-model = FNO2d(modes, modes, width).cuda()
+model = FNO2d(modes, modes, width, in_channels=in_channels, out_channels=1).cuda()
 print(count_params(model))
 
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
@@ -264,11 +320,12 @@ for ep in range(epochs):
         x, y = x.cuda(), y.cuda()
 
         optimizer.zero_grad()
-        out = model(x).reshape(batch_size, s, s)
+        bsz = x.shape[0]
+        out = model(x).reshape(bsz, s, s)
         out = y_normalizer.decode(out)
         y = y_normalizer.decode(y)
 
-        loss = myloss(out.reshape(batch_size, -1), y.reshape(batch_size, -1))
+        loss = myloss(out.reshape(bsz, -1), y.reshape(bsz, -1))
         loss.backward()
 
         optimizer.step()
@@ -281,10 +338,11 @@ for ep in range(epochs):
         for x, y in test_loader:
             x, y = x.cuda(), y.cuda()
 
-            out = model(x).reshape(batch_size, s, s)
+            bsz = x.shape[0]
+            out = model(x).reshape(bsz, s, s)
             out = y_normalizer.decode(out)
 
-            test_l2 += myloss(out.reshape(batch_size, -1), y.reshape(batch_size, -1)).item()
+            test_l2 += myloss(out.reshape(bsz, -1), y.reshape(bsz, -1)).item()
 
     train_l2/= ntrain
     test_l2 /= ntest

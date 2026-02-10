@@ -100,6 +100,29 @@ python fourier_2d.py --data-mode single_split --data-file data/piececonst_r421_N
 - `--r`（デフォルト: `5`）
 - `--grid-size`（デフォルト: `421`）
 
+### ExtremONet（新規）
+**実行例**
+```bash
+# EON on burgers (.mat)
+python extreme_1d.py --dataset-format mat --data-mode single_split --data-file data/burgers_data_R10.mat \
+  --ntrain 1000 --ntest 100 --num-sensors 128 --num-query 256
+
+# EON on darcy (.mat)
+python extreme_2d.py --dataset-format mat --data-mode separate_files \
+  --train-file data/piececonst_r421_N1024_smooth1.mat --test-file data/piececonst_r421_N1024_smooth2.mat \
+  --ntrain 1000 --ntest 100 --num-sensors 128 --num-query 256
+
+# FNO on EON pkl PDE (meta required)
+python fourier_1d.py --dataset-format eon_pkl --data-mode single_split \
+  --eon-data-file data/train_data_PDE_diff.pkl --eon-meta-file data/PDE_params_diff.pkl \
+  --ntrain 1000 --ntest 100
+```
+
+**補足**
+- `extreme_1d.py` / `extreme_2d.py` は `model/<run_name>.pt`, `pred/<run_name>.pt`, `viz/<run_name>/...` を保存します。
+- FNO スクリプト (`fourier_1d.py` / `fourier_2d.py`) は `--dataset-format mat` がデフォルトのため、既存コマンドはそのまま動作します。
+- `--dataset-format eon_pkl` では `--eon-meta-file` が必須です。
+
 ### fourier_2d_time.py
 **実行例**
 ```bash

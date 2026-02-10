@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from timeit import default_timer
 from utilities3 import *
 from cli_utils import add_data_mode_args, add_split_args, validate_data_mode_args
+from operator_data import eon_pkl_to_grid, load_pickle
 
 # ------------------------------------------------------------
 # Visualization helpers (PNG/PDF/SVG)
@@ -74,7 +75,7 @@ class MLP(nn.Module):
         return x
 
 class FNO1d(nn.Module):
-    def __init__(self, modes, width):
+    def __init__(self, modes, width, in_channels=1, out_channels=1):
         super(FNO1d, self).__init__()
 
         """
@@ -94,7 +95,7 @@ class FNO1d(nn.Module):
         self.width = width
         self.padding = 8 # pad the domain if input is non-periodic
 
-        self.p = nn.Linear(2, self.width) # input channel_dim is 2: (u0(x), x)
+        self.p = nn.Linear(in_channels + 1, self.width) # input: (field channels, x)
         self.conv0 = SpectralConv1d(self.width, self.width, self.modes1)
         self.conv1 = SpectralConv1d(self.width, self.width, self.modes1)
         self.conv2 = SpectralConv1d(self.width, self.width, self.modes1)
@@ -107,7 +108,7 @@ class FNO1d(nn.Module):
         self.w1 = nn.Conv1d(self.width, self.width, 1)
         self.w2 = nn.Conv1d(self.width, self.width, 1)
         self.w3 = nn.Conv1d(self.width, self.width, 1)
-        self.q = MLP(self.width, 1, self.width*2)  # output channel_dim is 1: u1(x)
+        self.q = MLP(self.width, out_channels, self.width*2)
 
     def forward(self, x):
         grid = self.get_grid(x.shape, x.device)
@@ -167,12 +168,40 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--epochs", type=int, default=500, help="Number of epochs.")
     parser.add_argument("--modes", type=int, default=16, help="Number of Fourier modes.")
     parser.add_argument("--width", type=int, default=64, help="Model width.")
+    parser.add_argument(
+        "--dataset-format",
+        choices=("mat", "eon_pkl"),
+        default="mat",
+        help="Input dataset format.",
+    )
+    parser.add_argument(
+        "--eon-data-file",
+        default=None,
+        help="EON pkl file for single_split mode (fallback: --data-file).",
+    )
+    parser.add_argument(
+        "--eon-train-file",
+        default=None,
+        help="EON pkl train file for separate_files mode (fallback: --train-file).",
+    )
+    parser.add_argument(
+        "--eon-test-file",
+        default=None,
+        help="EON pkl test file for separate_files mode (fallback: --test-file).",
+    )
+    parser.add_argument(
+        "--eon-meta-file",
+        default=None,
+        help="Meta pkl file for EON dataset conversion to grid.",
+    )
     add_split_args(parser, default_train_split=0.8, default_seed=0)
     return parser
 
 
 def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     validate_data_mode_args(args, parser)
+    if args.dataset_format == "eon_pkl" and not args.eon_meta_file:
+        parser.error("--eon-meta-file is required when --dataset-format=eon_pkl")
 
 
 ################################################################
@@ -189,8 +218,7 @@ ntrain = args.ntrain
 ntest = args.ntest
 
 sub = args.sub #subsampling rate
-h = 2**13 // sub #total grid size divided by the subsampling rate
-s = h
+s = 2**13 // sub
 
 batch_size = args.batch_size
 learning_rate = args.learning_rate
@@ -204,49 +232,91 @@ width = args.width
 # read data
 ################################################################
 
-# Data is of the shape (number of samples, grid size)
-if args.data_mode == "single_split":
-    dataloader = MatReader(args.data_file)
-    x_data = dataloader.read_field('a')[:,::sub]
-    y_data = dataloader.read_field('u')[:,::sub]
-    total = x_data.shape[0]
-    indices = np.arange(total)
-    if args.shuffle:
-        np.random.shuffle(indices)
-    split_idx = int(total * args.train_split)
-    train_idx = indices[:split_idx]
-    test_idx = indices[split_idx:]
+if args.dataset_format == "mat":
+    # Data is of the shape (number of samples, grid size)
+    if args.data_mode == "single_split":
+        dataloader = MatReader(args.data_file)
+        x_data = dataloader.read_field('a')[:,::sub]
+        y_data = dataloader.read_field('u')[:,::sub]
+        total = x_data.shape[0]
+        indices = np.arange(total)
+        if args.shuffle:
+            np.random.shuffle(indices)
+        split_idx = int(total * args.train_split)
+        train_idx = indices[:split_idx]
+        test_idx = indices[split_idx:]
 
-    if ntrain > len(train_idx) or ntest > len(test_idx):
-        raise ValueError(
-            f"Not enough samples for ntrain={ntrain}, ntest={ntest} with train split "
-            f"{args.train_split} (total={total})."
-        )
+        if ntrain > len(train_idx) or ntest > len(test_idx):
+            raise ValueError(
+                f"Not enough samples for ntrain={ntrain}, ntest={ntest} with train split "
+                f"{args.train_split} (total={total})."
+            )
 
-    train_idx = train_idx[:ntrain]
-    test_idx = test_idx[:ntest]
+        train_idx = train_idx[:ntrain]
+        test_idx = test_idx[:ntest]
 
-    x_train = x_data[train_idx]
-    y_train = y_data[train_idx]
-    x_test = x_data[test_idx]
-    y_test = y_data[test_idx]
+        x_train = x_data[train_idx]
+        y_train = y_data[train_idx]
+        x_test = x_data[test_idx]
+        y_test = y_data[test_idx]
+    else:
+        train_reader = MatReader(args.train_file)
+        test_reader = MatReader(args.test_file)
+
+        x_train = train_reader.read_field('a')[:ntrain,::sub]
+        y_train = train_reader.read_field('u')[:ntrain,::sub]
+        x_test = test_reader.read_field('a')[-ntest:,::sub]
+        y_test = test_reader.read_field('u')[-ntest:,::sub]
 else:
-    train_reader = MatReader(args.train_file)
-    test_reader = MatReader(args.test_file)
+    meta = load_pickle(args.eon_meta_file)
+    if args.data_mode == "single_split":
+        eon_data_file = args.eon_data_file or args.data_file
+        x_data, y_data, _ = eon_pkl_to_grid(load_pickle(eon_data_file), meta)
+        total = x_data.shape[0]
+        indices = np.arange(total)
+        if args.shuffle:
+            np.random.shuffle(indices)
+        split_idx = int(total * args.train_split)
+        train_idx = indices[:split_idx]
+        test_idx = indices[split_idx:]
+        if ntrain > len(train_idx) or ntest > len(test_idx):
+            raise ValueError(
+                f"Not enough samples for ntrain={ntrain}, ntest={ntest} with train split "
+                f"{args.train_split} (total={total})."
+            )
+        train_idx = train_idx[:ntrain]
+        test_idx = test_idx[:ntest]
+        x_train = x_data[train_idx]
+        y_train = y_data[train_idx]
+        x_test = x_data[test_idx]
+        y_test = y_data[test_idx]
+    else:
+        eon_train_file = args.eon_train_file or args.train_file
+        eon_test_file = args.eon_test_file or args.test_file
+        x_train, y_train, _ = eon_pkl_to_grid(load_pickle(eon_train_file), meta)
+        x_test, y_test, _ = eon_pkl_to_grid(load_pickle(eon_test_file), meta)
+        x_train = x_train[:ntrain]
+        y_train = y_train[:ntrain]
+        x_test = x_test[:ntest]
+        y_test = y_test[:ntest]
 
-    x_train = train_reader.read_field('a')[:ntrain,::sub]
-    y_train = train_reader.read_field('u')[:ntrain,::sub]
-    x_test = test_reader.read_field('a')[-ntest:,::sub]
-    y_test = test_reader.read_field('u')[-ntest:,::sub]
+if x_train.ndim == 2:
+    x_train = x_train.unsqueeze(-1)
+if x_test.ndim == 2:
+    x_test = x_test.unsqueeze(-1)
+if y_train.ndim == 3 and y_train.shape[-1] == 1:
+    y_train = y_train.squeeze(-1)
+if y_test.ndim == 3 and y_test.shape[-1] == 1:
+    y_test = y_test.squeeze(-1)
 
-x_train = x_train.reshape(ntrain,s,1)
-x_test = x_test.reshape(ntest,s,1)
+s = x_train.shape[1]
+in_channels = x_train.shape[-1]
 
 train_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(x_train, y_train), batch_size=batch_size, shuffle=True)
 test_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(x_test, y_test), batch_size=batch_size, shuffle=False)
 
 # model
-model = FNO1d(modes, width).cuda()
+model = FNO1d(modes, width, in_channels=in_channels, out_channels=1).cuda()
 print(count_params(model))
 
 ################################################################
@@ -275,8 +345,9 @@ for ep in range(epochs):
         optimizer.zero_grad()
         out = model(x)
 
-        mse = F.mse_loss(out.reshape(batch_size, -1), y.reshape(batch_size, -1), reduction='mean')
-        l2 = myloss(out.reshape(batch_size, -1), y.reshape(batch_size, -1))
+        bsz = x.shape[0]
+        mse = F.mse_loss(out.reshape(bsz, -1), y.reshape(bsz, -1), reduction='mean')
+        l2 = myloss(out.reshape(bsz, -1), y.reshape(bsz, -1))
         l2.backward() # use the l2 relative loss
 
         optimizer.step()
@@ -291,7 +362,8 @@ for ep in range(epochs):
             x, y = x.cuda(), y.cuda()
 
             out = model(x)
-            test_l2 += myloss(out.reshape(batch_size, -1), y.reshape(batch_size, -1)).item()
+            bsz = x.shape[0]
+            test_l2 += myloss(out.reshape(bsz, -1), y.reshape(bsz, -1)).item()
 
     train_mse /= len(train_loader)
     train_l2 /= ntrain
