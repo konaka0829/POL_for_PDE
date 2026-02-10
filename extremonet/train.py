@@ -34,6 +34,17 @@ def _to_tensor(x: Any, device: torch.device) -> torch.Tensor:
     return torch.tensor(np.asarray(x), device=device, dtype=torch.float32)
 
 
+def _infer_model_device(model: torch.nn.Module) -> torch.device:
+    # EON keeps most tensors as buffers; parameters may be empty.
+    first_param = next(model.parameters(), None)
+    if first_param is not None:
+        return first_param.device
+    first_buffer = next(model.buffers(), None)
+    if first_buffer is not None:
+        return first_buffer.device
+    return torch.device("cpu")
+
+
 def _batch_features(model: ExtremONet, x_query: torch.Tensor, u_sensors: torch.Tensor, idx: np.ndarray) -> torch.Tensor:
     u_b = u_sensors[idx]
     if x_query.ndim == 3:
@@ -119,7 +130,7 @@ def train_ridge(
     seed: int = 0,
     batch_size: int = 64,
 ) -> TrainResult:
-    device = next(model.parameters(), torch.tensor([])).device
+    device = _infer_model_device(model)
     x_t = _to_tensor(x_query, device)
     u_t = _to_tensor(u_sensors, device)
     y_t = _to_tensor(y_query, device)
