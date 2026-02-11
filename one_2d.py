@@ -1,4 +1,5 @@
 import argparse
+import os
 
 import numpy as np
 import torch
@@ -7,6 +8,13 @@ from timeit import default_timer
 from cli_utils import add_data_mode_args, validate_data_mode_args
 from one.one_config import add_one_optical_args
 from one.one_models import ONE2dDarcy
+from viz_utils import (
+    LearningCurve,
+    plot_2d_comparison,
+    plot_error_histogram,
+    plot_learning_curve,
+    rel_l2,
+)
 
 
 def _count_params(model: torch.nn.Module) -> int:
@@ -175,6 +183,11 @@ def main() -> None:
 
     myloss = LpLoss(size_average=False)
     y_normalizer.to(device)
+    viz_dir = os.path.join("visualizations", f"one_2d_{args.one_mode}")
+    os.makedirs(viz_dir, exist_ok=True)
+    hist_epochs = []
+    hist_train_rel_l2 = []
+    hist_test_rel_l2 = []
 
     for ep in range(epochs):
         model.train()
@@ -211,8 +224,56 @@ def main() -> None:
 
         train_l2 /= ntrain
         test_l2 /= ntest
+        hist_epochs.append(ep)
+        hist_train_rel_l2.append(train_l2)
+        hist_test_rel_l2.append(test_l2)
         t2 = default_timer()
         print(ep, t2 - t1, train_l2, test_l2)
+
+    try:
+        plot_learning_curve(
+            LearningCurve(
+                epochs=hist_epochs,
+                train=hist_train_rel_l2,
+                test=hist_test_rel_l2,
+                train_label="train (relL2)",
+                test_label="test (relL2)",
+                metric_name="relative L2",
+            ),
+            out_path_no_ext=os.path.join(viz_dir, "learning_curve_relL2"),
+            logy=True,
+            title=f"one_2d ({args.one_mode}): relative L2",
+        )
+
+        model.eval()
+        sample_ids = [0, min(1, ntest - 1), min(2, ntest - 1)]
+        per_sample_err = []
+
+        with torch.no_grad():
+            for i in range(ntest):
+                x_i = x_test[i : i + 1].to(device)
+                y_i = y_test[i : i + 1].to(device)
+                out_i = model(x_i).reshape(1, s, s)
+                out_i = y_normalizer.decode(out_i)
+                per_sample_err.append(rel_l2(out_i.reshape(-1), y_i.reshape(-1)))
+
+                if i in sample_ids:
+                    if args.one_mode == "tp_compat":
+                        coeff_norm = x_test[i, :, :, 0]
+                    else:
+                        coeff_norm = x_test[i].squeeze(-1)
+                    coeff_i = x_normalizer.decode(coeff_norm).squeeze()
+                    plot_2d_comparison(
+                        gt=y_i.squeeze().cpu(),
+                        pred=out_i.squeeze().cpu(),
+                        input_field=coeff_i.cpu(),
+                        out_path_no_ext=os.path.join(viz_dir, f"sample_{i:03d}"),
+                        suptitle=f"sample {i}  relL2={per_sample_err[-1]:.3g}",
+                    )
+
+        plot_error_histogram(per_sample_err, os.path.join(viz_dir, "test_relL2_hist"))
+    except Exception as e:
+        print(f"[viz] failed: {e}")
 
 
 if __name__ == "__main__":
