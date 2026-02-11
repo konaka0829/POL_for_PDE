@@ -124,3 +124,6 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Local third-party extracted references (do not track)
+third_party/ONE_PDE_public_ref/

@@ -157,6 +157,34 @@ python fourier_3d.py --data-mode single_split --data-file data/ns_data_V100_N100
 - `--T-in`（デフォルト: `10`）
 - `--T`（デフォルト: `40`）
 
+### ONE baselines（Stage A）
+FNO と同一のデータ処理・同一指標で比較できるよう、ONE ベースラインを追加しています。
+
+**Darcy（one_2d.py）**
+```bash
+python one_2d.py --data-mode separate_files \
+  --train-file data/piececonst_r421_N1024_smooth1.mat \
+  --test-file data/piececonst_r421_N1024_smooth2.mat
+python one_2d.py --data-mode single_split \
+  --data-file data/piececonst_r421_N1024_smooth1.mat
+```
+
+**Navier-Stokes（one_2d_time.py）**
+```bash
+python one_2d_time.py --data-mode separate_files \
+  --train-file data/ns_data_V100_N1000_T50_1.mat \
+  --test-file data/ns_data_V100_N1000_T50_2.mat
+python one_2d_time.py --data-mode single_split \
+  --data-file data/ns_data_V100_N1000_T50_1.mat \
+  --train-split 0.8 --shuffle
+```
+
+**スモークテスト（データ不要）**
+```bash
+python one_2d.py --smoke-test
+python one_2d_time.py --smoke-test
+```
+
 ### scripts/eval.py
 **実行例**
 ```bash
