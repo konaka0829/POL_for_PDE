@@ -77,6 +77,29 @@ python fourier_1d.py --data-mode separate_files --train-file data/burgers_train.
 - `--modes`（デフォルト: `16`）
 - `--width`（デフォルト: `64`）
 
+### rfm_1d.py
+`rfm_1d.py` は `fourier_1d.py` と同じ Burgers 1D データ（`burgers_data_R10.mat` の `a -> u`）を使って
+Random Feature Model (RFM) を学習・評価し、`visualizations/rfm_1d/` に可視化と `metrics.json` を保存します。
+
+**実行例**
+```bash
+python rfm_1d.py --data-mode single_split --data-file data/burgers_data_R10.mat \
+  --ntrain 64 --ntest 16 --sub 32 \
+  --m 64 --kmax 16 \
+  --lambda 1e-6 \
+  --nu-rf 0.31946787 --al-rf 0.1 --sig-rf 2.597733 \
+  --tau-g 15.045227 --al-g 2.9943917 --sig-g 1.7861565
+```
+
+**主要引数**
+- データ指定: `--data-mode`, `--data-file`, `--train-file`, `--test-file`, `--train-split`, `--seed`, `--shuffle`
+- データサイズ: `--ntrain`, `--ntest`, `--sub`
+- RFM本体: `--m`, `--kmax`, `--lambda`（内部では `lamreg = ntrain * lambda`）
+- RFフィルタ: `--nu-rf`, `--al-rf`, `--sig-rf`
+- GRF: `--tau-g`, `--al-g`, `--sig-g`（未指定時は自動設定）
+- バッチ: `--bsize-train`, `--bsize-test`, `--bsize-grf-train`, `--bsize-grf-test`, `--bsize-grf-sample`
+- 実行デバイス: `--cpu`（指定時はCPU固定）
+
 ### fourier_2d.py
 **実行例**
 ```bash
