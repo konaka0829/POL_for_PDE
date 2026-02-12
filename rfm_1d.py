@@ -61,6 +61,16 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         parser.error("--sub must be positive.")
     if args.ntrain <= 0 or args.ntest <= 0:
         parser.error("--ntrain and --ntest must be positive.")
+    if args.m <= 0:
+        parser.error("--m must be positive.")
+    if args.kmax <= 0:
+        parser.error("--kmax must be positive.")
+    if args.lambda_reg < 0:
+        parser.error("--lambda must be non-negative.")
+    if args.bsize_train <= 0 or args.bsize_test <= 0:
+        parser.error("--bsize-train and --bsize-test must be positive.")
+    if args.bsize_grf_train <= 0 or args.bsize_grf_test <= 0 or args.bsize_grf_sample <= 0:
+        parser.error("--bsize-grf-train, --bsize-grf-test, and --bsize-grf-sample must be positive.")
 
 
 def _load_data(args: argparse.Namespace) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
@@ -128,6 +138,8 @@ def main() -> None:
     x_train, y_train, x_test, y_test, K_fine = _load_data(args)
 
     K = int(x_train.shape[-1])
+    if K <= 0:
+        raise ValueError(f"Subsampled spatial size must be positive, but got K={K}.")
     if K % 2 != 0:
         raise ValueError(f"Subsampled spatial size K must be even for FFT, but got K={K}.")
     if x_test.shape[-1] != K:

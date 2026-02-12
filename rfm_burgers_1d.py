@@ -174,19 +174,45 @@ class RandomFeatureModel:
             a = a.to(self.device)
             y = y.to(self.device)
 
-            for j0 in range(0, self.m, self.bsize_grf_train):
-                j1 = min(j0 + self.bsize_grf_train, self.m)
-                rf_j = self.rf_batch(a, self.grf_g[j0:j1, :])
-                self.AstarY[j0:j1] += torch.sum(
-                    torch.trapz(torch.einsum("nmk,nk->nm", rf_j, y), dx=self.h), dim=0
+            ccc = 0
+            while True:
+                if self.m - ccc <= 0:
+                    break
+                if self.m - ccc >= self.bsize_grf_train:
+                    ay_gen = self.bsize_grf_train
+                else:
+                    ay_gen = self.m - ccc
+
+                rf = self.rf_batch(a, self.grf_g[ccc : ccc + ay_gen, :])
+                self.AstarY[ccc : ccc + ay_gen] += torch.sum(
+                    torch.trapz(torch.einsum("nmk,nk->nmk", rf, y), dx=self.h, dim=-1), dim=0
                 )
 
-                for l0 in range(0, j1, self.bsize_grf_train):
-                    l1 = min(l0 + self.bsize_grf_train, j1)
-                    rf_l = self.rf_batch(a, self.grf_g[l0:l1, :])
-                    self.AstarA[l0:l1, j0:j1] += torch.sum(
-                        torch.trapz(torch.einsum("nlk,nmk->nlm", rf_l, rf_j), dx=self.h), dim=0
+                cc = 0
+                while True:
+                    if ccc + 1 - cc <= 0:
+                        break
+                    if ccc + 1 - cc >= self.bsize_grf_train:
+                        aa_gen = self.bsize_grf_train
+                    else:
+                        aa_gen = ccc + 1 - cc
+
+                    rfcc = self.rf_batch(a, self.grf_g[cc : cc + aa_gen, :])
+                    self.AstarA[cc : cc + aa_gen, ccc : ccc + ay_gen] += torch.sum(
+                        torch.trapz(torch.einsum("nlk,nmk->nlmk", rfcc, rf), dx=self.h, dim=-1), dim=0
                     )
+                    cc += aa_gen
+
+                for k in range(ay_gen - 1):
+                    self.AstarA[ccc + 1 : ccc + 2 + k, ccc + 1 + k] += torch.sum(
+                        torch.trapz(
+                            torch.einsum("nmk,nk->nmk", rf[:, 1 : (k + 2), :], rf[:, 1 + k, :]),
+                            dx=self.h,
+                            dim=-1,
+                        ),
+                        dim=0,
+                    )
+                ccc += ay_gen
 
         self.AstarA = self.AstarA + self.AstarA.T - torch.diag(torch.diag(self.AstarA))
         self.AstarA /= self.m
@@ -195,7 +221,8 @@ class RandomFeatureModel:
             system = self.AstarA + self.lamreg * torch.eye(self.m, device=self.device)
             self.al_model = torch.linalg.solve(system, self.AstarY)
         else:
-            self.al_model = torch.linalg.lstsq(self.AstarA, self.AstarY).solution.squeeze()
+            # Keep alpha as 1D even when m == 1.
+            self.al_model = torch.linalg.lstsq(self.AstarA, self.AstarY).solution.reshape(-1)
 
     def predict(self, a: torch.Tensor) -> torch.Tensor:
         a = a.to(self.device)
