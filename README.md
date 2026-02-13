@@ -77,6 +77,91 @@ python fourier_1d.py --data-mode separate_files --train-file data/burgers_train.
 - `--modes`（デフォルト: `16`）
 - `--width`（デフォルト: `64`）
 
+### koopman_reservoir_1d.py
+**実行例**
+```bash
+python koopman_reservoir_1d.py \
+  --data-mode single_split --data-file data/burgers_data_R10.mat \
+  --ntrain 1000 --ntest 100 --sub 8 --seed 0 --shuffle \
+  --measure-basis fourier --measure-dim 128 \
+  --reservoir-dim 512 --washout 8 --leak-alpha 1.0 --spectral-radius 0.9 \
+  --decoder-basis grid --decoder-dim 0 \
+  --ridge-k 1e-6 --ridge-d 1e-6 \
+  --basis-normalize --stabilize-k
+```
+
+**引数とデフォルト値**
+- `--data-mode`：`single_split` / `separate_files`（デフォルト: `single_split`）
+- `--data-file`（デフォルト: `data/burgers_data_R10.mat`）
+- `--train-file` / `--test-file`（デフォルト: `None`）
+- `--train-split`（デフォルト: `0.8`）
+- `--seed`（デフォルト: `0`）
+- `--shuffle`（デフォルト: `False`）
+- `--ntrain`（デフォルト: `1000`）、`--ntest`（デフォルト: `100`）
+- `--sub`（デフォルト: `8`）
+- `--measure-basis`：`fourier/random_fourier/legendre/chebyshev/rbf/sensor`（デフォルト: `fourier`）
+- `--measure-dim`（デフォルト: `128`）
+- `--decoder-basis`：`grid/fourier/legendre/chebyshev/rbf`（デフォルト: `grid`）
+- `--decoder-dim`（デフォルト: `0`、`grid`以外では正値必須）
+- `--rbf-sigma`（デフォルト: `0.05`）
+- `--random-fourier-scale`（デフォルト: `4.0`）
+- `--basis-normalize`（デフォルト: `False`）
+- `--reservoir-dim`（デフォルト: `512`）
+- `--washout`（デフォルト: `8`）
+- `--leak-alpha`（デフォルト: `1.0`）
+- `--spectral-radius`（デフォルト: `0.9`）
+- `--input-scale`（デフォルト: `1.0`）
+- `--bias-scale`（デフォルト: `0.0`）
+- `--ridge-k`（デフォルト: `1e-6`）
+- `--ridge-d`（デフォルト: `1e-6`）
+- `--stabilize-k`（デフォルト: `False`）
+- `--device`：`auto/cpu/cuda`（デフォルト: `auto`）
+
+**ハイパーパラメータの意味（要点）**
+- データ分割系: `--ntrain/--ntest/--train-split/--shuffle/--seed` は評価のばらつきに直結。比較実験では固定する。
+- 解像度系: `--sub` は空間点数 `S` を決める（元が8192点なら `S=8192/sub`）。小さいほど高速、大きいほど高解像度。
+- 測定系: `--measure-basis/--measure-dim` は `u -> m` の情報圧縮を制御。`measure-dim` が小さすぎると情報落ちが大きい。
+- 基底安定化: `--basis-normalize` は基底行のスケールを揃え、ridge解の数値安定性を改善しやすい。
+- Reservoir容量: `--reservoir-dim` は潜在次元、`--washout` は非線形写像の深さ、`--leak-alpha` は更新の強さ。
+- Reservoir安定性: `--spectral-radius` は内部ダイナミクスの収縮/発散傾向を制御（一般に 1.0 未満は安定側）。
+- 入力注入: `--input-scale` は観測 `m` の効き方、`--bias-scale` はバイアスの強さを調整。
+- Koopman正則化: `--ridge-k` は `K` の過学習・不安定化抑制。`--stabilize-k` は必要時に半径を1以下へ再スケール。
+- Decoder系: `--decoder-basis/--decoder-dim/--ridge-d` は `z -> u` 復元の表現力と安定性を制御。
+
+**デフォルト実行時の出力と見方**
+- 実行:
+```bash
+python koopman_reservoir_1d.py
+```
+- 標準出力の主な行:
+  - `[info] device=...` 使用デバイス（`auto`ならGPU優先、不可ならCPU）。
+  - `[info] train=..., test=..., spatial_points=...` 実際に使われたデータ数と空間点数。
+  - `[info] reservoir_W_radius: initial=..., scaled=...` Reservoir行列 `W` の半径（スケーリング前後）。
+  - `[info] Koopman spectral radius: before=..., after=...` `K` の半径。`--stabilize-k` 有効時は `after<=1` が期待値。
+  - `[result] test relL2 mean=..., median=...` テスト相対L2誤差（小さいほど良い）。
+- 生成ファイル:
+  - `visualizations/koopman_reservoir_1d/test_relL2_hist.(png/pdf/svg)`  
+    誤差分布の広がりを見る。平均が同じでも裾が重い設定は不安定。
+  - `visualizations/koopman_reservoir_1d/sample_000..002.(png/pdf/svg)`  
+    `input(u0), GT(u1), Pred` の重なりを確認。ショック近傍の位相ズレ・振幅ズレを重点確認。
+
+**ハイパーパラメータ調査の進め方（推奨）**
+- 1. まず安定寄りの基準設定で1本回す（再現可能な比較軸）。
+```bash
+python koopman_reservoir_1d.py \
+  --data-mode single_split --data-file data/burgers_data_R10.mat \
+  --ntrain 1000 --ntest 100 --sub 8 --seed 0 --shuffle \
+  --measure-basis fourier --measure-dim 128 \
+  --reservoir-dim 512 --washout 8 --leak-alpha 1.0 --spectral-radius 0.9 \
+  --decoder-basis grid --ridge-k 1e-5 --ridge-d 1e-5 \
+  --basis-normalize --stabilize-k
+```
+- 2. 正則化を先に調整（`ridge-k`, `ridge-d` を `1e-6,1e-5,1e-4,1e-3` で探索）。
+- 3. 表現力を調整（`measure-dim: 64/128/256`, `reservoir-dim: 256/512/1024`）。
+- 4. 基底を切り替えて比較（例: `measure=fourier` vs `rbf`, `decoder=grid` vs `fourier`）。
+- 5. 最後に解像度を上げる（`sub=8` で探索後、候補のみ `sub=4` で再評価）。
+- 比較時は `seed`, `ntrain/ntest`, `sub`, 分割条件を固定し、`test relL2 mean/median` とヒストグラム形状を併用して判断する。
+
 ### fourier_2d.py
 **実行例**
 ```bash
