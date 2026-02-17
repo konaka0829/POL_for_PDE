@@ -244,6 +244,66 @@ python reservoir_burgers_1d.py \
 python reservoir_burgers_1d.py --dry-run --ntrain 8 --ntest 4 --sub 256
 ```
 
+**実行パターン（使い分け）**
+- 通常学習: 実データを指定して実行（`--data-mode single_split` または `--data-mode separate_files`）
+- 軽量確認: `--dry-run` でランダム疑似データを使い、shape/NaN/可視化出力を確認
+- 保存: `--save-model` を付けると `W_out`・ELM重み・センサ情報・設定を保存
+
+**引数とデフォルト値（`reservoir_burgers_1d.py`）**
+- データ関連
+- `--data-mode`（デフォルト: `single_split`）: `single_split` / `separate_files`
+- `--data-file`（デフォルト: `data/burgers_data_R10.mat`）: `single_split` 時の入力ファイル
+- `--train-file`（デフォルト: `None`）: `separate_files` 時の学習データ
+- `--test-file`（デフォルト: `None`）: `separate_files` 時の評価データ
+- `--train-split`（デフォルト: `0.8`）: `single_split` 時の学習割合
+- `--seed`（デフォルト: `0`）: 乱数シード（分割・ELMなど）
+- `--shuffle`（デフォルト: `False`）: `single_split` で分割前シャッフル
+- `--ntrain`（デフォルト: `1000`）: 学習サンプル数
+- `--ntest`（デフォルト: `100`）: テストサンプル数
+- `--sub`（デフォルト: `8`）: 空間間引き率（`s = 2**13 // sub`）
+- `--batch-size`（デフォルト: `20`）: DataLoader バッチサイズ
+
+- リザーバPDE関連
+- `--reservoir`（デフォルト: `reaction_diffusion`）: `reaction_diffusion|ks|burgers`
+- `--Tr`（デフォルト: `1.0`）: リザーバ発展時間
+- `--dt`（デフォルト: `0.01`）: 時間刻み
+- `--ks-dt`（デフォルト: `0.0`）: KS専用dt（`>0` なら `dt` を上書き）
+- `--K`（デフォルト: `5`）: 観測時刻数（等間隔）
+- `--feature-times`（デフォルト: `""`）: 観測時刻を直接指定（例: `"0.1,0.2,0.5"`）
+- `--rd-nu`（デフォルト: `1e-3`）: reaction-diffusion の拡散係数
+- `--rd-alpha`（デフォルト: `1.0`）: reaction-diffusion の線形成長係数
+- `--rd-beta`（デフォルト: `1.0`）: reaction-diffusion の三次非線形係数
+- `--res-burgers-nu`（デフォルト: `0.05`）: reservoir burgers の粘性係数
+- `--ks-dealias`（デフォルト: `False`）: KSで 2/3 dealiasing を有効化
+
+- 観測（Obs）関連
+- `--obs`（デフォルト: `full`）: `full|points`
+- `--J`（デフォルト: `128`）: `obs=points` 時のセンサ数
+- `--sensor-mode`（デフォルト: `equispaced`）: `equispaced|random`
+- `--sensor-seed`（デフォルト: `0`）: `sensor-mode=random` の乱数シード
+
+- 入力エンコード関連
+- `--input-scale`（デフォルト: `1.0`）: 初期条件スケール
+- `--input-shift`（デフォルト: `0.0`）: 初期条件シフト
+
+- ELM関連
+- `--use-elm`（デフォルト: `1`）: `0` で無効化（`h=Phi`）、`1` で有効化
+- `--elm-h`（デフォルト: `2048`）: ELM 隠れ次元
+- `--elm-activation`（デフォルト: `tanh`）: `tanh|relu`
+- `--elm-seed`（デフォルト: `0`）: ELM 重み生成シード
+- `--elm-weight-scale`（デフォルト: `0.0`）: `<=0` なら `1/sqrt(in_dim)` を自動使用
+- `--elm-bias-scale`（デフォルト: `1.0`）: ELM バイアス初期化スケール
+
+- Ridge関連
+- `--ridge-lambda`（デフォルト: `1e-4`）: L2 正則化係数
+- `--ridge-dtype`（デフォルト: `float64`）: `float32|float64`（数値安定性は `float64` 推奨）
+
+- 実行・出力関連
+- `--device`（デフォルト: `auto`）: `auto|cpu|cuda`
+- `--out-dir`（デフォルト: `visualizations/reservoir_burgers_1d`）: 図・設定出力先
+- `--save-model`（デフォルト: `""`）: モデル保存。引数なしで付けると `out-dir/model.pt`
+- `--dry-run`（デフォルト: `False`）: 外部データ不要の検証モード
+
 ## Datasets
 We provide the Burgers equation, Darcy flow, and Navier-Stokes equation datasets we used in the paper. 
 The data generation configuration can be found in the paper.
