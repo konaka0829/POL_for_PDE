@@ -193,6 +193,57 @@ python scripts/super_resolution.py --data-file data/ns_data_V1e-4_N20_T50_test.m
 - `--T`（デフォルト: `20`）
 - `--indent`（デフォルト: `1`）
 
+### reservoir_burgers_1d.py（Backprop-free: Reservoir PDE + ELM + Ridge）
+`AGENT.md` の仕様に対応した、Burgers（`a -> u`）向けの backprop-free 学習スクリプトです。  
+既存の FNO スクリプトを変更せず、新規追加モジュール `pol/` を利用します。
+
+**主な機能**
+- リザーバPDE（`reaction_diffusion` / `ks` / `burgers`）を固定で時間発展
+- 複数時刻観測で特徴 `Phi` を作成（`obs=full|points`）
+- 固定ランダム写像 ELM（任意）を適用
+- 最終 readout のみをリッジ回帰（`XtX/XtY` 蓄積 + 線形方程式求解）で学習
+- `viz_utils.py` を使い、誤差ヒストグラム・代表サンプル図を PNG/PDF/SVG 保存
+
+**実行例（reaction_diffusion）**
+```bash
+python reservoir_burgers_1d.py \
+  --data-mode single_split --data-file data/burgers_data_R10.mat \
+  --ntrain 1000 --ntest 100 --sub 8 --batch-size 20 \
+  --reservoir reaction_diffusion --Tr 1.0 --dt 0.01 --K 5 --obs full \
+  --use-elm 1 --elm-h 2048 --elm-activation tanh --elm-seed 0 \
+  --ridge-lambda 1e-4 --ridge-dtype float64 \
+  --out-dir visualizations/reservoir_burgers_rd --save-model
+```
+
+**実行例（KS）**
+```bash
+python reservoir_burgers_1d.py \
+  --data-mode single_split --data-file data/burgers_data_R10.mat \
+  --ntrain 1000 --ntest 100 --sub 8 --batch-size 20 \
+  --reservoir ks --Tr 0.5 --dt 0.001 --ks-dt 0.0005 --K 5 \
+  --obs points --J 256 --sensor-mode equispaced \
+  --use-elm 1 --elm-h 2048 --elm-activation tanh \
+  --ridge-lambda 1e-4 --ridge-dtype float64 \
+  --out-dir visualizations/reservoir_burgers_ks
+```
+
+**実行例（Reservoir Burgers）**
+```bash
+python reservoir_burgers_1d.py \
+  --data-mode single_split --data-file data/burgers_data_R10.mat \
+  --ntrain 1000 --ntest 100 --sub 8 --batch-size 20 \
+  --reservoir burgers --res-burgers-nu 0.05 --Tr 1.0 --dt 0.001 \
+  --feature-times \"0.1,0.3,0.6,1.0\" --obs full \
+  --use-elm 0 \
+  --ridge-lambda 1e-5 --ridge-dtype float64 \
+  --out-dir visualizations/reservoir_burgers_res
+```
+
+**dry-run（外部データ不要）**
+```bash
+python reservoir_burgers_1d.py --dry-run --ntrain 8 --ntest 4 --sub 256
+```
+
 ## Datasets
 We provide the Burgers equation, Darcy flow, and Navier-Stokes equation datasets we used in the paper. 
 The data generation configuration can be found in the paper.
