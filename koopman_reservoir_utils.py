@@ -1,4 +1,4 @@
-"""Utilities for backprop-free Koopman-Reservoir operator learning (1D).
+"""Utilities for backprop-free Koopman-Reservoir operator learning (1D/2D).
 
 This module provides:
   - basis construction for measurement/decoder
@@ -119,6 +119,141 @@ def build_basis_1d(
 
     if normalize:
         phi = normalize_basis_rows(phi, dx=dx)
+    return phi
+
+
+def _build_poly_basis_1d(kind: str, dim: int, grid_1d: torch.Tensor) -> torch.Tensor:
+    if dim <= 0:
+        raise ValueError(f"basis dim must be positive, got {dim}.")
+    if grid_1d.ndim != 1:
+        raise ValueError(f"grid must be 1D, got shape={tuple(grid_1d.shape)}")
+
+    t = 2.0 * grid_1d - 1.0  # [0,1] -> [-1,1]
+    phi = torch.zeros((dim, grid_1d.shape[0]), dtype=grid_1d.dtype, device=grid_1d.device)
+    phi[0] = 1.0
+    if dim > 1:
+        phi[1] = t
+
+    if kind == "legendre":
+        for n in range(2, dim):
+            phi[n] = ((2 * n - 1) * t * phi[n - 1] - (n - 1) * phi[n - 2]) / n
+        return phi
+    if kind == "chebyshev":
+        for n in range(2, dim):
+            phi[n] = 2.0 * t * phi[n - 1] - phi[n - 2]
+        return phi
+    raise ValueError(f"Unsupported polynomial basis '{kind}'.")
+
+
+def build_basis_2d(
+    basis_name: str,
+    dim: int,
+    x_grid: torch.Tensor,
+    y_grid: torch.Tensor,
+    *,
+    normalize: bool = False,
+    rbf_sigma: float = 0.05,
+    random_fourier_scale: float = 4.0,
+    seed: int = 0,
+) -> torch.Tensor:
+    # return phi: [dim, S] where S = sx * sy
+    if dim <= 0:
+        raise ValueError(f"basis dim must be positive, got {dim}.")
+    if x_grid.ndim != 1 or y_grid.ndim != 1:
+        raise ValueError(
+            f"x_grid/y_grid must be 1D, got {tuple(x_grid.shape)} and {tuple(y_grid.shape)}"
+        )
+    if rbf_sigma <= 0 and basis_name == "rbf":
+        raise ValueError(f"--rbf-sigma must be positive, got {rbf_sigma}.")
+
+    device = x_grid.device
+    dtype = x_grid.dtype
+    sx = int(x_grid.shape[0])
+    sy = int(y_grid.shape[0])
+    dx = float(1.0 / max(sx - 1, 1))
+    dy = float(1.0 / max(sy - 1, 1))
+    dxdy = dx * dy
+
+    xx, yy = torch.meshgrid(x_grid, y_grid, indexing="ij")
+    x_flat = xx.reshape(-1)
+    y_flat = yy.reshape(-1)
+    s_total = x_flat.shape[0]
+
+    if basis_name == "fourier":
+        rows: list[torch.Tensor] = [torch.ones((s_total,), dtype=dtype, device=device)]
+        seen_wavevectors: set[tuple[int, int]] = set()
+        k_max = 0
+        while len(rows) < dim:
+            k_max += 1
+            wavevectors: list[tuple[int, int]] = []
+            for kx in range(-k_max, k_max + 1):
+                for ky in range(-k_max, k_max + 1):
+                    if kx == 0 and ky == 0:
+                        continue
+                    # Canonical half-space to avoid +/- duplicates.
+                    if (kx > 0 or (kx == 0 and ky > 0)) and (kx, ky) not in seen_wavevectors:
+                        seen_wavevectors.add((kx, ky))
+                        wavevectors.append((kx, ky))
+            wavevectors.sort(key=lambda kk: (abs(kk[0]) + abs(kk[1]), max(abs(kk[0]), abs(kk[1]))))
+            for kx, ky in wavevectors:
+                if len(rows) >= dim:
+                    break
+                ang = 2.0 * np.pi * (float(kx) * x_flat + float(ky) * y_flat)
+                rows.append(torch.cos(ang))
+                if len(rows) >= dim:
+                    break
+                rows.append(torch.sin(ang))
+        phi = torch.stack(rows[:dim], dim=0)
+    elif basis_name == "random_fourier":
+        rng = np.random.default_rng(seed)
+        omega = torch.tensor(
+            rng.normal(loc=0.0, scale=random_fourier_scale, size=(dim, 2)),
+            dtype=dtype,
+            device=device,
+        )
+        phase = torch.tensor(
+            rng.uniform(low=0.0, high=2.0 * np.pi, size=(dim, 1)),
+            dtype=dtype,
+            device=device,
+        )
+        arg = 2.0 * np.pi * (omega[:, 0:1] * x_flat[None, :] + omega[:, 1:2] * y_flat[None, :]) + phase
+        phi = np.sqrt(2.0) * torch.cos(arg)
+    elif basis_name in {"legendre", "chebyshev"}:
+        n_side = int(np.ceil(np.sqrt(dim)))
+        bx = _build_poly_basis_1d(basis_name, n_side, x_grid)  # [n_side, sx]
+        by = _build_poly_basis_1d(basis_name, n_side, y_grid)  # [n_side, sy]
+        rows = []
+        for i in range(n_side):
+            for j in range(n_side):
+                if len(rows) >= dim:
+                    break
+                rows.append((bx[i][:, None] * by[j][None, :]).reshape(-1))
+            if len(rows) >= dim:
+                break
+        phi = torch.stack(rows, dim=0)
+    elif basis_name == "rbf":
+        n_side = int(np.ceil(np.sqrt(dim)))
+        cx = torch.linspace(0.0, 1.0, n_side, dtype=dtype, device=device)
+        cy = torch.linspace(0.0, 1.0, n_side, dtype=dtype, device=device)
+        cxx, cyy = torch.meshgrid(cx, cy, indexing="ij")
+        centers = torch.stack([cxx.reshape(-1), cyy.reshape(-1)], dim=1)[:dim]  # [dim,2]
+        diff_x = x_flat[None, :] - centers[:, 0:1]
+        diff_y = y_flat[None, :] - centers[:, 1:2]
+        phi = torch.exp(-(diff_x * diff_x + diff_y * diff_y) / (2.0 * (rbf_sigma**2)))
+    elif basis_name == "sensor":
+        n_side = int(np.ceil(np.sqrt(dim)))
+        idx_x = torch.linspace(0, sx - 1, n_side, device=device).round().long()
+        idx_y = torch.linspace(0, sy - 1, n_side, device=device).round().long()
+        ix_grid, iy_grid = torch.meshgrid(idx_x, idx_y, indexing="ij")
+        coords = torch.stack([ix_grid.reshape(-1), iy_grid.reshape(-1)], dim=1)[:dim]
+        flat_idx = coords[:, 0] * sy + coords[:, 1]
+        phi = torch.zeros((dim, s_total), dtype=dtype, device=device)
+        phi[torch.arange(dim, device=device), flat_idx] = 1.0 / max(dxdy, 1e-12)
+    else:
+        raise ValueError(f"Unknown basis '{basis_name}'.")
+
+    if normalize:
+        phi = normalize_basis_rows(phi, dx=dxdy)
     return phi
 
 

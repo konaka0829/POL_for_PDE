@@ -162,6 +162,67 @@ python koopman_reservoir_1d.py \
 - 5. 最後に解像度を上げる（`sub=8` で探索後、候補のみ `sub=4` で再評価）。
 - 比較時は `seed`, `ntrain/ntest`, `sub`, 分割条件を固定し、`test relL2 mean/median` とヒストグラム形状を併用して判断する。
 
+### koopman_reservoir_2d.py
+**実行例（separate_files）**
+```bash
+python koopman_reservoir_2d.py --data-mode separate_files \
+  --train-file data/piececonst_r421_N1024_smooth1.mat \
+  --test-file  data/piececonst_r421_N1024_smooth2.mat \
+  --ntrain 1000 --ntest 100 --r 5 --grid-size 421 \
+  --normalize unit_gaussian \
+  --measure-basis random_fourier --measure-dim 256 \
+  --reservoir-dim 512 --washout 8 --leak-alpha 1.0 --spectral-radius 0.9 \
+  --decoder-basis grid \
+  --ridge-k 1e-6 --ridge-d 1e-6 \
+  --basis-normalize --stabilize-k
+```
+
+**実行例（single_split）**
+```bash
+python koopman_reservoir_2d.py --data-mode single_split \
+  --data-file data/piececonst_r421_N1024_smooth1.mat \
+  --train-split 0.8 --shuffle --seed 0 \
+  --ntrain 1000 --ntest 100 --r 5 --grid-size 421 \
+  --normalize unit_gaussian \
+  --measure-basis rbf --measure-dim 256 \
+  --decoder-basis fourier --decoder-dim 256 \
+  --reservoir-dim 512 --washout 8 \
+  --ridge-k 1e-6 --ridge-d 1e-6 --basis-normalize
+```
+
+**smoke test（外部データ不要）**
+```bash
+python koopman_reservoir_2d.py --smoke-test --device cpu \
+  --ntrain 16 --ntest 4 \
+  --measure-basis random_fourier --measure-dim 64 \
+  --reservoir-dim 128 --washout 4 --leak-alpha 1.0 --spectral-radius 0.9 \
+  --decoder-basis grid \
+  --ridge-k 1e-6 --ridge-d 1e-6 \
+  --basis-normalize --stabilize-k
+```
+
+**主要引数とデフォルト値**
+- データ系:
+  - `--data-mode`（デフォルト: `separate_files`）
+  - `--data-file`（デフォルト: `data/piececonst_r421_N1024_smooth1.mat`）
+  - `--train-file`（デフォルト: `data/piececonst_r421_N1024_smooth1.mat`）
+  - `--test-file`（デフォルト: `data/piececonst_r421_N1024_smooth2.mat`）
+  - `--train-split`（デフォルト: `0.8`）, `--seed`（デフォルト: `0`）, `--shuffle`（デフォルト: `False`）
+  - `--ntrain`（デフォルト: `1000`）, `--ntest`（デフォルト: `100`）
+  - `--r`（デフォルト: `5`）, `--grid-size`（デフォルト: `421`）
+  - `--normalize`：`none/unit_gaussian`（デフォルト: `unit_gaussian`）
+- モデル系:
+  - `--measure-basis`：`fourier/random_fourier/legendre/chebyshev/rbf/sensor`（デフォルト: `random_fourier`）
+  - `--measure-dim`（デフォルト: `256`）
+  - `--decoder-basis`：`grid/fourier/legendre/chebyshev/rbf`（デフォルト: `grid`）
+  - `--decoder-dim`（デフォルト: `0`, `grid` 以外では正値必須）
+  - `--rbf-sigma`（デフォルト: `0.05`）, `--random-fourier-scale`（デフォルト: `4.0`）
+  - `--basis-normalize`（デフォルト: `False`）
+  - `--reservoir-dim`（デフォルト: `512`）, `--washout`（デフォルト: `8`）, `--leak-alpha`（デフォルト: `1.0`）
+  - `--spectral-radius`（デフォルト: `0.9`）, `--input-scale`（デフォルト: `1.0`）, `--bias-scale`（デフォルト: `0.0`）
+  - `--ridge-k`（デフォルト: `1e-6`）, `--ridge-d`（デフォルト: `1e-6`）, `--stabilize-k`（デフォルト: `False`）
+  - `--smoke-test`（デフォルト: `False`）, `--device`：`auto/cpu/cuda`（デフォルト: `auto`）
+
 ### fourier_2d.py
 **実行例**
 ```bash
