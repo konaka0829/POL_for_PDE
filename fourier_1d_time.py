@@ -25,6 +25,26 @@ torch.manual_seed(0)
 np.random.seed(0)
 
 
+class TimeGaussianNormalizer1D:
+    """Time-independent per-space normalization for [N,S,T]."""
+
+    def __init__(self, u_train: torch.Tensor, eps: float = 1e-5):
+        self.eps = eps
+        self.mean = torch.mean(u_train, dim=(0, 2), keepdim=True)
+        self.std = torch.std(u_train, dim=(0, 2), keepdim=True)
+
+    def encode(self, u: torch.Tensor) -> torch.Tensor:
+        return (u - self.mean) / (self.std + self.eps)
+
+    def decode(self, u: torch.Tensor) -> torch.Tensor:
+        return u * (self.std + self.eps) + self.mean
+
+    def to(self, device: torch.device) -> "TimeGaussianNormalizer1D":
+        self.mean = self.mean.to(device)
+        self.std = self.std.to(device)
+        return self
+
+
 class SpectralConv1d(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, modes1: int):
         super().__init__()
@@ -132,6 +152,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ntest", type=int, default=100)
     parser.add_argument("--sub", type=int, default=1)
     parser.add_argument("--S", type=int, default=1024)
+    parser.add_argument("--normalize", choices=("none", "unit_gaussian"), default="unit_gaussian")
     parser.add_argument("--T-in", type=int, default=1)
     parser.add_argument("--T", type=int, default=40)
     parser.add_argument("--step", type=int, default=1)
@@ -259,9 +280,20 @@ def main() -> None:
     device = _pick_device(args.device)
 
     train_a, train_u, test_a, test_u = _prepare_data(args)
+    normalizer: TimeGaussianNormalizer1D | None = None
+    if args.normalize == "unit_gaussian":
+        full_train = torch.cat([train_a, train_u], dim=-1)
+        normalizer = TimeGaussianNormalizer1D(full_train)
+        train_a = normalizer.encode(train_a)
+        train_u = normalizer.encode(train_u)
+        test_a = normalizer.encode(test_a)
+        test_u = normalizer.encode(test_u)
+
     ntrain, s, _ = train_a.shape
     ntest = test_a.shape[0]
     print(f"[info] device={device}, train={ntrain}, test={ntest}, S={s}, T_in={args.T_in}, T={args.T}")
+    id_baseline = rel_l2(test_a[:, :, -1:], test_u[:, :, :1])
+    print(f"[diag] persistence baseline relL2 (t+1 <- last input) = {id_baseline:.6f}")
 
     train_loader = torch.utils.data.DataLoader(
         torch.utils.data.TensorDataset(train_a, train_u), batch_size=args.batch_size, shuffle=True
@@ -378,7 +410,11 @@ def main() -> None:
         with torch.no_grad():
             for i in range(n_hist):
                 pred_i = _rollout_chunked(model, test_a_dev[i : i + 1], horizon=args.T, step=args.step).squeeze(0).cpu()
-                per_sample_full.append(rel_l2(pred_i, test_u_cpu[i]))
+                gt_i = test_u_cpu[i]
+                if normalizer is not None:
+                    gt_i = normalizer.decode(gt_i.unsqueeze(0)).squeeze(0)
+                    pred_i = normalizer.decode(pred_i.unsqueeze(0)).squeeze(0)
+                per_sample_full.append(rel_l2(pred_i, gt_i))
         plot_error_histogram(
             per_sample_full,
             os.path.join(viz_dir, f"test_full_relL2_hist_first{n_hist}"),
@@ -393,6 +429,11 @@ def main() -> None:
             for i in sample_ids:
                 pred_i = _rollout_chunked(model, test_a_dev[i : i + 1], horizon=args.T, step=args.step).squeeze(0).cpu()
                 gt_i = test_u_cpu[i]
+                input_i = test_a[i, :, 0]
+                if normalizer is not None:
+                    gt_i = normalizer.decode(gt_i.unsqueeze(0)).squeeze(0)
+                    pred_i = normalizer.decode(pred_i.unsqueeze(0)).squeeze(0)
+                    input_i = normalizer.decode(input_i.view(1, -1, 1)).view(-1)
                 plot_rel_l2_over_time_1d(
                     gt=gt_i,
                     pred=pred_i,
@@ -403,7 +444,7 @@ def main() -> None:
                         x=x_grid,
                         gt=gt_i[:, tt],
                         pred=pred_i[:, tt],
-                        input_u0=test_a[i, :, 0],
+                        input_u0=input_i,
                         out_path_no_ext=os.path.join(viz_dir, f"sample_{i:03d}_t{tt:03d}"),
                         title_prefix=f"sample {i}, t={tt}: ",
                     )

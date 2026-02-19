@@ -55,7 +55,7 @@ def _integrate_burgers(u0: np.ndarray, t_final: float, dt: float, record_steps: 
     steps = int(math.ceil(t_final / dt))
     if steps < 1:
         raise ValueError("T-final must be positive")
-    record_every = max(1, steps // record_steps)
+    t_targets = np.linspace(0.0, t_final, num=record_steps, dtype=np.float64)
 
     k = 2.0 * np.pi * np.fft.fftfreq(s, d=1.0 / s)
     ik = 1j * k
@@ -69,6 +69,12 @@ def _integrate_burgers(u0: np.ndarray, t_final: float, dt: float, record_steps: 
 
     t = 0.0
     c = 0
+    u = u0.astype(np.float64, copy=True)
+    while c < record_steps and t + 1e-12 >= t_targets[c]:
+        out[:, c] = u.astype(np.float32)
+        t_out[c] = float(t)
+        c += 1
+
     for n in range(steps):
         u = np.fft.ifft(u_hat).real
         nonlinear_hat = -0.5 * ik * np.fft.fft(u * u)
@@ -76,14 +82,12 @@ def _integrate_burgers(u0: np.ndarray, t_final: float, dt: float, record_steps: 
         # Semi-implicit update: explicit convection + implicit diffusion.
         u_hat = (u_hat + dt * nonlinear_hat) / (1.0 + dt * nu * k2)
         t += dt
-
-        if ((n + 1) % record_every == 0) and (c < record_steps):
-            out[:, c] = np.fft.ifft(u_hat).real.astype(np.float32)
+        u = np.fft.ifft(u_hat).real
+        while c < record_steps and t + 1e-12 >= t_targets[c]:
+            out[:, c] = u.astype(np.float32)
             t_out[c] = float(min(t, t_final))
             c += 1
 
-    # If record_steps is not an exact divisor, pad with final state.
-    u = np.fft.ifft(u_hat).real
     while c < record_steps:
         out[:, c] = u.astype(np.float32)
         t_out[c] = float(t_final)

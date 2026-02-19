@@ -59,12 +59,13 @@ def _build_parser() -> argparse.ArgumentParser:
     add_split_args(p, default_train_split=0.8, default_seed=0)
 
     p.add_argument("--field", type=str, default="u", help="MAT field name")
+    p.add_argument("--S", type=int, default=1024, help="Expected spatial size after subsampling")
     p.add_argument("--ntrain", type=int, default=200, help="Number of train trajectories")
     p.add_argument("--ntest", type=int, default=50, help="Number of test trajectories")
     p.add_argument("--sub", type=int, default=1, help="Spatial subsampling")
     p.add_argument("--T", type=int, default=40, help="Rollout horizon")
     p.add_argument("--t0", type=int, default=0, help="Rollout start time index")
-    p.add_argument("--normalize", choices=("none", "unit_gaussian"), default="none")
+    p.add_argument("--normalize", choices=("none", "unit_gaussian"), default="unit_gaussian")
 
     p.add_argument(
         "--measure-basis",
@@ -102,18 +103,26 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         validate_data_mode_args(args, parser)
     if args.ntrain <= 0 or args.ntest <= 0:
         parser.error("--ntrain and --ntest must be positive")
-    if args.sub <= 0 or args.T <= 0:
-        parser.error("--sub and --T must be positive")
+    if args.sub <= 0 or args.T <= 0 or args.S <= 1:
+        parser.error("--sub, --S and --T must be positive")
     if args.measure_dim <= 0:
         parser.error("--measure-dim must be positive")
     if args.decoder_basis != "grid" and args.decoder_dim <= 0:
         parser.error("--decoder-dim must be positive for non-grid decoder")
 
 
-def _to_time_last_1d(u: torch.Tensor) -> torch.Tensor:
+def _to_time_last_1d(u: torch.Tensor, expected_s: Optional[int]) -> torch.Tensor:
     if u.ndim != 3:
         raise ValueError(f"Expected 3D u, got {tuple(u.shape)}")
-    # Prefer [N,S,T] if second axis looks spatial (usually >= 16 and bigger than T).
+    if expected_s is not None:
+        if u.shape[1] == expected_s:
+            return u
+        if u.shape[2] == expected_s:
+            return u.transpose(1, 2)
+        raise ValueError(
+            f"Could not infer spatial axis from shape={tuple(u.shape)} with expected S={expected_s}. "
+            "Check --S/--sub or dataset layout."
+        )
     if u.shape[1] >= u.shape[2]:
         return u
     return u.transpose(1, 2)
@@ -134,9 +143,9 @@ def _generate_smoke_u(n: int, s: int, t_total: int, seed: int) -> torch.Tensor:
     return torch.from_numpy(u)
 
 
-def _read_u(path: str, field: str, sub: int) -> torch.Tensor:
+def _read_u(path: str, field: str, sub: int, expected_s_before_sub: Optional[int]) -> torch.Tensor:
     u = MatReader(path).read_field(field).float()
-    u = _to_time_last_1d(u)
+    u = _to_time_last_1d(u, expected_s=expected_s_before_sub)
     return u[:, ::sub, :]
 
 
@@ -190,11 +199,12 @@ def main() -> None:
 
     if args.smoke_test:
         t_total = max(args.T + args.t0 + 1, 50)
-        u_all = _generate_smoke_u(args.ntrain + args.ntest, s=256 // max(args.sub, 1), t_total=t_total, seed=args.seed)
+        smoke_s = max(16, args.S // max(args.sub, 1))
+        u_all = _generate_smoke_u(args.ntrain + args.ntest, s=smoke_s, t_total=t_total, seed=args.seed)
         u_train_raw = u_all[: args.ntrain]
         u_test_raw = u_all[args.ntrain : args.ntrain + args.ntest]
     elif args.data_mode == "single_split":
-        u_raw = _read_u(args.data_file, args.field, args.sub)
+        u_raw = _read_u(args.data_file, args.field, args.sub, expected_s_before_sub=args.S * args.sub)
         train_idx, test_idx = _split_traj_indices(u_raw.shape[0], args.train_split, args.shuffle, args.seed)
         if args.ntrain > len(train_idx) or args.ntest > len(test_idx):
             raise ValueError(
@@ -204,8 +214,8 @@ def main() -> None:
         u_train_raw = u_raw[train_idx[: args.ntrain]]
         u_test_raw = u_raw[test_idx[: args.ntest]]
     else:
-        u_train_raw = _read_u(args.train_file, args.field, args.sub)
-        u_test_raw = _read_u(args.test_file, args.field, args.sub)
+        u_train_raw = _read_u(args.train_file, args.field, args.sub, expected_s_before_sub=args.S * args.sub)
+        u_test_raw = _read_u(args.test_file, args.field, args.sub, expected_s_before_sub=args.S * args.sub)
         if args.ntrain > u_train_raw.shape[0] or args.ntest > u_test_raw.shape[0]:
             raise ValueError(
                 f"Not enough trajectories in separate_files mode: train={u_train_raw.shape[0]}, test={u_test_raw.shape[0]}, "
@@ -218,6 +228,10 @@ def main() -> None:
         raise ValueError(f"Expected u_train shape [N,S,T], got {tuple(u_train_raw.shape)}")
 
     ntrain, s, t_total = u_train_raw.shape
+    if s != args.S:
+        raise ValueError(
+            f"Spatial size mismatch after subsampling: expected {args.S} from --S, got {s}"
+        )
     ntest = u_test_raw.shape[0]
     t_eval = min(args.T, t_total - args.t0 - 1)
     if t_eval <= 0:
@@ -289,6 +303,10 @@ def main() -> None:
     m_train_all = measure_with_basis(u_train_all, psi, dx=dx)
     z_train_all = reservoir.encode(m_train_all)
     decoder_coef, decoder_phi = _fit_decoder(z_train_all, u_train_all, x_grid, args)
+    train_decode = rel_l2(_decode(z_train_all, decoder_coef, decoder_phi), u_train_all)
+    print(f"[diag] train decoder relL2={train_decode:.6f}")
+    train_one_step = rel_l2(_decode(z0 @ kt, decoder_coef, decoder_phi), y_pairs)
+    print(f"[diag] train one-step relL2={train_one_step:.6f}")
 
     # Rollout on test trajectories.
     per_step_err = np.zeros((ntest, t_eval), dtype=np.float64)

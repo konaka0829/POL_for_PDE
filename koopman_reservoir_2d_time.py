@@ -116,10 +116,18 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         parser.error("--decoder-dim must be positive for non-grid decoder")
 
 
-def _to_time_last_2d(u: torch.Tensor) -> torch.Tensor:
+def _to_time_last_2d(u: torch.Tensor, expected_s: Optional[int]) -> torch.Tensor:
     if u.ndim != 4:
         raise ValueError(f"Expected 4D u, got {tuple(u.shape)}")
-    # If already [N,S,S,T], keep. Otherwise swap last two if [N,T,S,S].
+    if expected_s is not None:
+        if u.shape[1] == expected_s and u.shape[2] == expected_s:
+            return u
+        if u.shape[2] == expected_s and u.shape[3] == expected_s:
+            return u.permute(0, 2, 3, 1)
+        raise ValueError(
+            f"Could not infer time-last layout from shape={tuple(u.shape)} with expected S={expected_s}. "
+            "Check --S/--sub or dataset layout."
+        )
     if u.shape[1] == u.shape[2]:
         return u
     if u.shape[2] == u.shape[3]:
@@ -145,9 +153,9 @@ def _generate_smoke_u(n: int, s: int, t_total: int, seed: int) -> torch.Tensor:
     return torch.from_numpy(out)
 
 
-def _read_u(path: str, field: str, sub: int) -> torch.Tensor:
+def _read_u(path: str, field: str, sub: int, expected_s_before_sub: Optional[int]) -> torch.Tensor:
     u = MatReader(path).read_field(field).float()
-    u = _to_time_last_2d(u)
+    u = _to_time_last_2d(u, expected_s=expected_s_before_sub)
     return u[:, ::sub, ::sub, :]
 
 
@@ -207,7 +215,7 @@ def main() -> None:
         u_train_raw = u_all[: args.ntrain]
         u_test_raw = u_all[args.ntrain : args.ntrain + args.ntest]
     elif args.data_mode == "single_split":
-        u_raw = _read_u(args.data_file, args.field, args.sub)
+        u_raw = _read_u(args.data_file, args.field, args.sub, expected_s_before_sub=args.S * args.sub)
         train_idx, test_idx = _split_traj_indices(u_raw.shape[0], args.train_split, args.shuffle, args.seed)
         if args.ntrain > len(train_idx) or args.ntest > len(test_idx):
             raise ValueError(
@@ -217,8 +225,8 @@ def main() -> None:
         u_train_raw = u_raw[train_idx[: args.ntrain]]
         u_test_raw = u_raw[test_idx[: args.ntest]]
     else:
-        u_train_raw = _read_u(args.train_file, args.field, args.sub)
-        u_test_raw = _read_u(args.test_file, args.field, args.sub)
+        u_train_raw = _read_u(args.train_file, args.field, args.sub, expected_s_before_sub=args.S * args.sub)
+        u_test_raw = _read_u(args.test_file, args.field, args.sub, expected_s_before_sub=args.S * args.sub)
         if args.ntrain > u_train_raw.shape[0] or args.ntest > u_test_raw.shape[0]:
             raise ValueError(
                 f"Not enough trajectories in separate_files mode: train={u_train_raw.shape[0]}, test={u_test_raw.shape[0]}, "
@@ -231,7 +239,7 @@ def main() -> None:
     if s1 != s2:
         raise ValueError(f"Expected square spatial grid, got {s1}x{s2}")
     if args.S != s1:
-        raise ValueError(f"Expected S={args.S} after subsampling, got {s1}")
+        raise ValueError(f"Expected S={args.S} after subsampling from --S, got {s1}")
     ntest = u_test_raw.shape[0]
 
     t_eval = min(args.T, t_total - args.t0 - 1)
@@ -250,13 +258,13 @@ def main() -> None:
     u_train = u_train.to(device)
     u_test = u_test.to(device)
 
-    s_total = args.S * args.S
+    s_total = s1 * s1
     x_pairs = u_train[..., :-1].permute(0, 3, 1, 2).reshape(-1, s_total)
     y_pairs = u_train[..., 1:].permute(0, 3, 1, 2).reshape(-1, s_total)
 
-    x_grid = torch.linspace(0.0, 1.0, args.S, dtype=torch.float32, device=device)
-    y_grid = torch.linspace(0.0, 1.0, args.S, dtype=torch.float32, device=device)
-    dxdy = float((1.0 / max(args.S - 1, 1)) ** 2)
+    x_grid = torch.linspace(0.0, 1.0, s1, dtype=torch.float32, device=device)
+    y_grid = torch.linspace(0.0, 1.0, s1, dtype=torch.float32, device=device)
+    dxdy = float((1.0 / max(s1 - 1, 1)) ** 2)
 
     psi = build_basis_2d(
         args.measure_basis,
@@ -307,8 +315,12 @@ def main() -> None:
     m_train_all = measure_with_basis(u_train_all, psi, dx=dxdy)
     z_train_all = reservoir.encode(m_train_all)
     decoder_coef, decoder_phi = _fit_decoder(z_train_all, u_train_all, x_grid, y_grid, args)
+    train_decode = rel_l2(_decode(z_train_all, decoder_coef, decoder_phi), u_train_all)
+    train_one_step = rel_l2(_decode(z0 @ kt, decoder_coef, decoder_phi), y_pairs)
+    print(f"[diag] train decoder relL2={train_decode:.6f}")
+    print(f"[diag] train one-step relL2={train_one_step:.6f}")
 
-    pred_all = torch.zeros((ntest, args.S, args.S, t_eval), dtype=torch.float32, device=device)
+    pred_all = torch.zeros((ntest, s1, s1, t_eval), dtype=torch.float32, device=device)
 
     with torch.no_grad():
         for i in range(ntest):
@@ -318,7 +330,7 @@ def main() -> None:
             for k in range(t_eval):
                 z = z @ kt
                 u_hat = _decode(z, decoder_coef, decoder_phi)
-                pred_all[i, :, :, k] = u_hat.reshape(args.S, args.S)
+                pred_all[i, :, :, k] = u_hat.reshape(s1, s1)
 
     gt_all = u_test[:, :, :, args.t0 + 1 : args.t0 + 1 + t_eval]
 

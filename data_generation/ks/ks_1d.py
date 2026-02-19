@@ -69,7 +69,7 @@ def _integrate_ks(u0: np.ndarray, t_final: float, dt: float, record_steps: int) 
     steps = int(math.ceil(t_final / dt))
     if steps < 1:
         raise ValueError("T-final must be positive")
-    record_every = max(1, steps // record_steps)
+    t_targets = np.linspace(0.0, t_final, num=record_steps, dtype=np.float64)
 
     # Periodic domain [0, 2pi); derivative is ik with integer k.
     k = np.fft.fftfreq(s, d=1.0 / s)
@@ -87,6 +87,11 @@ def _integrate_ks(u0: np.ndarray, t_final: float, dt: float, record_steps: int) 
     t_out = np.zeros((record_steps,), dtype=np.float32)
     t = 0.0
     c = 0
+    u = u0.astype(np.float64, copy=True)
+    while c < record_steps and t + 1e-12 >= t_targets[c]:
+        out[:, c] = u.astype(np.float32)
+        t_out[c] = float(t)
+        c += 1
 
     for n in range(steps):
         Nv = N(v)
@@ -99,12 +104,13 @@ def _integrate_ks(u0: np.ndarray, t_final: float, dt: float, record_steps: int) 
         v = E * v + f1 * Nv + 2.0 * f2 * (Na + Nb) + f3 * Nc
 
         t += dt
-        if ((n + 1) % record_every == 0) and (c < record_steps):
-            out[:, c] = np.fft.ifft(v).real.astype(np.float32)
+        u = np.fft.ifft(v).real
+        while c < record_steps and t + 1e-12 >= t_targets[c]:
+            out[:, c] = u.astype(np.float32)
             t_out[c] = float(min(t, t_final))
             c += 1
 
-    final_u = np.fft.ifft(v).real.astype(np.float32)
+    final_u = u.astype(np.float32)
     while c < record_steps:
         out[:, c] = final_u
         t_out[c] = float(t_final)

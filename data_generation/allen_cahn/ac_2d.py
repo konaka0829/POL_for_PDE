@@ -55,7 +55,7 @@ def _integrate_allen_cahn(u0: np.ndarray, t_final: float, dt: float, record_step
     steps = int(math.ceil(t_final / dt))
     if steps < 1:
         raise ValueError("T-final must be positive")
-    record_every = max(1, steps // record_steps)
+    t_targets = np.linspace(0.0, t_final, num=record_steps, dtype=np.float64)
 
     k = 2.0 * np.pi * np.fft.fftfreq(s, d=1.0 / s)
     kx, ky = np.meshgrid(k, k, indexing="ij")
@@ -67,6 +67,11 @@ def _integrate_allen_cahn(u0: np.ndarray, t_final: float, dt: float, record_step
     t_out = np.zeros((record_steps,), dtype=np.float32)
     t = 0.0
     c = 0
+    u = u0.astype(np.float64, copy=True)
+    while c < record_steps and t + 1e-12 >= t_targets[c]:
+        out[:, :, c] = u.astype(np.float32)
+        t_out[c] = float(t)
+        c += 1
 
     for n in range(steps):
         u = np.fft.ifft2(u_hat).real
@@ -78,12 +83,13 @@ def _integrate_allen_cahn(u0: np.ndarray, t_final: float, dt: float, record_step
         u_hat = (u_hat + dt * nonlinear_hat) / denom
 
         t += dt
-        if ((n + 1) % record_every == 0) and (c < record_steps):
-            out[:, :, c] = np.fft.ifft2(u_hat).real.astype(np.float32)
+        u = np.fft.ifft2(u_hat).real
+        while c < record_steps and t + 1e-12 >= t_targets[c]:
+            out[:, :, c] = u.astype(np.float32)
             t_out[c] = float(min(t, t_final))
             c += 1
 
-    final_u = np.fft.ifft2(u_hat).real.astype(np.float32)
+    final_u = u.astype(np.float32)
     while c < record_steps:
         out[:, :, c] = final_u
         t_out[c] = float(t_final)

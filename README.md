@@ -372,7 +372,7 @@ python fourier_1d_time.py --data-mode single_split --data-file data/burgers_1d_t
 ### 1D 時系列 KRO（rollout）
 ```bash
 python koopman_reservoir_1d_time.py --data-mode single_split --data-file data/burgers_1d_ts.mat \
-  --ntrain 100 --ntest 20 --sub 1 --T 40 --t0 0 --seed 0 --shuffle \
+  --ntrain 100 --ntest 20 --sub 1 --S 1024 --T 40 --t0 0 --seed 0 --shuffle \
   --measure-basis fourier --measure-dim 128 \
   --reservoir-dim 256 --washout 8 --leak-alpha 1.0 --spectral-radius 0.9 \
   --decoder-basis grid --ridge-k 1e-6 --ridge-d 1e-6 --basis-normalize --stabilize-k
@@ -461,10 +461,10 @@ python koopman_reservoir_2d_time.py --smoke-test --device cpu \
   - `--train-split`（デフォルト: `0.8`）, `--seed`（デフォルト: `0`）, `--shuffle`（デフォルト: `False`）
   - `--field`（デフォルト: `u`）
   - `--ntrain`（デフォルト: `200`）, `--ntest`（デフォルト: `50`）: いずれも軌道数。
-  - `--sub`（デフォルト: `1`）
+  - `--sub`（デフォルト: `1`）, `--S`（デフォルト: `1024`）: `S` は subsampling 後の空間サイズ。
 - rollout/正規化:
   - `--T`（デフォルト: `40`）, `--t0`（デフォルト: `0`）
-  - `--normalize`（デフォルト: `none`）: `none/unit_gaussian`
+  - `--normalize`（デフォルト: `unit_gaussian`）: `none/unit_gaussian`
 - 測定基底:
   - `--measure-basis`（デフォルト: `fourier`）
   - `--measure-dim`（デフォルト: `128`）
@@ -488,7 +488,7 @@ python koopman_reservoir_2d_time.py --smoke-test --device cpu \
   - `--train-split`（デフォルト: `0.8`）, `--seed`（デフォルト: `0`）, `--shuffle`（デフォルト: `False`）
   - `--field`（デフォルト: `u`）
   - `--ntrain`（デフォルト: `100`）, `--ntest`（デフォルト: `20`）: いずれも軌道数。
-  - `--sub`（デフォルト: `1`）, `--S`（デフォルト: `64`）
+  - `--sub`（デフォルト: `1`）, `--S`（デフォルト: `64`）: `S` は subsampling 後の空間サイズ。
 - rollout/正規化:
   - `--T`（デフォルト: `40`）, `--t0`（デフォルト: `0`）
   - `--normalize`（デフォルト: `none`）: `none/unit_gaussian`

@@ -161,6 +161,23 @@ class FNO2d(nn.Module):
         gridy = gridy.reshape(1, 1, size_y, 1).repeat([batchsize, size_x, 1, 1])
         return torch.cat((gridx, gridy), dim=-1).to(device)
 
+
+def _rollout_chunked_2d(model, xx, horizon, step):
+    """Autoregressive rollout for horizon steps; returns (B,S,S,horizon)."""
+    preds = []
+    state = xx
+    t = 0
+    while t < horizon:
+        chunk = min(step, horizon - t)
+        chunk_preds = []
+        for _ in range(chunk):
+            im = model(state)
+            chunk_preds.append(im)
+            state = torch.cat((state[..., 1:], im), dim=-1)
+        preds.append(torch.cat(chunk_preds, dim=-1))
+        t += chunk
+    return torch.cat(preds, dim=-1)
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Fourier Neural Operator 2D Time")
     add_data_mode_args(
@@ -289,28 +306,24 @@ optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=iterations)
 
 myloss = LpLoss(size_average=False)
+n_chunks = len(range(0, T, step))
 for ep in range(epochs):
     model.train()
     t1 = default_timer()
     train_l2_step = 0
     train_l2_full = 0
     for xx, yy in train_loader:
-        loss = 0
         xx = xx.to(device)
         yy = yy.to(device)
+        bs = xx.shape[0]
+        pred = _rollout_chunked_2d(model, xx, horizon=T, step=step)
 
+        loss = 0
         for t in range(0, T, step):
-            y = yy[..., t:t + step]
-            im = model(xx)
-            bs = xx.shape[0]
-            loss += myloss(im.reshape(bs, -1), y.reshape(bs, -1))
-
-            if t == 0:
-                pred = im
-            else:
-                pred = torch.cat((pred, im), -1)
-
-            xx = torch.cat((xx[..., step:], im), dim=-1)
+            h = min(step, T - t)
+            y = yy[..., t:t + h]
+            p = pred[..., t:t + h]
+            loss += myloss(p.reshape(bs, -1), y.reshape(bs, -1))
 
         train_l2_step += loss.item()
         l2_full = myloss(pred.reshape(bs, -1), yy.reshape(bs, -1))
@@ -325,35 +338,30 @@ for ep in range(epochs):
     test_l2_full = 0
     with torch.no_grad():
         for xx, yy in test_loader:
-            loss = 0
             xx = xx.to(device)
             yy = yy.to(device)
+            bs = xx.shape[0]
+            pred = _rollout_chunked_2d(model, xx, horizon=T, step=step)
 
+            loss = 0
             for t in range(0, T, step):
-                y = yy[..., t:t + step]
-                im = model(xx)
-                bs = xx.shape[0]
-                loss += myloss(im.reshape(bs, -1), y.reshape(bs, -1))
-
-                if t == 0:
-                    pred = im
-                else:
-                    pred = torch.cat((pred, im), -1)
-
-                xx = torch.cat((xx[..., step:], im), dim=-1)
+                h = min(step, T - t)
+                y = yy[..., t:t + h]
+                p = pred[..., t:t + h]
+                loss += myloss(p.reshape(bs, -1), y.reshape(bs, -1))
 
             test_l2_step += loss.item()
             test_l2_full += myloss(pred.reshape(bs, -1), yy.reshape(bs, -1)).item()
 
     t2 = default_timer()
-    print(ep, t2 - t1, train_l2_step / ntrain / (T / step), train_l2_full / ntrain, test_l2_step / ntest / (T / step),
+    print(ep, t2 - t1, train_l2_step / ntrain / n_chunks, train_l2_full / ntrain, test_l2_step / ntest / n_chunks,
           test_l2_full / ntest)
 
     # store history for plotting
     hist_epochs.append(ep)
-    hist_train_step.append(train_l2_step / ntrain / (T / step))
+    hist_train_step.append(train_l2_step / ntrain / n_chunks)
     hist_train_full.append(train_l2_full / ntrain)
-    hist_test_step.append(test_l2_step / ntest / (T / step))
+    hist_test_step.append(test_l2_step / ntest / n_chunks)
     hist_test_full.append(test_l2_full / ntest)
 # torch.save(model, path_model)
 
@@ -391,12 +399,7 @@ try:
     def _rollout_autoregressive(xx0: torch.Tensor) -> torch.Tensor:
         """Roll out the model autoregressively for T steps (batch, S, S, T)."""
         xx = xx0.to(device)
-        preds = []
-        for _t in range(0, T, step):
-            im = model(xx)
-            preds.append(im)
-            xx = torch.cat((xx[..., step:], im), dim=-1)
-        return torch.cat(preds, dim=-1)
+        return _rollout_chunked_2d(model, xx, horizon=T, step=step)
 
     model.eval()
     # Qualitative plots for a few test samples
