@@ -339,6 +339,181 @@ python scripts/super_resolution.py --data-file data/ns_data_V1e-4_N20_T50_test.m
 - `--T`（デフォルト: `20`）
 - `--indent`（デフォルト: `1`）
 
+## 時系列PDE拡張（rollout）
+### 重要なデータ規約
+- 時系列データは **time-last** で統一する。
+  - 1D: `u.shape = [N, S, T_total]`
+  - 2D: `u.shape = [N, S, S, T_total]`
+- train/test 分割は必ず **軌道（初期条件）単位** で行う。
+  - 先に軌道を分割してから `(t -> t+1)` ペアを作る。
+  - 全ペアを作ってからシャッフル分割すると、同一軌道が train/test に混ざりリークするため禁止。
+
+### 時系列データ生成
+```bash
+python data_generation/burgers/burgers_1d_time.py \
+  --out data/burgers_1d_ts.mat \
+  --N 200 --S 1024 --T-final 1.0 --dt 1e-4 --record-steps 200 --nu 1e-2 --seed 0
+
+python data_generation/ks/ks_1d.py \
+  --out data/ks_1d_ts.mat \
+  --N 200 --S 1024 --T-final 50.0 --dt 2.5e-3 --record-steps 200 --seed 0
+
+python data_generation/allen_cahn/ac_2d.py \
+  --out data/allen_cahn_2d_ts.mat \
+  --N 200 --S 64 --T-final 1.0 --dt 1e-3 --record-steps 200 --epsilon 0.01 --seed 0
+```
+
+### 1D 時系列 FNO
+```bash
+python fourier_1d_time.py --data-mode single_split --data-file data/burgers_1d_ts.mat \
+  --ntrain 100 --ntest 20 --sub 1 --S 1024 --T-in 1 --T 50 --step 1 --epochs 10
+```
+
+### 1D 時系列 KRO（rollout）
+```bash
+python koopman_reservoir_1d_time.py --data-mode single_split --data-file data/burgers_1d_ts.mat \
+  --ntrain 100 --ntest 20 --sub 1 --T 40 --t0 0 --seed 0 --shuffle \
+  --measure-basis fourier --measure-dim 128 \
+  --reservoir-dim 256 --washout 8 --leak-alpha 1.0 --spectral-radius 0.9 \
+  --decoder-basis grid --ridge-k 1e-6 --ridge-d 1e-6 --basis-normalize --stabilize-k
+```
+
+### 2D 時系列 KRO（rollout）
+```bash
+python koopman_reservoir_2d_time.py --data-mode single_split --data-file data/allen_cahn_2d_ts.mat \
+  --ntrain 80 --ntest 20 --sub 1 --S 64 --T 40 --t0 0 \
+  --measure-basis random_fourier --measure-dim 256 \
+  --reservoir-dim 512 --washout 8 --leak-alpha 1.0 --spectral-radius 0.9 \
+  --decoder-basis grid --ridge-k 1e-6 --ridge-d 1e-6 --basis-normalize --stabilize-k
+```
+
+### 2D 時系列 KRO smoke test（外部データ不要）
+```bash
+python koopman_reservoir_2d_time.py --smoke-test --device cpu \
+  --ntrain 16 --ntest 4 --S 64 --T 20 \
+  --measure-basis random_fourier --measure-dim 64 \
+  --reservoir-dim 128 --washout 4 \
+  --decoder-basis grid --ridge-k 1e-6 --ridge-d 1e-6 --basis-normalize --stabilize-k
+```
+
+### 時系列スクリプトの引数とデフォルト値（詳細）
+以下は本リポジトリで追加した時系列用スクリプトの主要引数一覧。
+
+#### data_generation/burgers/burgers_1d_time.py
+- `--out`（デフォルト: `data/burgers_1d_ts.mat`）: 出力 MAT ファイル。
+- `--N`（デフォルト: `1000`）: 軌道数。
+- `--S`（デフォルト: `1024`）: 空間格子点数。
+- `--T-final`（デフォルト: `1.0`）: 終了時刻。
+- `--dt`（デフォルト: `1e-4`）: 内部時間刻み。
+- `--record-steps`（デフォルト: `200`）: 保存スナップショット数（`u[N,S,T_total]` の `T_total`）。
+- `--nu`（デフォルト: `1e-2`）: 粘性係数。
+- `--seed`（デフォルト: `0`）: 乱数シード。
+- `--alpha`（デフォルト: `2.0`）, `--tau`（デフォルト: `7.0`）, `--scale`（デフォルト: `1.0`）: GaussianRF 初期条件の形状/スケール。
+- `--device`（デフォルト: `auto`）: `cpu/cuda/auto`。
+
+#### data_generation/ks/ks_1d.py
+- `--out`（デフォルト: `data/ks_1d_ts.mat`）
+- `--N`（デフォルト: `200`）
+- `--S`（デフォルト: `1024`）
+- `--T-final`（デフォルト: `50.0`）
+- `--dt`（デフォルト: `2.5e-3`）
+- `--record-steps`（デフォルト: `200`）
+- `--seed`（デフォルト: `0`）
+- `--alpha`（デフォルト: `2.0`）, `--tau`（デフォルト: `7.0`）, `--scale`（デフォルト: `1.0`）
+- `--device`（デフォルト: `auto`）
+
+#### data_generation/allen_cahn/ac_2d.py
+- `--out`（デフォルト: `data/allen_cahn_2d_ts.mat`）
+- `--N`（デフォルト: `200`）
+- `--S`（デフォルト: `64`）
+- `--T-final`（デフォルト: `1.0`）
+- `--dt`（デフォルト: `1e-3`）
+- `--record-steps`（デフォルト: `200`）
+- `--epsilon`（デフォルト: `0.01`）: Allen–Cahn の係数。
+- `--seed`（デフォルト: `0`）
+- `--alpha`（デフォルト: `2.5`）, `--tau`（デフォルト: `7.0`）, `--scale`（デフォルト: `1.0`）
+- `--device`（デフォルト: `auto`）
+
+#### fourier_1d_time.py
+- データ分割:
+  - `--data-mode`（デフォルト: `single_split`）
+  - `--data-file`（デフォルト: `data/burgers_1d_ts.mat`）
+  - `--train-file` / `--test-file`（デフォルト: `None`）
+  - `--train-split`（デフォルト: `0.8`）, `--seed`（デフォルト: `0`）, `--shuffle`（デフォルト: `False`）
+  - `--field`（デフォルト: `u`）
+- 形状/時系列:
+  - `--ntrain`（デフォルト: `1000`）, `--ntest`（デフォルト: `100`）
+  - `--sub`（デフォルト: `1`）, `--S`（デフォルト: `1024`）
+  - `--T-in`（デフォルト: `1`）, `--T`（デフォルト: `40`）, `--step`（デフォルト: `1`）
+- 学習:
+  - `--batch-size`（デフォルト: `20`）
+  - `--learning-rate`（デフォルト: `0.001`）
+  - `--epochs`（デフォルト: `500`）
+  - `--modes`（デフォルト: `16`）
+  - `--width`（デフォルト: `64`）
+  - `--device`（デフォルト: `auto`）
+
+#### koopman_reservoir_1d_time.py
+- データ分割:
+  - `--data-mode`（デフォルト: `single_split`）
+  - `--data-file`（デフォルト: `data/burgers_1d_ts.mat`）
+  - `--train-file` / `--test-file`（デフォルト: `None`）
+  - `--train-split`（デフォルト: `0.8`）, `--seed`（デフォルト: `0`）, `--shuffle`（デフォルト: `False`）
+  - `--field`（デフォルト: `u`）
+  - `--ntrain`（デフォルト: `200`）, `--ntest`（デフォルト: `50`）: いずれも軌道数。
+  - `--sub`（デフォルト: `1`）
+- rollout/正規化:
+  - `--T`（デフォルト: `40`）, `--t0`（デフォルト: `0`）
+  - `--normalize`（デフォルト: `none`）: `none/unit_gaussian`
+- 測定基底:
+  - `--measure-basis`（デフォルト: `fourier`）
+  - `--measure-dim`（デフォルト: `128`）
+- Decoder:
+  - `--decoder-basis`（デフォルト: `grid`）
+  - `--decoder-dim`（デフォルト: `0`, grid以外では正値必須）
+  - `--rbf-sigma`（デフォルト: `0.05`）, `--random-fourier-scale`（デフォルト: `4.0`）
+  - `--basis-normalize`（デフォルト: `False`）
+- Reservoir/Koopman:
+  - `--reservoir-dim`（デフォルト: `512`）, `--washout`（デフォルト: `8`）, `--leak-alpha`（デフォルト: `1.0`）
+  - `--spectral-radius`（デフォルト: `0.9`）, `--input-scale`（デフォルト: `1.0`）, `--bias-scale`（デフォルト: `0.0`）
+  - `--ridge-k`（デフォルト: `1e-6`）, `--ridge-d`（デフォルト: `1e-6`）
+  - `--stabilize-k`（デフォルト: `False`）
+  - `--smoke-test`（デフォルト: `False`）, `--device`（デフォルト: `auto`）
+
+#### koopman_reservoir_2d_time.py
+- データ分割:
+  - `--data-mode`（デフォルト: `single_split`）
+  - `--data-file`（デフォルト: `data/allen_cahn_2d_ts.mat`）
+  - `--train-file` / `--test-file`（デフォルト: `None`）
+  - `--train-split`（デフォルト: `0.8`）, `--seed`（デフォルト: `0`）, `--shuffle`（デフォルト: `False`）
+  - `--field`（デフォルト: `u`）
+  - `--ntrain`（デフォルト: `100`）, `--ntest`（デフォルト: `20`）: いずれも軌道数。
+  - `--sub`（デフォルト: `1`）, `--S`（デフォルト: `64`）
+- rollout/正規化:
+  - `--T`（デフォルト: `40`）, `--t0`（デフォルト: `0`）
+  - `--normalize`（デフォルト: `none`）: `none/unit_gaussian`
+- 測定基底:
+  - `--measure-basis`（デフォルト: `random_fourier`）
+  - `--measure-dim`（デフォルト: `256`）
+- Decoder:
+  - `--decoder-basis`（デフォルト: `grid`）
+  - `--decoder-dim`（デフォルト: `0`, grid以外では正値必須）
+  - `--rbf-sigma`（デフォルト: `0.05`）, `--random-fourier-scale`（デフォルト: `4.0`）
+  - `--basis-normalize`（デフォルト: `False`）
+- Reservoir/Koopman:
+  - `--reservoir-dim`（デフォルト: `512`）, `--washout`（デフォルト: `8`）, `--leak-alpha`（デフォルト: `1.0`）
+  - `--spectral-radius`（デフォルト: `0.9`）, `--input-scale`（デフォルト: `1.0`）, `--bias-scale`（デフォルト: `0.0`）
+  - `--ridge-k`（デフォルト: `1e-6`）, `--ridge-d`（デフォルト: `1e-6`）
+  - `--stabilize-k`（デフォルト: `False`）
+  - `--smoke-test`（デフォルト: `False`）, `--device`（デフォルト: `auto`）
+
+### ハイパーパラメータ調整の実務順（時系列）
+1. まず `--T` を短くして（例: 20）動作確認。
+2. KRO は `--ridge-k/--ridge-d` を先に探索（`1e-6, 1e-5, 1e-4`）。
+3. その後 `--measure-dim`, `--reservoir-dim` を増やして表現力を上げる。
+4. 最後に `--T` を本命の長さに伸ばして長期 rollout を評価。
+5. 比較実験では `seed`, `ntrain/ntest`, `train-split`, `shuffle` を固定。
+
 ## Datasets
 We provide the Burgers equation, Darcy flow, and Navier-Stokes equation datasets we used in the paper. 
 The data generation configuration can be found in the paper.

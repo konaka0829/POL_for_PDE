@@ -374,3 +374,57 @@ def plot_rel_l2_over_time(
     paths = save_figure_all_formats(fig, out_path_no_ext)
     plt.close(fig)
     return paths
+
+
+def plot_rel_l2_over_time_1d(
+    gt: ArrayLike,
+    pred: ArrayLike,
+    out_path_no_ext: str,
+    eps: float = 1e-12,
+    title: Optional[str] = None,
+) -> Tuple[str, str, str]:
+    """Compute rel L2 per time index for 1D space-time fields.
+
+    Accepts:
+      - (S, T): single trajectory
+      - (N, S, T): multiple trajectories (averages over N)
+    """
+    y = np.squeeze(_to_numpy(gt))
+    p = np.squeeze(_to_numpy(pred))
+
+    if y.ndim == 2 and p.ndim == 2:
+        y = y[None, ...]
+        p = p[None, ...]
+    if y.ndim != 3 or p.ndim != 3:
+        raise ValueError(f"expected (S,T) or (N,S,T), got {y.shape} and {p.shape}")
+    if y.shape != p.shape:
+        raise ValueError(f"shape mismatch: gt={y.shape}, pred={p.shape}")
+
+    n, _, T = y.shape
+    errs = np.zeros((n, T), dtype=float)
+    for i in range(n):
+        for t in range(T):
+            y_t = y[i, :, t].reshape(-1)
+            p_t = p[i, :, t].reshape(-1)
+            num = np.linalg.norm(p_t - y_t)
+            den = np.linalg.norm(y_t)
+            errs[i, t] = float(num / (den + eps))
+
+    mean_err = np.mean(errs, axis=0)
+    fig, ax = plt.subplots(figsize=(7.5, 4.5))
+    ax.plot(range(T), mean_err, label="mean relL2")
+    if n > 1:
+        p25 = np.percentile(errs, 25, axis=0)
+        p75 = np.percentile(errs, 75, axis=0)
+        ax.fill_between(range(T), p25, p75, alpha=0.2, label="25-75%")
+    ax.set_xlabel("time index")
+    ax.set_ylabel("relative L2")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    if title is None:
+        title = f"1D relL2 over time (mean={np.mean(mean_err):.3g}, max={np.max(mean_err):.3g})"
+    ax.set_title(title)
+    fig.tight_layout()
+    paths = save_figure_all_formats(fig, out_path_no_ext)
+    plt.close(fig)
+    return paths

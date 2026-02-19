@@ -81,7 +81,7 @@ class MLP(nn.Module):
         return x
 
 class FNO2d(nn.Module):
-    def __init__(self, modes1, modes2, width):
+    def __init__(self, modes1, modes2, width, in_channels=12):
         super(FNO2d, self).__init__()
 
         """
@@ -102,7 +102,7 @@ class FNO2d(nn.Module):
         self.width = width
         self.padding = 8 # pad the domain if input is non-periodic
 
-        self.p = nn.Linear(12, self.width) # input channel is 12: the solution of the previous 10 timesteps + 2 locations (u(t-10, x, y), ..., u(t-1, x, y),  x, y)
+        self.p = nn.Linear(in_channels, self.width) # input channel is T_in + 2 (x,y)
         self.conv0 = SpectralConv2d(self.width, self.width, self.modes1, self.modes2)
         self.conv1 = SpectralConv2d(self.width, self.width, self.modes1, self.modes2)
         self.conv2 = SpectralConv2d(self.width, self.width, self.modes1, self.modes2)
@@ -283,7 +283,7 @@ test_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(test_a,
 ################################################################
 # training and evaluation
 ################################################################
-model = FNO2d(modes, modes, width).cuda()
+model = FNO2d(modes, modes, width, in_channels=T_in + 2).to(device)
 print(count_params(model))
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=iterations)
@@ -302,7 +302,8 @@ for ep in range(epochs):
         for t in range(0, T, step):
             y = yy[..., t:t + step]
             im = model(xx)
-            loss += myloss(im.reshape(batch_size, -1), y.reshape(batch_size, -1))
+            bs = xx.shape[0]
+            loss += myloss(im.reshape(bs, -1), y.reshape(bs, -1))
 
             if t == 0:
                 pred = im
@@ -312,7 +313,7 @@ for ep in range(epochs):
             xx = torch.cat((xx[..., step:], im), dim=-1)
 
         train_l2_step += loss.item()
-        l2_full = myloss(pred.reshape(batch_size, -1), yy.reshape(batch_size, -1))
+        l2_full = myloss(pred.reshape(bs, -1), yy.reshape(bs, -1))
         train_l2_full += l2_full.item()
 
         optimizer.zero_grad()
@@ -331,7 +332,8 @@ for ep in range(epochs):
             for t in range(0, T, step):
                 y = yy[..., t:t + step]
                 im = model(xx)
-                loss += myloss(im.reshape(batch_size, -1), y.reshape(batch_size, -1))
+                bs = xx.shape[0]
+                loss += myloss(im.reshape(bs, -1), y.reshape(bs, -1))
 
                 if t == 0:
                     pred = im
@@ -341,7 +343,7 @@ for ep in range(epochs):
                 xx = torch.cat((xx[..., step:], im), dim=-1)
 
             test_l2_step += loss.item()
-            test_l2_full += myloss(pred.reshape(batch_size, -1), yy.reshape(batch_size, -1)).item()
+            test_l2_full += myloss(pred.reshape(bs, -1), yy.reshape(bs, -1)).item()
 
     t2 = default_timer()
     print(ep, t2 - t1, train_l2_step / ntrain / (T / step), train_l2_full / ntrain, test_l2_step / ntest / (T / step),
