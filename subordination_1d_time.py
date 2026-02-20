@@ -11,6 +11,7 @@ from utilities3 import MatReader, count_params
 from viz_utils import (
     LearningCurve,
     plot_1d_prediction,
+    plot_1d_prediction_multi,
     plot_error_histogram,
     plot_learning_curve,
     plot_psi_curve,
@@ -61,29 +62,30 @@ class BernsteinPsi(nn.Module):
         self.s_eps = float(s_eps)
         self.learn_s = bool(learn_s)
 
-        self.log_a = nn.Parameter(torch.tensor(0.0))
-        self.log_b = nn.Parameter(torch.tensor(0.0))
+        self.log_a = nn.Parameter(torch.tensor(-10.0))
+        self.log_b = nn.Parameter(torch.tensor(-10.0))
         self.log_alpha = nn.Parameter(torch.zeros(J))
 
         s0 = torch.logspace(np.log10(s_min), np.log10(s_max), J)
-        s_raw = torch.log(torch.clamp(s0 - self.s_eps, min=1e-12))
+        theta_s0 = torch.log(torch.clamp(s0, min=1e-12))
         if self.learn_s:
-            self.log_s = nn.Parameter(s_raw.clone())
+            self.theta_s = nn.Parameter(theta_s0.clone())
         else:
-            self.register_buffer("log_s", s_raw)
+            self.register_buffer("theta_s", theta_s0)
 
-    def _positive_s(self) -> torch.Tensor:
-        return torch.nn.functional.softplus(self.log_s) + self.s_eps
+    def positive_params(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        a0 = torch.nn.functional.softplus(self.log_a)
+        b = torch.nn.functional.softplus(self.log_b)
+        alpha = torch.nn.functional.softplus(self.log_alpha)
+        s = torch.exp(self.theta_s) + self.s_eps
+        return a0, b, alpha, s
 
     def forward(self, lam: torch.Tensor) -> torch.Tensor:
         # lam: (..., K) or (K,)
         lam = torch.clamp(lam, min=0.0)
-        a = torch.nn.functional.softplus(self.log_a)
-        b = torch.nn.functional.softplus(self.log_b)
-        alpha = torch.nn.functional.softplus(self.log_alpha)
-        s = self._positive_s()
+        a0, b, alpha, s = self.positive_params()
         atoms = 1.0 - torch.exp(-lam[..., None] * s[None, ...])
-        return a + b * lam + torch.sum(alpha[None, ...] * atoms, dim=-1)
+        return a0 + b * lam + torch.sum(alpha[None, ...] * atoms, dim=-1)
 
 
 class SubordinatedHeatOperator1D(nn.Module):
@@ -110,6 +112,54 @@ class SubordinatedHeatOperator1D(nn.Module):
         u_hat = a_hat[:, None, :] * decay[None, :, :]  # (B, T, K), complex
         u = torch.fft.irfft(u_hat, n=self.S, dim=-1)  # (B, T, S), real
         return u.permute(0, 2, 1).contiguous()  # (B, S, T)
+
+    def forward_mc(
+        self,
+        a: torch.Tensor,
+        t: torch.Tensor,
+        mc_samples: int,
+        generator: torch.Generator | None = None,
+        chunk_size: int | None = None,
+    ) -> torch.Tensor:
+        if mc_samples <= 0:
+            raise ValueError("mc_samples must be positive.")
+        if a.ndim == 3 and a.shape[-1] == 1:
+            a = a[..., 0]
+        if a.ndim != 2:
+            raise ValueError(f"Expected a shape (B,S) or (B,S,1), got {tuple(a.shape)}")
+        if t.ndim != 1:
+            raise ValueError(f"Expected t shape (T,), got {tuple(t.shape)}")
+
+        a_hat = torch.fft.rfft(a, dim=-1)  # (B, K), complex
+        B, K = a_hat.shape
+        T = t.numel()
+        lam = self.lam
+        a0, b, alpha, s = self.psi.positive_params()
+
+        if chunk_size is None or chunk_size <= 0:
+            chunk_size = mc_samples
+        chunk_size = min(chunk_size, mc_samples)
+
+        out = torch.empty((B, self.S, T), device=a.device, dtype=a.dtype)
+        for j in range(T):
+            t_j = t[j]
+            rates_j = torch.clamp(alpha * t_j, min=0.0)  # (J,)
+            u_hat_sum = torch.zeros((B, K), device=a_hat.device, dtype=a_hat.dtype)
+            used = 0
+            while used < mc_samples:
+                m = min(chunk_size, mc_samples - used)
+                rate_tensor = rates_j.view(1, 1, -1).expand(m, B, -1)
+                N = torch.poisson(rate_tensor, generator=generator)
+                tau = b * t_j + torch.sum(N * s.view(1, 1, -1), dim=-1)  # (m, B)
+                mult = torch.exp(-tau[..., None] * lam.view(1, 1, -1))  # (m, B, K)
+                u_hat_samples = a_hat[None, :, :] * mult
+                u_hat_sum = u_hat_sum + u_hat_samples.sum(dim=0)
+                used += m
+
+            u_hat_mean = (u_hat_sum / float(mc_samples)) * torch.exp(-a0 * t_j)
+            u_j = torch.fft.irfft(u_hat_mean, n=self.S, dim=-1)
+            out[:, :, j] = u_j
+        return out
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -140,6 +190,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--viz-dir", type=str, default="visualizations/subordination_1d_time")
     parser.add_argument("--plot-psi", action="store_true")
     parser.add_argument("--plot-samples", type=int, default=3)
+    parser.add_argument("--mc-samples", type=int, default=0)
+    parser.add_argument("--mc-seed", type=int, default=0)
+    parser.add_argument("--mc-batch-size", type=int, default=0)
+    parser.add_argument("--mc-chunk", type=int, default=0)
     return parser
 
 
@@ -157,6 +211,12 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         parser.error("--epochs must be positive.")
     if args.learning_rate <= 0:
         parser.error("--learning-rate must be positive.")
+    if args.mc_samples < 0:
+        parser.error("--mc-samples must be >= 0.")
+    if args.mc_batch_size < 0:
+        parser.error("--mc-batch-size must be >= 0.")
+    if args.mc_chunk < 0:
+        parser.error("--mc-chunk must be >= 0.")
 
 
 def _load_single_split(
@@ -346,25 +406,69 @@ def main() -> None:
     # Test predictions and histogram
     model.eval()
     with torch.no_grad():
-        pred_test = model(x_test.to(device), t_dev).cpu()
-    per_sample_err = [rel_l2(pred_test[i], y_test[i]) for i in range(pred_test.shape[0])]
+        pred_test_det = model(x_test.to(device), t_dev).cpu()
+    per_sample_err = [rel_l2(pred_test_det[i], y_test[i]) for i in range(pred_test_det.shape[0])]
     plot_error_histogram(per_sample_err, os.path.join(args.viz_dir, "error_hist"))
+
+    pred_test_mc = None
+    if args.mc_samples > 0:
+        mc_bs = args.batch_size if args.mc_batch_size <= 0 else args.mc_batch_size
+        mc_loader = torch.utils.data.DataLoader(
+            torch.utils.data.TensorDataset(x_test, y_test),
+            batch_size=mc_bs,
+            shuffle=False,
+        )
+        gen_device = "cuda" if device.type == "cuda" else "cpu"
+        mc_generator = torch.Generator(device=gen_device)
+        mc_generator.manual_seed(args.mc_seed)
+        mc_batches: list[torch.Tensor] = []
+        with torch.no_grad():
+            for a_batch, _ in mc_loader:
+                a_batch = a_batch.to(device)
+                pred_batch = model.forward_mc(
+                    a_batch,
+                    t_dev,
+                    mc_samples=args.mc_samples,
+                    generator=mc_generator,
+                    chunk_size=args.mc_chunk if args.mc_chunk > 0 else None,
+                )
+                mc_batches.append(pred_batch.cpu())
+        pred_test_mc = torch.cat(mc_batches, dim=0)
+
+        err_mc_vs_det = [rel_l2(pred_test_mc[i], pred_test_det[i]) for i in range(pred_test_det.shape[0])]
+        plot_error_histogram(err_mc_vs_det, os.path.join(args.viz_dir, "mc_vs_det_hist"))
+        err_mc_vs_gt = [rel_l2(pred_test_mc[i], y_test[i]) for i in range(pred_test_det.shape[0])]
+        plot_error_histogram(err_mc_vs_gt, os.path.join(args.viz_dir, "mc_vs_gt_hist"))
 
     # Representative sample plots at t = 0, T//2, T-1
     sample_count = max(1, min(args.plot_samples, x_test.shape[0]))
     sample_ids = list(range(sample_count))
     t_indices = sorted(set([0, T // 2, T - 1]))
-    x_grid = np.linspace(0.0, 1.0, S)
+    x_grid = np.linspace(0.0, 1.0, S, endpoint=False)
     for sid in sample_ids:
         for tidx in t_indices:
-            plot_1d_prediction(
-                x=x_grid,
-                gt=y_test[sid, :, tidx],
-                pred=pred_test[sid, :, tidx],
-                input_u0=x_test[sid],
-                out_path_no_ext=os.path.join(args.viz_dir, f"sample_{sid:03d}_t{tidx:03d}"),
-                title_prefix=f"sample={sid}, t_idx={tidx}:",
-            )
+            out_base = os.path.join(args.viz_dir, f"sample_{sid:03d}_t{tidx:03d}")
+            if pred_test_mc is None:
+                plot_1d_prediction(
+                    x=x_grid,
+                    gt=y_test[sid, :, tidx],
+                    pred=pred_test_det[sid, :, tidx],
+                    input_u0=x_test[sid],
+                    out_path_no_ext=out_base,
+                    title_prefix=f"sample={sid}, t_idx={tidx}:",
+                )
+            else:
+                plot_1d_prediction_multi(
+                    x=x_grid,
+                    gt=y_test[sid, :, tidx],
+                    preds={
+                        "deterministic": pred_test_det[sid, :, tidx],
+                        "mc": pred_test_mc[sid, :, tidx],
+                    },
+                    input_u0=x_test[sid],
+                    out_path_no_ext=out_base,
+                    title_prefix=f"sample={sid}, t_idx={tidx}:",
+                )
 
     if args.plot_psi:
         lam = model.lam.detach().cpu()

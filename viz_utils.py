@@ -211,6 +211,50 @@ def plot_1d_prediction(
     return paths
 
 
+def plot_1d_prediction_multi(
+    x: Optional[ArrayLike],
+    gt: ArrayLike,
+    preds: dict[str, ArrayLike],
+    out_path_no_ext: str,
+    input_u0: Optional[ArrayLike] = None,
+    title_prefix: str = "",
+) -> Tuple[str, str, str]:
+    y = _to_numpy(gt).reshape(-1)
+    if x is None:
+        x_np = np.linspace(0.0, 1.0, num=y.shape[0], endpoint=False)
+    else:
+        x_np = _to_numpy(x).reshape(-1)
+
+    fig, ax = plt.subplots(figsize=(8.0, 4.5))
+    if input_u0 is not None:
+        u0 = _to_numpy(input_u0).reshape(-1)
+        ax.plot(x_np, u0, label="input (u0)", linewidth=1.0, alpha=0.7)
+
+    ax.plot(x_np, y, label="GT", linewidth=2.0)
+
+    metric_lines = []
+    for label, pred in preds.items():
+        p = _to_numpy(pred).reshape(-1)
+        ax.plot(x_np, p, label=label, linewidth=2.0, linestyle="--")
+        metric_lines.append(f"{label}: relL2={rel_l2(p, y):.3g}, RMSE={rmse(p, y):.3g}")
+
+    ax.set_xlabel("x")
+    ax.set_ylabel("u")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    title = title_prefix.strip()
+    metrics = "\n".join(metric_lines)
+    if title:
+        title = f"{title}\n{metrics}"
+    else:
+        title = metrics
+    ax.set_title(title)
+    fig.tight_layout()
+    paths = save_figure_all_formats(fig, out_path_no_ext)
+    plt.close(fig)
+    return paths
+
+
 def plot_psi_curve(
     lam: ArrayLike,
     psi_pred: ArrayLike,

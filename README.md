@@ -267,7 +267,7 @@ python scripts/super_resolution.py --data-file data/ns_data_V1e-4_N20_T50_test.m
 ```bash
 python data_generation/fractional_diffusion_1d/gen_fractional_diffusion_1d.py \
   --out-file data/fractional_diffusion_1d_alpha0.5.mat \
-  --N 1200 --S 1024 --T 11 --t-max 1.0 --alpha 0.5 --seed 0
+  --N 1500 --S 1024 --T 11 --t-max 1.0 --alpha 0.5 --seed 0
 ```
 
 ### 学習
@@ -278,6 +278,26 @@ python subordination_1d_time.py \
   --batch-size 20 --learning-rate 1e-2 --epochs 300 \
   --psi-J 32 --learn-s --psi-s-min 1e-3 --psi-s-max 1e3 \
   --plot-psi
+```
+
+### ψ の解析的ベースライン推定（log-ratio）
+```bash
+python scripts/estimate_psi_logratio_1d.py \
+  --data-mode single_split --data-file data/fractional_diffusion_1d_alpha0.5.mat \
+  --sub 2 --sub-t 1 --split all \
+  --viz-dir visualizations/psi_baseline_1d \
+  --plot-psi-true
+```
+
+### Monte Carlo subordination 評価
+```bash
+python subordination_1d_time.py \
+  --data-mode single_split --data-file data/fractional_diffusion_1d_alpha0.5.mat \
+  --ntrain 1000 --ntest 200 --sub 2 --sub-t 1 \
+  --batch-size 20 --learning-rate 1e-2 --epochs 300 \
+  --psi-J 32 --learn-s --psi-s-min 1e-3 --psi-s-max 1e3 \
+  --plot-psi \
+  --mc-samples 256 --mc-seed 0 --mc-batch-size 20 --mc-chunk 0
 ```
 
 ### データフォーマット（.mat）
@@ -293,29 +313,69 @@ python subordination_1d_time.py \
 
 実行環境によっては `python` ではなく `python3` を使ってください。
 
-### 学習スクリプトの主要ハイパーパラメータ（subordination_1d_time.py）
-- データ分割:
-  - `--data-mode`：`single_split` / `separate_files`
-  - `--data-file`：単一ファイル入力
-  - `--train-file`, `--test-file`：分割済み入力
-  - `--train-split`, `--seed`, `--shuffle`：分割制御
-- 学習規模:
-  - `--ntrain`, `--ntest`：使用サンプル数
-  - `--sub`：空間サブサンプル率（`a[:, ::sub]`, `u[:, ::sub, :]`）
-  - `--sub-t`：時間サブサンプル率（`u[..., ::sub_t]`, `t[::sub_t]`）
-- 最適化:
-  - `--batch-size`：ミニバッチサイズ
-  - `--learning-rate`：学習率
-  - `--epochs`：学習エポック数
-- ψ モデル:
-  - `--psi-J`：Bernstein 原子数（表現力）
-  - `--learn-s`：`s_j` を学習するか
-  - `--psi-s-min`, `--psi-s-max`：`s_j` 初期化の logspace 範囲
-  - `--psi-eps`：`s_j > 0` を保つ下限
-- 可視化:
-  - `--viz-dir`：図の保存先
-  - `--plot-psi`：`alpha` がある場合に `psi_true` と `psi_pred` を比較
-  - `--plot-samples`：可視化するテストサンプル数
+### 実装の動き方（subordination_1d_time.py）
+1. `a(N,S), u(N,S,T), t(T)` を読み込み、`--sub`, `--sub-t` で間引く。
+2. `--data-mode single_split` の場合は `train_split` で分割し、`ntrain/ntest` を切り出す。
+3. `psi(lambda)=a0 + b*lambda + Σ alpha_j (1-exp(-s_j*lambda))` を学習する。
+4. forward は FFT 対角化で `u_hat(k,t)=exp(-t*psi(lambda_k))*a_hat(k)` を計算する。
+5. 損失はバッチ平均 relative L2（`||pred-gt||/||gt||`）で学習する。
+6. 学習後に deterministic 予測で `learning_curve`, `error_hist`, `sample_*` を保存する。
+7. `--plot-psi` かつデータに `alpha` がある場合、`psi_true=lambda^alpha` と比較して `psi_curve` を保存する。
+8. `--mc-samples > 0` の場合、Poisson サンプリングによる Monte Carlo subordination を追加評価し、`mc_vs_det_hist`, `mc_vs_gt_hist` と重ね描きサンプル図を保存する。
+
+### 学習スクリプト引数（subordination_1d_time.py、デフォルト値）
+- `--data-mode`（`single_split`）
+- `--data-file`（`data/fractional_diffusion_1d_alpha0.5.mat`）
+- `--train-file`（`None`）
+- `--test-file`（`None`）
+- `--train-split`（`0.8`）
+- `--seed`（`0`）
+- `--shuffle`（デフォルト無効。指定時のみ有効）
+- `--ntrain`（`1000`）
+- `--ntest`（`200`）
+- `--sub`（`1`）
+- `--sub-t`（`1`）
+- `--batch-size`（`20`）
+- `--learning-rate`（`1e-2`）
+- `--epochs`（`300`）
+- `--psi-J`（`32`）
+- `--learn-s`（デフォルト無効。指定時のみ `s_j` を学習）
+- `--psi-s-min`（`1e-3`）
+- `--psi-s-max`（`1e3`）
+- `--psi-eps`（`1e-8`）
+- `--viz-dir`（`visualizations/subordination_1d_time`）
+- `--plot-psi`（デフォルト無効）
+- `--plot-samples`（`3`）
+- `--mc-samples`（`0`。`0` で MC 評価をスキップ）
+- `--mc-seed`（`0`）
+- `--mc-batch-size`（`0`。`0` のとき `--batch-size` を使用）
+- `--mc-chunk`（`0`。`0` のとき chunk 分割なし）
+
+### ψ ベースライン推定の動き方（scripts/estimate_psi_logratio_1d.py）
+1. `a,u,t` を読み込み、`--split` で `all/train/test` を選ぶ。
+2. `a_hat=rfft(a), u_hat=rfft(u)` を計算。
+3. `y=log(|u_hat|+eps)-log(|a_hat|+eps)` を作る。
+4. 振幅閾値 `amp-threshold` でマスクし、時刻方向の原点回帰で `psi_hat(lambda_k)` を推定。
+5. `psi_hat` を 0 以上に clamp し、`k=0` は `psi_hat[0]=0` を明示。
+6. `psi_baseline_curve.(png/pdf/svg)` と `psi_baseline.npz` を保存する。
+
+### ψ ベースライン推定引数（estimate_psi_logratio_1d.py、デフォルト値）
+- `--data-mode`（`single_split`）
+- `--data-file`（`data/fractional_diffusion_1d_alpha0.5.mat`）
+- `--train-file`（`None`）
+- `--test-file`（`None`）
+- `--train-split`（`0.8`）
+- `--seed`（`0`）
+- `--shuffle`（デフォルト無効）
+- `--sub`（`1`）
+- `--sub-t`（`1`）
+- `--split`（`all`）
+- `--amp-threshold`（`1e-8`）
+- `--log-eps`（`1e-12`）
+- `--max-samples`（`0`。`0` 以下で無制限）
+- `--viz-dir`（`visualizations/psi_baseline_1d`）
+- `--out-npz`（空文字。未指定時は `<viz-dir>/psi_baseline.npz`）
+- `--plot-psi-true`（デフォルト無効）
 
 ### データ生成スクリプトの主要ハイパーパラメータ（gen_fractional_diffusion_1d.py）
 - `--out-file`：出力 `.mat` ファイル
