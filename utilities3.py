@@ -1,7 +1,10 @@
 import torch
 import numpy as np
 import scipy.io
-import h5py
+try:
+    import h5py
+except ImportError:
+    h5py = None
 import torch.nn as nn
 
 import operator
@@ -34,7 +37,12 @@ class MatReader(object):
         try:
             self.data = scipy.io.loadmat(self.file_path)
             self.old_mat = True
-        except:
+        except Exception as exc:
+            if h5py is None:
+                raise RuntimeError(
+                    "Failed to read MAT file with scipy.io.loadmat and h5py is not installed "
+                    "for HDF5-based MAT files."
+                ) from exc
             self.data = h5py.File(self.file_path)
             self.old_mat = False
 
@@ -316,6 +324,5 @@ class DenseNet(torch.nn.Module):
 def count_params(model):
     c = 0
     for p in list(model.parameters()):
-        c += reduce(operator.mul, 
-                    list(p.size()+(2,) if p.is_complex() else p.size()))
+        c += int(p.numel() * (2 if p.is_complex() else 1))
     return c

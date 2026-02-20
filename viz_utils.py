@@ -211,6 +211,70 @@ def plot_1d_prediction(
     return paths
 
 
+def plot_psi_curve(
+    lam: ArrayLike,
+    psi_pred: ArrayLike,
+    psi_true: Optional[ArrayLike] = None,
+    logx: bool = True,
+    logy: bool = True,
+    title: Optional[str] = None,
+    out_path_no_ext: str = "psi_curve",
+) -> Tuple[str, str, str]:
+    """Plot learned psi(lambda) and optional reference curve."""
+    lam_np = _to_numpy(lam).reshape(-1)
+    psi_pred_np = _to_numpy(psi_pred).reshape(-1)
+    if lam_np.shape != psi_pred_np.shape:
+        raise ValueError(f"shape mismatch: lam={lam_np.shape}, psi_pred={psi_pred_np.shape}")
+
+    psi_true_np = None
+    if psi_true is not None:
+        psi_true_np = _to_numpy(psi_true).reshape(-1)
+        if psi_true_np.shape != lam_np.shape:
+            raise ValueError(f"shape mismatch: lam={lam_np.shape}, psi_true={psi_true_np.shape}")
+
+    mask = np.isfinite(lam_np) & np.isfinite(psi_pred_np)
+    if psi_true_np is not None:
+        mask = mask & np.isfinite(psi_true_np)
+    if logx:
+        mask = mask & (lam_np > 0)
+    if logy:
+        mask = mask & (psi_pred_np > 0)
+        if psi_true_np is not None:
+            mask = mask & (psi_true_np > 0)
+    if not np.any(mask):
+        raise ValueError("No valid points to plot after applying log/finite filters.")
+
+    x = lam_np[mask]
+    y_pred = psi_pred_np[mask]
+    y_true = psi_true_np[mask] if psi_true_np is not None else None
+
+    order = np.argsort(x)
+    x = x[order]
+    y_pred = y_pred[order]
+    if y_true is not None:
+        y_true = y_true[order]
+
+    fig, ax = plt.subplots(figsize=(7.0, 4.5))
+    ax.plot(x, y_pred, label="psi_pred", linewidth=2.0)
+    if y_true is not None:
+        ax.plot(x, y_true, label="psi_true", linewidth=2.0, linestyle="--")
+    if logx:
+        ax.set_xscale("log")
+    if logy:
+        ax.set_yscale("log")
+    ax.set_xlabel("lambda")
+    ax.set_ylabel("psi(lambda)")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    if title is None:
+        title = "psi curve"
+    ax.set_title(title)
+    fig.tight_layout()
+    paths = save_figure_all_formats(fig, out_path_no_ext)
+    plt.close(fig)
+    return paths
+
+
 def plot_2d_comparison(
     gt: ArrayLike,
     pred: ArrayLike,

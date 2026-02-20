@@ -258,6 +258,82 @@ python scripts/super_resolution.py --data-file data/ns_data_V1e-4_N20_T50_test.m
 - `--T`（デフォルト: `20`）
 - `--indent`（デフォルト: `1`）
 
+## Subordination 1D（Heat semigroup + Bernstein ψ）
+1D 周期領域に対して、半群
+`u_hat(k,t) = exp(-t * psi(lambda_k)) * a_hat(k)`
+を直接学習する最小実装です。`psi` は Bernstein 関数パラメータ化で推定します。
+
+### データ生成（分数拡散）
+```bash
+python data_generation/fractional_diffusion_1d/gen_fractional_diffusion_1d.py \
+  --out-file data/fractional_diffusion_1d_alpha0.5.mat \
+  --N 1200 --S 1024 --T 11 --t-max 1.0 --alpha 0.5 --seed 0
+```
+
+### 学習
+```bash
+python subordination_1d_time.py \
+  --data-mode single_split --data-file data/fractional_diffusion_1d_alpha0.5.mat \
+  --ntrain 1000 --ntest 200 --sub 2 --sub-t 1 \
+  --batch-size 20 --learning-rate 1e-2 --epochs 300 \
+  --psi-J 32 --learn-s --psi-s-min 1e-3 --psi-s-max 1e3 \
+  --plot-psi
+```
+
+### データフォーマット（.mat）
+- `a`: `(N, S)` float32（初期条件）
+- `u`: `(N, S, T)` float32（解、time-last）
+- `t`: `(T,)` float32（時刻）
+- 任意メタ: `alpha`, `S`, `T`, `t_max`, `grf_beta`, `grf_scale`
+
+### 本格実行の流れ（推奨）
+1. `gen_fractional_diffusion_1d.py` でデータ生成
+2. `subordination_1d_time.py` で学習
+3. `visualizations/subordination_1d_time/` の出力（`learning_curve`, `error_hist`, `sample_*`, `psi_curve`）を確認
+
+実行環境によっては `python` ではなく `python3` を使ってください。
+
+### 学習スクリプトの主要ハイパーパラメータ（subordination_1d_time.py）
+- データ分割:
+  - `--data-mode`：`single_split` / `separate_files`
+  - `--data-file`：単一ファイル入力
+  - `--train-file`, `--test-file`：分割済み入力
+  - `--train-split`, `--seed`, `--shuffle`：分割制御
+- 学習規模:
+  - `--ntrain`, `--ntest`：使用サンプル数
+  - `--sub`：空間サブサンプル率（`a[:, ::sub]`, `u[:, ::sub, :]`）
+  - `--sub-t`：時間サブサンプル率（`u[..., ::sub_t]`, `t[::sub_t]`）
+- 最適化:
+  - `--batch-size`：ミニバッチサイズ
+  - `--learning-rate`：学習率
+  - `--epochs`：学習エポック数
+- ψ モデル:
+  - `--psi-J`：Bernstein 原子数（表現力）
+  - `--learn-s`：`s_j` を学習するか
+  - `--psi-s-min`, `--psi-s-max`：`s_j` 初期化の logspace 範囲
+  - `--psi-eps`：`s_j > 0` を保つ下限
+- 可視化:
+  - `--viz-dir`：図の保存先
+  - `--plot-psi`：`alpha` がある場合に `psi_true` と `psi_pred` を比較
+  - `--plot-samples`：可視化するテストサンプル数
+
+### データ生成スクリプトの主要ハイパーパラメータ（gen_fractional_diffusion_1d.py）
+- `--out-file`：出力 `.mat` ファイル
+- `--N`：サンプル数
+- `--S`：空間グリッド数
+- `--T`：時刻数
+- `--t-max`：最終時刻
+- `--alpha`：分数拡散指数（真の `psi(lam)=lam^alpha`）
+- `--seed`：乱数シード
+- `--grf-beta`：初期条件 GRF のスペクトル減衰（大きいほど滑らか）
+- `--grf-scale`：初期条件振幅スケール
+
+### 実運用の調整目安
+- まず `--psi-J 16` か `--psi-J 32` で開始
+- 不安定なら `--learning-rate` を下げる（例: `1e-2 -> 5e-3 -> 1e-3`）
+- 高速化したい場合は `--sub` を大きくする（ただし分解能は低下）
+- `--plot-psi` を有効にして、`psi` の形状が真値と整合するか確認
+
 ## Datasets
 We provide the Burgers equation, Darcy flow, and Navier-Stokes equation datasets we used in the paper. 
 The data generation configuration can be found in the paper.
