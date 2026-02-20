@@ -50,6 +50,20 @@ def build_sensor_indices(
     if obs == "full":
         return torch.arange(s, dtype=torch.long)
 
+    if obs == "fourier":
+        max_modes = s // 2 + 1
+        if J <= 0 or J > max_modes:
+            raise ValueError(f"J must be in [1, {max_modes}] for fourier observation")
+        return torch.arange(J, dtype=torch.long)
+
+    if obs == "proj":
+        if J <= 0:
+            raise ValueError("J must be positive for proj observation")
+        gen = torch.Generator(device="cpu")
+        gen.manual_seed(sensor_seed)
+        scale = 1.0 / np.sqrt(float(s))
+        return scale * torch.randn((J, s), generator=gen, dtype=torch.float32)
+
     if J <= 0 or J > s:
         raise ValueError(f"J must be in [1, {s}] for points observation")
 
@@ -72,6 +86,14 @@ def collect_observations(states: Sequence[torch.Tensor], obs: str, sensor_idx: t
         elif obs == "points":
             idx = sensor_idx.to(z.device)
             obs_list.append(z.index_select(dim=-1, index=idx))
+        elif obs == "fourier":
+            modes = sensor_idx.to(z.device)
+            z_hat = torch.fft.rfft(z, dim=-1)
+            sel = z_hat.index_select(dim=-1, index=modes)
+            obs_list.append(torch.cat([sel.real, sel.imag], dim=-1))
+        elif obs == "proj":
+            proj = sensor_idx.to(device=z.device, dtype=z.dtype)
+            obs_list.append(z @ proj.t())
         else:
             raise ValueError(f"Unsupported observation type: {obs}")
     return obs_list

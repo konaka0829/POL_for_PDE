@@ -199,7 +199,7 @@ python scripts/super_resolution.py --data-file data/ns_data_V1e-4_N20_T50_test.m
 
 **主な機能**
 - リザーバPDE（`reaction_diffusion` / `ks` / `burgers`）を固定で時間発展
-- 複数時刻観測で特徴 `Phi` を作成（`obs=full|points`）
+- 複数時刻観測で特徴 `Phi` を作成（`obs=full|points|fourier|proj`）
 - 固定ランダム写像 ELM（任意）を適用
 - 最終 readout のみをリッジ回帰（`XtX/XtY` 蓄積 + 線形方程式求解）で学習
 - `viz_utils.py` を使い、誤差ヒストグラム・代表サンプル図を PNG/PDF/SVG 保存
@@ -242,12 +242,92 @@ python reservoir_burgers_1d.py \
 **dry-run（外部データ不要）**
 ```bash
 python reservoir_burgers_1d.py --dry-run --ntrain 8 --ntest 4 --sub 256
+python reservoir_burgers_1d.py --dry-run --ntrain 8 --ntest 4 --sub 256 --obs fourier --J 16 --standardize-features 1
+python reservoir_burgers_1d.py --dry-run --ntrain 8 --ntest 4 --sub 256 --obs proj --J 16 --sensor-seed 1 --standardize-features 1
 ```
 
 **実行パターン（使い分け）**
 - 通常学習: 実データを指定して実行（`--data-mode single_split` または `--data-mode separate_files`）
 - 軽量確認: `--dry-run` でランダム疑似データを使い、shape/NaN/可視化出力を確認
 - 保存: `--save-model` を付けると `W_out`・ELM重み・センサ情報・設定を保存
+
+**本格実行の手順（推奨）**
+1. 依存を入れる: `python3 -m pip install -r requirements.txt`
+2. まず `--dry-run` で動作確認する
+3. 実データ実行（単一ファイル分割）
+```bash
+python3 reservoir_burgers_1d.py \
+  --data-mode single_split --data-file data/burgers_data_R10.mat \
+  --train-split 0.8 --shuffle --seed 0 \
+  --ntrain 1000 --ntest 100 --sub 8 --batch-size 20 \
+  --reservoir reaction_diffusion --Tr 1.0 --dt 0.01 --K 5 \
+  --obs fourier --J 64 \
+  --use-elm 1 --elm-h 2048 --elm-activation tanh --elm-seed 0 \
+  --ridge-lambda 1e-4 --ridge-dtype float64 \
+  --standardize-features 1 --feature-std-eps 1e-6 \
+  --device auto --out-dir visualizations/reservoir_burgers_full --save-model
+```
+4. 実データ実行（学習・評価を別ファイルで管理）
+```bash
+python3 reservoir_burgers_1d.py \
+  --data-mode separate_files \
+  --train-file data/burgers_train.mat --test-file data/burgers_test.mat \
+  --ntrain 1000 --ntest 100 --sub 8 --batch-size 20 \
+  --reservoir burgers --res-burgers-nu 0.05 --Tr 1.0 --dt 0.001 \
+  --obs proj --J 128 --sensor-seed 1 \
+  --use-elm 1 --elm-h 4096 --elm-activation relu \
+  --ridge-lambda 1e-5 --ridge-dtype float64 --standardize-features 1 \
+  --device auto --out-dir visualizations/reservoir_burgers_sep --save-model
+```
+5. `run_config.json` と可視化画像（ヒストグラム・予測プロット）で結果を確認する
+
+**ハイパーパラメータの詳細（`reservoir_burgers_1d.py`）**
+- `--ntrain`, `--ntest`:
+  サンプル数を増やすほど汎化は安定しやすい。小さすぎると `W_out` が過学習しやすい。
+- `--sub`:
+  空間解像度 `s=2**13//sub` を決める。`sub` を小さくすると高解像度で精度向上余地はあるが、メモリと計算時間が増える。
+- `--batch-size`:
+  streaming ridge でも特徴計算のピークメモリを左右する。OOM時は最優先で下げる。
+- `--reservoir`:
+  `reaction_diffusion` は比較的安定、`ks` は高表現だが時間刻みに敏感、`burgers` はターゲット近傍の誘導がしやすい。
+- `--Tr`:
+  リザーバ発展時間。短すぎると特徴が浅く、長すぎると散逸で情報が薄まる。`0.3~1.0` から探索が無難。
+- `--dt`, `--ks-dt`:
+  時間刻み。小さいほど安定だが遅い。`ks` では `--ks-dt` を優先して `5e-4` 付近から調整するのが実用的。
+- `--K`, `--feature-times`:
+  観測時刻設計。`K` は等間隔、`feature-times` は任意指定。`feature-times` 指定時はその値が優先される。
+- `--obs`:
+  `full` は高次元で情報量最大、`points` は軽量、`fourier` は低周波重視、`proj` はランダム線形汎関数。
+- `--J`:
+  `points/fourier/proj` の観測次元。大きいほど表現力は上がるが計算コストも増える。`fourier` は `J <= s//2+1` 制約。
+- `--sensor-mode`, `--sensor-seed`:
+  `points` のセンサ配置制御。比較実験では `sensor-seed` 固定が必須。
+- `--input-scale`, `--input-shift`:
+  リザーバ初期条件 `z0=scale*x+shift` を規定。入力振幅を変えて非線形応答領域を調整できる。
+- `--use-elm`:
+  `1` で固定ランダム非線形層を使う。`0` は線形 readout 直結でベースライン比較に向く。
+- `--elm-h`:
+  ELM 隠れ次元。大きいほど表現力増だが `O(H^2)` のGram蓄積コストが増える。
+- `--elm-activation`:
+  `tanh` は滑らか、`relu` は疎で大次元時に効くことがある。
+- `--elm-seed`, `--elm-weight-scale`, `--elm-bias-scale`:
+  固定ランダム写像の再現性とスケール制御。`weight-scale<=0` は `1/sqrt(in_dim)` 自動設定。
+- `--ridge-lambda`:
+  L2正則化。小さすぎると過学習・数値不安定、大きすぎると過平滑化。`1e-6~1e-3` を対数探索するのが定石。
+- `--ridge-dtype`:
+  `float64` 推奨。`float32` は高速だが条件数が悪い設定で不安定化しやすい。
+- `--standardize-features`, `--feature-std-eps`:
+  ELM後特徴の標準化。`1` を推奨。`eps` は分母ゼロ回避で通常 `1e-6` 付近。
+- `--rd-nu`, `--rd-alpha`, `--rd-beta`:
+  `reaction_diffusion` の力学パラメータ。`rd-nu` は平滑化、`rd-alpha/rd-beta` は反応非線形の強さ。
+- `--res-burgers-nu`:
+  `burgers` リザーバ粘性。小さすぎると不安定化、大きすぎると過度に平滑化。
+- `--ks-dealias`:
+  KS の高周波折返し抑制。高解像度・長時間で有効。
+- `--device`:
+  `auto` 推奨。CPU固定比較時のみ `cpu` 明示。
+- `--out-dir`, `--save-model`:
+  出力管理。比較実験では run ごとに別 `out-dir` を切ると追跡しやすい。
 
 **引数とデフォルト値（`reservoir_burgers_1d.py`）**
 - データ関連
@@ -277,8 +357,8 @@ python reservoir_burgers_1d.py --dry-run --ntrain 8 --ntest 4 --sub 256
 - `--ks-dealias`（デフォルト: `False`）: KSで 2/3 dealiasing を有効化
 
 - 観測（Obs）関連
-- `--obs`（デフォルト: `full`）: `full|points`
-- `--J`（デフォルト: `128`）: `obs=points` 時のセンサ数
+- `--obs`（デフォルト: `full`）: `full|points|fourier|proj`
+- `--J`（デフォルト: `128`）: `obs=points|fourier|proj` 時の次元
 - `--sensor-mode`（デフォルト: `equispaced`）: `equispaced|random`
 - `--sensor-seed`（デフォルト: `0`）: `sensor-mode=random` の乱数シード
 
@@ -297,12 +377,63 @@ python reservoir_burgers_1d.py --dry-run --ntrain 8 --ntest 4 --sub 256
 - Ridge関連
 - `--ridge-lambda`（デフォルト: `1e-4`）: L2 正則化係数
 - `--ridge-dtype`（デフォルト: `float64`）: `float32|float64`（数値安定性は `float64` 推奨）
+- `--standardize-features`（デフォルト: `0`）: `1` で最終特徴を学習統計で標準化して解く
+- `--feature-std-eps`（デフォルト: `1e-6`）: 標準化の分母安定化項
 
 - 実行・出力関連
 - `--device`（デフォルト: `auto`）: `auto|cpu|cuda`
 - `--out-dir`（デフォルト: `visualizations/reservoir_burgers_1d`）: 図・設定出力先
 - `--save-model`（デフォルト: `""`）: モデル保存。引数なしで付けると `out-dir/model.pt`
 - `--dry-run`（デフォルト: `False`）: 外部データ不要の検証モード
+
+### rfm_burgers_1d.py（関数値RFM: m×m 解法）
+特徴そのものを格子関数として扱い、`alpha in R^m` を解くルートです。
+
+**dry-run（外部データ不要）**
+```bash
+python rfm_burgers_1d.py --dry-run --ntrain 8 --ntest 4 --sub 256 --m 32 --K 3 --Tr 0.1 --dt 0.01
+```
+
+**本格実行例**
+```bash
+python3 rfm_burgers_1d.py \
+  --data-mode single_split --data-file data/burgers_data_R10.mat \
+  --train-split 0.8 --shuffle --seed 0 \
+  --ntrain 1000 --ntest 100 --sub 8 --batch-size 20 \
+  --reservoir reaction_diffusion --Tr 0.5 --dt 0.005 --K 5 \
+  --input-scale 1.0 --input-shift 0.0 \
+  --m 256 --rfm-activation tanh --rfm-seed 0 \
+  --rfm-weight-scale 0.0 --rfm-bias-scale 1.0 \
+  --ridge-lambda 1e-4 --ridge-dtype float64 \
+  --device auto --out-dir visualizations/rfm_burgers_full --save-model
+```
+
+**ハイパーパラメータの詳細（`rfm_burgers_1d.py`）**
+- データ系 (`--data-mode`, `--data-file`, `--train-file`, `--test-file`, `--train-split`, `--seed`, `--shuffle`, `--ntrain`, `--ntest`, `--sub`, `--batch-size`):
+  意味は `reservoir_burgers_1d.py` と同じ。
+- リザーバ系 (`--reservoir`, `--Tr`, `--dt`, `--ks-dt`, `--K`, `--feature-times`, `--rd-*`, `--res-burgers-nu`, `--ks-dealias`):
+  関数値特徴 `F(x)` を作る前段の力学を決める。時刻・刻みの設計が特徴の質に直結する。
+- `--m`:
+  関数値ランダム特徴の本数。学習計算量は主に `m×m` 解法に依存するため、増やしすぎると急に重くなる。
+- `--rfm-activation`:
+  時刻混合後の点ごとの活性化。`identity` は線形基底、`tanh/relu` は非線形基底。
+- `--rfm-seed`:
+  時刻混合行列 `A` とバイアス `b` の再現性を固定する。
+- `--rfm-weight-scale`:
+  `A` のスケール。`<=0` で `1/sqrt(K_obs)` 自動設定。大きすぎると活性化飽和を起こしやすい。
+- `--rfm-bias-scale`:
+  `b` のスケール。活性化の動作点を動かす。
+- `--ridge-lambda`, `--ridge-dtype`:
+  `alpha` 推定の安定化。`float64` + `1e-6~1e-3` 探索が安全。
+- `--device`, `--out-dir`, `--save-model`, `--dry-run`:
+  実行環境と出力管理。
+
+**チューニングの実務的な順序（共通）**
+1. `sub` と `batch-size` を先に決めて計算予算を固定する
+2. `reservoir`, `Tr`, `dt`, `K` を粗く探索して特徴品質を決める
+3. `obs/J`（または `m`）で表現次元を調整する
+4. `ridge-lambda` を対数探索する
+5. 最後に `ELM` 系（または `rfm-*`）のスケールを微調整する
 
 ## Datasets
 We provide the Burgers equation, Darcy flow, and Navier-Stokes equation datasets we used in the paper. 

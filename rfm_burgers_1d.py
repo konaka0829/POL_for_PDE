@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import time
 import warnings
@@ -11,22 +12,14 @@ import numpy as np
 import torch
 
 from cli_utils import add_data_mode_args, add_split_args, validate_data_mode_args
-from pol.elm import FixedRandomELM
-from pol.features_1d import (
-    build_sensor_indices,
-    build_time_grid,
-    collect_observations,
-    flatten_observations,
-)
+from pol.features_1d import build_time_grid
 from pol.reservoir_1d import Reservoir1DSolver, ReservoirConfig
-from pol.ridge import fit_ridge_streaming, predict_linear
-from pol.ridge import fit_ridge_streaming_standardized
 from viz_utils import plot_1d_prediction, plot_error_histogram, rel_l2
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Backprop-free PDE Reservoir Operator Learner for 1D Burgers"
+        description="Backprop-free function-valued RFM for 1D Burgers"
     )
 
     add_data_mode_args(
@@ -54,41 +47,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--K", type=int, default=5)
     parser.add_argument("--feature-times", type=str, default="")
 
-    parser.add_argument(
-        "--obs",
-        choices=("full", "points", "fourier", "proj"),
-        default="full",
-        help="Observation type: full state, point sensors, Fourier modes, or random projections.",
-    )
-    parser.add_argument("--J", type=int, default=128)
-    parser.add_argument(
-        "--sensor-mode", choices=("equispaced", "random"), default="equispaced"
-    )
-    parser.add_argument("--sensor-seed", type=int, default=0)
-
-    parser.add_argument("--input-scale", type=float, default=1.0)
-    parser.add_argument("--input-shift", type=float, default=0.0)
-
-    parser.add_argument("--use-elm", type=int, choices=(0, 1), default=1)
-    parser.add_argument("--elm-h", type=int, default=2048)
-    parser.add_argument("--elm-activation", choices=("tanh", "relu"), default="tanh")
-    parser.add_argument("--elm-seed", type=int, default=0)
-    parser.add_argument("--elm-weight-scale", type=float, default=0.0)
-    parser.add_argument("--elm-bias-scale", type=float, default=1.0)
-
-    parser.add_argument("--ridge-lambda", type=float, default=1e-4)
-    parser.add_argument("--ridge-dtype", choices=("float32", "float64"), default="float64")
-    parser.add_argument("--standardize-features", type=int, choices=(0, 1), default=0)
-    parser.add_argument("--feature-std-eps", type=float, default=1e-6)
-
     parser.add_argument("--rd-nu", type=float, default=1e-3)
     parser.add_argument("--rd-alpha", type=float, default=1.0)
     parser.add_argument("--rd-beta", type=float, default=1.0)
     parser.add_argument("--res-burgers-nu", type=float, default=5e-2)
     parser.add_argument("--ks-dealias", action="store_true")
 
+    parser.add_argument("--input-scale", type=float, default=1.0)
+    parser.add_argument("--input-shift", type=float, default=0.0)
+
+    parser.add_argument("--m", type=int, default=256)
+    parser.add_argument(
+        "--rfm-activation", choices=("tanh", "relu", "identity"), default="tanh"
+    )
+    parser.add_argument("--rfm-seed", type=int, default=0)
+    parser.add_argument("--rfm-weight-scale", type=float, default=0.0)
+    parser.add_argument("--rfm-bias-scale", type=float, default=1.0)
+
+    parser.add_argument("--ridge-lambda", type=float, default=1e-4)
+    parser.add_argument("--ridge-dtype", choices=("float32", "float64"), default="float64")
+
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
-    parser.add_argument("--out-dir", type=str, default="visualizations/reservoir_burgers_1d")
+    parser.add_argument("--out-dir", type=str, default="visualizations/rfm_burgers_1d")
     parser.add_argument(
         "--save-model",
         nargs="?",
@@ -111,8 +91,8 @@ def parse_args() -> argparse.Namespace:
 
     if args.ridge_lambda < 0.0:
         parser.error("--ridge-lambda must be non-negative")
-    if args.feature_std_eps <= 0.0:
-        parser.error("--feature-std-eps must be positive")
+    if args.m <= 0:
+        parser.error("--m must be positive")
 
     return args
 
@@ -154,6 +134,7 @@ def make_dry_run_data(ntrain: int, ntest: int, s: int, seed: int) -> tuple[torch
 def load_data(args: argparse.Namespace, s: int) -> tuple[torch.Tensor, ...]:
     if args.dry_run:
         return make_dry_run_data(args.ntrain, args.ntest, s, args.seed)
+
     from utilities3 import MatReader
 
     if args.data_mode == "single_split":
@@ -196,6 +177,14 @@ def load_data(args: argparse.Namespace, s: int) -> tuple[torch.Tensor, ...]:
     return x_train, y_train, x_test, y_test
 
 
+def apply_activation(x: torch.Tensor, name: str) -> torch.Tensor:
+    if name == "tanh":
+        return torch.tanh(x)
+    if name == "relu":
+        return torch.relu(x)
+    return x
+
+
 def main() -> None:
     args = parse_args()
 
@@ -210,14 +199,7 @@ def main() -> None:
     os.makedirs(out_dir, exist_ok=True)
 
     times, obs_steps = build_time_grid(Tr=args.Tr, dt=dt, K=args.K, feature_times=args.feature_times)
-
-    sensor_idx = build_sensor_indices(
-        s=s,
-        obs=args.obs,
-        J=args.J,
-        sensor_mode=args.sensor_mode,
-        sensor_seed=args.sensor_seed,
-    )
+    k_obs = len(obs_steps)
 
     x_train, y_train, x_test, y_test = load_data(args, s)
     x_train = x_train.reshape(args.ntrain, s).float()
@@ -228,7 +210,7 @@ def main() -> None:
     train_loader = torch.utils.data.DataLoader(
         torch.utils.data.TensorDataset(x_train, y_train),
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=False,
     )
     eval_train_loader = torch.utils.data.DataLoader(
         torch.utils.data.TensorDataset(x_train, y_train),
@@ -252,65 +234,46 @@ def main() -> None:
         )
     )
 
-    sensor_idx_dev = sensor_idx.to(device)
+    gen = torch.Generator(device="cpu")
+    gen.manual_seed(args.rfm_seed)
+    weight_scale = args.rfm_weight_scale
+    if weight_scale <= 0.0:
+        weight_scale = 1.0 / math.sqrt(float(k_obs))
+    A = weight_scale * torch.randn((args.m, k_obs), generator=gen, dtype=torch.float32, device="cpu")
+    b = args.rfm_bias_scale * torch.randn((args.m,), generator=gen, dtype=torch.float32, device="cpu")
+    A = A.to(device)
+    b = b.to(device)
 
     @torch.no_grad()
-    def phi_fn(x_batch: torch.Tensor) -> torch.Tensor:
+    def function_features(x_batch: torch.Tensor) -> torch.Tensor:
         x = x_batch.to(device=device, dtype=torch.float32)
         z0 = args.input_scale * x + args.input_shift
         states = reservoir.simulate(z0, dt=dt, Tr=args.Tr, obs_steps=obs_steps)
-        obs_list = collect_observations(states, args.obs, sensor_idx_dev)
-        return flatten_observations(obs_list)
+        Z = torch.stack(states, dim=1)
+        mixed = torch.einsum("bks,mk->bms", Z, A) + b.view(1, args.m, 1)
+        return apply_activation(mixed, args.rfm_activation)
 
-    # Probe feature dimension.
-    probe_phi = phi_fn(x_train[: min(2, args.ntrain)])
-    if torch.isnan(probe_phi).any():
-        raise RuntimeError("NaN detected in reservoir features")
+    probe = function_features(x_train[: min(2, args.ntrain)])
+    if probe.shape[-2:] != (args.m, s):
+        raise RuntimeError(f"Unexpected feature shape: {tuple(probe.shape)}")
+    if torch.isnan(probe).any():
+        raise RuntimeError("NaN detected in RFM features")
 
-    elm = None
-    if args.use_elm == 1:
-        elm = FixedRandomELM(
-            in_dim=probe_phi.shape[1],
-            hidden_dim=args.elm_h,
-            activation=args.elm_activation,
-            seed=args.elm_seed,
-            weight_scale=args.elm_weight_scale,
-            bias_scale=args.elm_bias_scale,
-            device=device,
-            dtype=torch.float32,
-        )
-
-    @torch.no_grad()
-    def feature_fn(x_batch: torch.Tensor) -> torch.Tensor:
-        phi = phi_fn(x_batch)
-        if elm is None:
-            return phi
-        return elm(phi)
-
-    probe_h = feature_fn(x_train[: min(2, args.ntrain)])
-    if torch.isnan(probe_h).any():
-        raise RuntimeError("NaN detected in final features")
-
-    t0 = time.time()
     ridge_dtype = ridge_dtype_from_name(args.ridge_dtype)
-    if args.standardize_features == 1:
-        ridge_state = fit_ridge_streaming_standardized(
-            train_loader,
-            feature_fn,
-            args.ridge_lambda,
-            dtype=ridge_dtype,
-            regularize_bias=False,
-            eps=args.feature_std_eps,
-        )
-    else:
-        ridge_state = fit_ridge_streaming(
-            train_loader,
-            feature_fn,
-            args.ridge_lambda,
-            dtype=ridge_dtype,
-            regularize_bias=False,
-        )
-    W = ridge_state["W"]
+    t0 = time.time()
+    gram = torch.zeros((args.m, args.m), dtype=ridge_dtype, device=device)
+    rhs = torch.zeros((args.m,), dtype=ridge_dtype, device=device)
+
+    for xb, yb in train_loader:
+        F = function_features(xb).to(dtype=ridge_dtype)
+        yb_dev = yb.to(device=device, dtype=ridge_dtype)
+        gram += torch.einsum("bms,bns->mn", F, F)
+        rhs += torch.einsum("bms,bs->m", F, yb_dev)
+
+    eye = torch.eye(args.m, device=device, dtype=ridge_dtype)
+    reg_gram = gram + args.ridge_lambda * eye
+    chol = torch.linalg.cholesky(reg_gram)
+    alpha = torch.cholesky_solve(rhs.unsqueeze(1), chol).squeeze(1)
 
     @torch.no_grad()
     def run_eval(loader):
@@ -319,8 +282,8 @@ def main() -> None:
         ys = []
         xs = []
         for xb, yb in loader:
-            feat = feature_fn(xb).to(dtype=W.dtype)
-            pred = predict_linear(feat, W).to(dtype=torch.float32)
+            F = function_features(xb).to(dtype=alpha.dtype)
+            pred = torch.einsum("m,bms->bs", alpha, F).to(dtype=torch.float32)
             y_dev = yb.to(pred.device, dtype=pred.dtype)
             num = torch.linalg.norm((pred - y_dev).reshape(pred.shape[0], -1), dim=1)
             den = torch.linalg.norm(y_dev.reshape(y_dev.shape[0], -1), dim=1)
@@ -339,8 +302,8 @@ def main() -> None:
     test_rel, pred_test, y_test_all, x_test_all = run_eval(test_loader)
     elapsed = time.time() - t0
 
-    print(f"reservoir={args.reservoir} obs={args.obs} use_elm={args.use_elm}")
-    print(f"dt={dt} Tr={args.Tr} K={len(obs_steps)} feature_dim={probe_h.shape[1]}")
+    print(f"reservoir={args.reservoir} m={args.m} act={args.rfm_activation}")
+    print(f"dt={dt} Tr={args.Tr} K={k_obs} s={s}")
     print(f"train relL2: {train_rel:.6f}")
     print(f"test  relL2: {test_rel:.6f}")
     print(f"elapsed sec: {elapsed:.3f}")
@@ -368,24 +331,14 @@ def main() -> None:
         if save_path == "model.pt":
             save_path = os.path.join(out_dir, save_path)
         state = {
-            "W_out": W.detach().cpu(),
-            "sensor_idx": sensor_idx.cpu(),
+            "alpha": alpha.detach().cpu(),
+            "A_time_mix": A.detach().cpu(),
+            "b_time_mix": b.detach().cpu(),
             "obs_times": times,
             "obs_steps": obs_steps,
             "config": vars(args),
             "reservoir_config": asdict(reservoir.config),
         }
-        if elm is not None:
-            state["elm_weight"] = elm.weight.detach().cpu()
-            state["elm_bias"] = elm.bias.detach().cpu()
-            state["elm_activation"] = elm.activation
-        if "mean" in ridge_state:
-            state["feature_mean"] = ridge_state["mean"].detach().cpu()
-        if "std" in ridge_state:
-            state["feature_std"] = ridge_state["std"].detach().cpu()
-        if "W_std" in ridge_state:
-            state["W_out_std"] = ridge_state["W_std"].detach().cpu()
-
         torch.save(state, save_path)
         print(f"saved model: {save_path}")
 

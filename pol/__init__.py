@@ -8,7 +8,7 @@ from .features_1d import (
     flatten_observations,
 )
 from .reservoir_1d import Reservoir1DSolver
-from .ridge import fit_ridge_streaming, predict_linear
+from .ridge import fit_ridge_streaming, fit_ridge_streaming_standardized, predict_linear
 
 __all__ = [
     "FixedRandomELM",
@@ -18,5 +18,6 @@ __all__ = [
     "collect_observations",
     "flatten_observations",
     "fit_ridge_streaming",
+    "fit_ridge_streaming_standardized",
     "predict_linear",
 ]
