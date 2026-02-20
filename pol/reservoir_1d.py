@@ -16,6 +16,9 @@ class ReservoirConfig:
     rd_alpha: float = 1.0
     rd_beta: float = 1.0
     res_burgers_nu: float = 5e-2
+    ks_nl: float = 1.0
+    ks_c2: float = 1.0
+    ks_c4: float = 1.0
     ks_dealias: bool = False
 
 
@@ -84,11 +87,11 @@ class Reservoir1DSolver:
     def _step_ks(self, z: torch.Tensor, dt: float, k: torch.Tensor) -> torch.Tensor:
         z_hat = torch.fft.rfft(z, dim=-1)
         zx = self._ux(z, k)
-        nonlinear = -z * zx
+        nonlinear = -self.config.ks_nl * z * zx
         n_hat = torch.fft.rfft(nonlinear, dim=-1)
         n_hat = self._apply_dealias(n_hat)
 
-        l_hat = k.pow(2) - k.pow(4)
+        l_hat = self.config.ks_c2 * k.pow(2) - self.config.ks_c4 * k.pow(4)
         denom = 1.0 - dt * l_hat
         next_hat = (z_hat + dt * n_hat) / denom
         next_hat = self._apply_dealias(next_hat)

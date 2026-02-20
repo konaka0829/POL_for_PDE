@@ -304,6 +304,104 @@ python reservoir_burgers_1d.py --dry-run --ntrain 8 --ntest 4 --sub 256
 - `--save-model`（デフォルト: `""`）: モデル保存。引数なしで付けると `out-dir/model.pt`
 - `--dry-run`（デフォルト: `False`）: 外部データ不要の検証モード
 
+### reservoir_random_features_burgers_1d.py（Theme 1: Random Features KRR）
+`AGENT.md` Theme 1 仕様に対応したスクリプトで、ランダムにサンプルした `R` 本のリザーバPDE特徴を結合し、最後を ridge で学習します。
+
+**dry-run（外部データ不要）**
+```bash
+python reservoir_random_features_burgers_1d.py \
+  --dry-run --ntrain 8 --ntest 4 --sub 256 \
+  --reservoir reaction_diffusion --Tr 0.2 --dt 0.01 --K 3 \
+  --obs points --J 32 \
+  --R 4 --theta-seed 0 \
+  --use-elm 1 --elm-mode per_reservoir --elm-h-per 16 --elm-activation tanh \
+  --ridge-lambda 1e-3 --ridge-dtype float64 \
+  --out-dir visualizations/theme1_dryrun --save-model
+```
+
+**実行例（single_split 実データ）**
+```bash
+python reservoir_random_features_burgers_1d.py \
+  --data-mode single_split --data-file data/burgers_data_R10.mat \
+  --ntrain 1000 --ntest 100 --sub 8 --batch-size 20 \
+  --reservoir reaction_diffusion --Tr 1.0 --dt 0.01 --K 5 \
+  --obs points --J 128 --sensor-mode equispaced \
+  --R 8 --theta-seed 0 \
+  --use-elm 1 --elm-mode per_reservoir --elm-h-per 128 --elm-activation tanh \
+  --ridge-lambda 1e-4 --ridge-dtype float64 \
+  --out-dir visualizations/theme1_run --save-model
+```
+
+**実行パターン（使い分け）**
+- 軽量確認: `--dry-run` で shape/NaN/保存を確認
+- 通常学習: `single_split` か `separate_files` で実データを指定
+- 省メモリ寄り: `--use-elm 1 --elm-mode per_reservoir`（デフォルト）を推奨
+- 生特徴を直接 ridge: `--use-elm 0`（特徴次元が大きいとメモリ負荷に注意）
+
+**引数とデフォルト値（`reservoir_random_features_burgers_1d.py`）**
+- データ関連
+- `--data-mode`（デフォルト: `single_split`）: `single_split|separate_files`
+- `--data-file`（デフォルト: `data/burgers_data_R10.mat`）
+- `--train-file`（デフォルト: `None`）
+- `--test-file`（デフォルト: `None`）
+- `--train-split`（デフォルト: `0.8`）
+- `--seed`（デフォルト: `0`）
+- `--shuffle`（デフォルト: `False`）
+- `--ntrain`（デフォルト: `1000`）
+- `--ntest`（デフォルト: `100`）
+- `--sub`（デフォルト: `8`）
+- `--batch-size`（デフォルト: `20`）
+- `--dry-run`（デフォルト: `False`）
+
+- リザーバ・観測関連
+- `--reservoir`（デフォルト: `reaction_diffusion`）: `reaction_diffusion|ks|burgers`
+- `--Tr`（デフォルト: `1.0`）
+- `--dt`（デフォルト: `0.01`）
+- `--ks-dt`（デフォルト: `0.0`）: KS 時に `>0` なら `dt` を上書き
+- `--K`（デフォルト: `5`）
+- `--feature-times`（デフォルト: `""`）
+- `--obs`（デフォルト: `full`）: `full|points`
+- `--J`（デフォルト: `128`）
+- `--sensor-mode`（デフォルト: `equispaced`）: `equispaced|random`
+- `--sensor-seed`（デフォルト: `0`）
+- `--input-scale`（デフォルト: `1.0`）
+- `--input-shift`（デフォルト: `0.0`）
+- `--ks-dealias`（デフォルト: `False`）
+
+- Theme 1 固有
+- `--R`（デフォルト: `8`）: ランダムリザーバ数
+- `--theta-seed`（デフォルト: `0`）: θ サンプリング用 seed
+
+- θ 分布関連
+- `--rd-nu-range`（デフォルト: `1e-4 1e-2`）
+- `--rd-alpha-range`（デフォルト: `0.5 1.5`）
+- `--rd-beta-range`（デフォルト: `0.5 1.5`）
+- `--rd-nu-dist`（デフォルト: `loguniform`）: `loguniform|uniform`
+- `--res-burgers-nu-range`（デフォルト: `1e-3 2e-1`）
+- `--res-burgers-nu-dist`（デフォルト: `loguniform`）: `loguniform|uniform`
+- `--ks-nl-range`（デフォルト: `0.7 1.3`）
+- `--ks-c2-range`（デフォルト: `0.7 1.3`）
+- `--ks-c4-range`（デフォルト: `0.7 1.3`）
+
+- ELM 関連
+- `--use-elm`（デフォルト: `1`）
+- `--elm-mode`（デフォルト: `per_reservoir`）: `per_reservoir|global`
+- `--elm-h-per`（デフォルト: `128`）: `per_reservoir` 用
+- `--elm-h`（デフォルト: `2048`）: `global` 用
+- `--elm-activation`（デフォルト: `tanh`）: `tanh|relu`
+- `--elm-seed`（デフォルト: `0`）
+- `--elm-weight-scale`（デフォルト: `0.0`）: `<=0` なら `1/sqrt(in_dim)` を使用
+- `--elm-bias-scale`（デフォルト: `1.0`）
+
+- Ridge 関連
+- `--ridge-lambda`（デフォルト: `1e-4`）
+- `--ridge-dtype`（デフォルト: `float64`）: `float32|float64`
+
+- 実行・出力関連
+- `--device`（デフォルト: `auto`）: `auto|cpu|cuda`
+- `--out-dir`（デフォルト: `visualizations/theme1_random_features_1d`）
+- `--save-model`（デフォルト: `""`）: 引数なしで付けると `out-dir/model.pt`
+
 ## Datasets
 We provide the Burgers equation, Darcy flow, and Navier-Stokes equation datasets we used in the paper. 
 The data generation configuration can be found in the paper.
