@@ -1,0 +1,90 @@
+{
+  "args": {
+    "data_mode": "single_split",
+    "data_file": "data/burgers_data_R10.mat",
+    "train_file": null,
+    "test_file": null,
+    "train_split": 0.8,
+    "seed": 0,
+    "shuffle": false,
+    "ntrain": 8,
+    "ntest": 4,
+    "sub": 256,
+    "batch_size": 20,
+    "dry_run": true,
+    "reservoir": "reaction_diffusion",
+    "Tr": 0.2,
+    "dt": 0.01,
+    "ks_dt": 0.0,
+    "K": 3,
+    "feature_times": "",
+    "obs": "points",
+    "J": 32,
+    "sensor_mode": "equispaced",
+    "sensor_seed": 0,
+    "input_scale": 1.0,
+    "input_shift": 0.0,
+    "ks_dealias": false,
+    "R": 4,
+    "theta_seed": 0,
+    "rd_nu_range": [
+      0.0001,
+      0.01
+    ],
+    "rd_alpha_range": [
+      0.5,
+      1.5
+    ],
+    "rd_beta_range": [
+      0.5,
+      1.5
+    ],
+    "rd_nu_dist": "loguniform",
+    "res_burgers_nu_range": [
+      0.001,
+      0.2
+    ],
+    "res_burgers_nu_dist": "loguniform",
+    "ks_nl_range": [
+      0.7,
+      1.3
+    ],
+    "ks_c2_range": [
+      0.7,
+      1.3
+    ],
+    "ks_c4_range": [
+      0.7,
+      1.3
+    ],
+    "use_elm": 1,
+    "elm_mode": "per_reservoir",
+    "elm_h_per": 16,
+    "elm_h": 2048,
+    "elm_activation": "tanh",
+    "elm_seed": 0,
+    "elm_weight_scale": 0.0,
+    "elm_bias_scale": 1.0,
+    "ridge_lambda": 0.001,
+    "ridge_dtype": "float64",
+    "device": "auto",
+    "out_dir": "visualizations/theme1_dryrun",
+    "save_model": "model.pt"
+  },
+  "resolved_dt": 0.01,
+  "obs_times": [
+    0.01,
+    0.105,
+    0.2
+  ],
+  "obs_steps": [
+    1,
+    10,
+    20
+  ],
+  "raw_feature_dim": 384,
+  "final_feature_dim": 64,
+  "train_relL2": 0.0002819473738782108,
+  "test_relL2": 1.05149245262146,
+  "elapsed_sec": 0.13797497749328613
+}

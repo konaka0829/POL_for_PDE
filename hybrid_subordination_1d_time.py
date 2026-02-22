@@ -35,20 +35,49 @@ def _read_optional_scalar(reader: MatReader, field: str) -> float | None:
     return None
 
 
+def _read_time_or_default(
+    reader: MatReader,
+    u_data: torch.Tensor,
+    default_t_max: float,
+    source_name: str,
+) -> torch.Tensor:
+    """Read 1D time array t; if missing, create uniform time grid from u's time length."""
+    if u_data.ndim != 3:
+        raise ValueError(f"Expected u=(N,S,T) before reading time array, got {tuple(u_data.shape)}")
+    T = int(u_data.shape[-1])
+    if T <= 1:
+        raise ValueError(f"Expected time dimension T>1 in u, got T={T}")
+
+    try:
+        t = reader.read_field("t").reshape(-1)
+    except KeyError:
+        t = torch.linspace(0.0, float(default_t_max), T, dtype=u_data.dtype)
+        print(
+            f"[warn] 't' field not found in {source_name}. "
+            f"Using fallback t=linspace(0,{float(default_t_max):g},{T})."
+        )
+        return t
+
+    if t.ndim != 1:
+        raise ValueError(f"Expected t=(T,), got {tuple(t.shape)} in {source_name}")
+    if t.numel() != T:
+        raise ValueError(
+            f"Time length mismatch in {source_name}: u has T={T} but t has length {t.numel()}."
+        )
+    return t
+
+
 def _load_single_split(
     args: argparse.Namespace,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, float | None]:
     reader = MatReader(args.data_file)
     a_data = reader.read_field("a")
     u_data = reader.read_field("u")
-    t = reader.read_field("t").reshape(-1)
+    t = _read_time_or_default(reader, u_data, args.default_t_max, args.data_file)
     alpha = _read_optional_scalar(reader, "alpha")
 
     if a_data.ndim != 2 or u_data.ndim != 3:
         raise ValueError(f"Expected a=(N,S), u=(N,S,T), got {tuple(a_data.shape)}, {tuple(u_data.shape)}")
-    if t.ndim != 1:
-        raise ValueError(f"Expected t=(T,), got {tuple(t.shape)}")
-
     a_data = a_data[:, :: args.sub]
     u_data = u_data[:, :: args.sub, :: args.sub_t]
     t = t[:: args.sub_t]
@@ -89,11 +118,15 @@ def _load_separate_files(
 
     a_train_all = train_reader.read_field("a")[:, :: args.sub]
     u_train_all = train_reader.read_field("u")[:, :: args.sub, :: args.sub_t]
-    t_train = train_reader.read_field("t").reshape(-1)[:: args.sub_t]
+    t_train = _read_time_or_default(train_reader, train_reader.read_field("u"), args.default_t_max, args.train_file)[
+        :: args.sub_t
+    ]
 
     a_test_all = test_reader.read_field("a")[:, :: args.sub]
     u_test_all = test_reader.read_field("u")[:, :: args.sub, :: args.sub_t]
-    t_test = test_reader.read_field("t").reshape(-1)[:: args.sub_t]
+    t_test = _read_time_or_default(test_reader, test_reader.read_field("u"), args.default_t_max, args.test_file)[
+        :: args.sub_t
+    ]
 
     if args.ntrain > a_train_all.shape[0]:
         raise ValueError(f"ntrain={args.ntrain} exceeds available train samples={a_train_all.shape[0]}.")
@@ -128,6 +161,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ntest", type=int, default=200)
     parser.add_argument("--sub", type=int, default=1)
     parser.add_argument("--sub-t", type=int, default=1)
+    parser.add_argument(
+        "--default-t-max",
+        type=float,
+        default=1.0,
+        help="Fallback max time used only when 't' field is missing in .mat (uniform linspace).",
+    )
 
     parser.add_argument("--psi-J", type=int, default=32)
     parser.add_argument("--learn-s", action="store_true")
@@ -181,6 +220,8 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         parser.error("--sub-t must be positive.")
     if args.ntrain <= 0 or args.ntest <= 0:
         parser.error("--ntrain and --ntest must be positive.")
+    if args.default_t_max <= 0:
+        parser.error("--default-t-max must be positive.")
 
     if args.base_epochs <= 0:
         parser.error("--base-epochs must be positive.")
