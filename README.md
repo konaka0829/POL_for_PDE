@@ -100,6 +100,93 @@ python fourier_2d.py --data-mode single_split --data-file data/piececonst_r421_N
 - `--r`（デフォルト: `5`）
 - `--grid-size`（デフォルト: `421`）
 
+### pde_rf_1d.py（PDE-induced Random Features / Burgers）
+**実行例**
+```bash
+# 合成データでスモークテスト（データ不要）
+python3 pde_rf_1d.py --smoke-test
+
+# 実データ（single_split）
+python3 pde_rf_1d.py --data-mode single_split --data-file data/burgers_data_R10.mat
+
+# 実データ（separate_files）
+python3 pde_rf_1d.py --data-mode separate_files \
+  --train-file data/burgers_train.mat \
+  --test-file data/burgers_test.mat
+```
+
+**引数とデフォルト値（意味）**
+- データ指定（`fourier_1d.py` 互換）
+- `--data-mode`：`single_split` / `separate_files`（デフォルト: `single_split`）
+- `--data-file`：単一ファイル読み込み時（デフォルト: `data/burgers_data_R10.mat`）
+- `--train-file` / `--test-file`：分割済みファイル（デフォルト: `None`）
+- `--train-split`：単一ファイル時の学習割合（デフォルト: `0.8`）
+- `--seed`：乱数シード（分割・特徴サンプリング）（デフォルト: `0`）
+- `--shuffle`：分割前にシャッフル（デフォルト: `False`）
+- `--ntrain` / `--ntest`：学習/評価サンプル数（デフォルト: `1000` / `100`）
+- `--sub`：1D格子の間引き率（デフォルト: `8`）
+- PDE-RF 固有
+- `--M`：ランダム特徴数（デフォルト: `2048`）
+- `--nu`：熱半群 \(e^{\tau \nu \Delta}\) の拡散係数（デフォルト: `1.0`）
+- `--tau-dist`：`loguniform` / `uniform` / `exponential`（デフォルト: `loguniform`）
+- `--tau-min` / `--tau-max`：\(\tau\) の範囲（デフォルト: `1e-4` / `1.0`）
+- `--tau-exp-rate`：exponential 分布の rate（デフォルト: `1.0`）
+- `--g-smooth-tau`：ランダムテスト関数 \(g\) の事前平滑化時間（デフォルト: `0.0` = 無効）
+- `--activation`：`tanh` / `gelu` / `relu` / `sin`（デフォルト: `tanh`）
+- `--feature-scale`：`none` / `inv_sqrt_m`（デフォルト: `inv_sqrt_m`）
+- `--ridge-lambda`：リッジ正則化係数（デフォルト: `1e-6`、`>0` 必須）
+- `--solve-device`：`auto` / `cpu` / `cuda`（デフォルト: `auto`）
+- `--dtype`：`float32` / `float64`（デフォルト: `float32`）
+- 可視化/検証
+- `--viz-dir`：可視化保存先（デフォルト: `visualizations/pde_rf_1d`）
+- `--num-viz`：可視化するテストサンプル数（デフォルト: `3`）
+- `--smoke-test`：合成データ実行フラグ（デフォルト: `False`）
+
+### pde_rf_2d.py（PDE-induced Random Features / Darcy）
+**実行例**
+```bash
+# 合成データでスモークテスト（データ不要）
+python3 pde_rf_2d.py --smoke-test
+
+# 実データ（separate_files）
+python3 pde_rf_2d.py --data-mode separate_files \
+  --train-file data/piececonst_r421_N1024_smooth1.mat \
+  --test-file data/piececonst_r421_N1024_smooth2.mat
+
+# 実データ（single_split）
+python3 pde_rf_2d.py --data-mode single_split --data-file data/piececonst_r421_N1024_smooth1.mat
+```
+
+**引数とデフォルト値（意味）**
+- データ指定（`fourier_2d.py` 互換）
+- `--data-mode`：`single_split` / `separate_files`（デフォルト: `separate_files`）
+- `--data-file`：単一ファイル読み込み時（デフォルト: `data/piececonst_r421_N1024_smooth1.mat`）
+- `--train-file` / `--test-file`：分割済みファイル（デフォルト: `data/piececonst_r421_N1024_smooth1.mat` / `data/piececonst_r421_N1024_smooth2.mat`）
+- `--ntrain` / `--ntest`：学習/評価サンプル数（デフォルト: `1000` / `100`）
+- `--seed`：乱数シード（デフォルト: `0`）
+- `--r`：空間ダウンサンプル率（デフォルト: `5`）
+- `--grid-size`：元の格子サイズ（デフォルト: `421`）
+- PDE-RF 固有
+- `--M`：ランダム特徴数（デフォルト: `2048`）
+- `--nu`：熱半群 \(e^{\tau \nu \Delta}\) の拡散係数（デフォルト: `1.0`）
+- `--tau-dist`：`loguniform` / `uniform` / `exponential`（デフォルト: `loguniform`）
+- `--tau-min` / `--tau-max`：\(\tau\) の範囲（デフォルト: `1e-4` / `1.0`）
+- `--tau-exp-rate`：exponential 分布の rate（デフォルト: `1.0`）
+- `--g-smooth-tau`：ランダムテスト関数 \(g\) の事前平滑化時間（デフォルト: `0.0` = 無効）
+- `--activation`：`tanh` / `gelu` / `relu` / `sin`（デフォルト: `tanh`）
+- `--feature-scale`：`none` / `inv_sqrt_m`（デフォルト: `inv_sqrt_m`）
+- `--ridge-lambda`：リッジ正則化係数（デフォルト: `1e-6`、`>0` 必須）
+- `--solve-device`：`auto` / `cpu` / `cuda`（デフォルト: `auto`）
+- `--dtype`：`float32` / `float64`（デフォルト: `float32`）
+- 出力基底（2Dのみ）
+- `--basis`：`grid` / `pod`（デフォルト: `grid`）
+- `--basis-dim`：`basis=pod` 時の次元数（デフォルト: `256`）
+- `--pod-center` / `--no-pod-center`：POD 前の中心化有無（デフォルト: `--pod-center`）
+- 可視化/検証
+- `--viz-dir`：可視化保存先（デフォルト: `visualizations/pde_rf_2d`）
+- `--num-viz`：可視化するテストサンプル数（デフォルト: `3`）
+- `--smoke-test`：合成データ実行フラグ（デフォルト: `False`）
+
 ### fourier_2d_time.py
 **実行例**
 ```bash

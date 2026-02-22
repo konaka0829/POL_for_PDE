@@ -1,7 +1,10 @@
 import torch
 import numpy as np
 import scipy.io
-import h5py
+try:
+    import h5py
+except ImportError:
+    h5py = None
 import torch.nn as nn
 
 import operator
@@ -34,9 +37,21 @@ class MatReader(object):
         try:
             self.data = scipy.io.loadmat(self.file_path)
             self.old_mat = True
-        except:
-            self.data = h5py.File(self.file_path)
-            self.old_mat = False
+            return
+        except NotImplementedError:
+            # MATLAB v7.3 files are HDF5-backed and require h5py.
+            pass
+        except ValueError as exc:
+            # Some SciPy versions raise ValueError for v7.3/unknown MAT headers.
+            msg = str(exc).lower()
+            if "please use hdf reader" not in msg and "unknown mat file type" not in msg:
+                raise
+        if h5py is None:
+            raise ImportError(
+                "h5py is required to read MATLAB v7.3 files but is not installed."
+            )
+        self.data = h5py.File(self.file_path)
+        self.old_mat = False
 
     def load_file(self, file_path):
         self.file_path = file_path
