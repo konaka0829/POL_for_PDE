@@ -612,3 +612,320 @@ GPU/CPU 両対応（device に乗る tensor で torch.poisson できるように
 log は log(x+eps) を徹底
 
 underflow は 0 になっても良いが NaN を出さない
+
+# AGENT.md — Hybrid Subordination + Residual Correction (1D) with FNO / CNN / MLP / ELM
+
+## 0. 目的（今回追加する研究機能）
+このリポジトリには既に 1D Subordination（熱半群 + Bernstein 関数 ψ 推定）と、(A) ψの解析ベースライン推定、(B) Monte Carlo subordination forward が実装済みである。
+
+今回の目的は **「ψ(-Δ) クラス外のPDE」**（例：非線形・移流・係数不均一など）に対して、
+Subordination を **物理（既知PDE＝熱）に基づく計算基盤**として残しつつ、
+不足分をデータ駆動で補正する **ハイブリッド予測器**を実装すること。
+
+具体的には以下の形を学習する：
+
+- Base（理論核）：  
+  \[
+  u_{\text{base}}(t) = S_{\psi}(t)a,\qquad S_{\psi}(t)=e^{-t\psi(-\Delta)}
+  \]
+- Residual（補正器）：  
+  \[
+  r_{\theta}(\cdot)
+  \]
+- Hybrid（最終予測）：  
+  \[
+  u_{\text{pred}}(t)=u_{\text{base}}(t) + r_{\theta}\big(\mathcal{I}(a,\;u_{\text{base}})\big)
+  \]
+
+Residual 補正器として **FNO / CNN / MLP**（学習）に加え、**ELM（固定ランダム特徴 + 線形読出しを最小二乗/リッジで学習）**も実装する。
+
+---
+
+## 1. 数理仕様（実装に直結）
+
+### 1.1 1D 周期領域
+- 空間領域：\(\Omega=[0,1)\)（周期）
+- グリッド：\(S\) 点
+- \(-\Delta\) 固有値（rFFT）：
+  \[
+  \lambda_k=(2\pi k)^2,\quad k=0,\dots,\lfloor S/2\rfloor
+  \]
+
+### 1.2 Base（Subordination）モデル
+既存実装 `subordination_1d_time.py` のクラスを **再利用**する：
+- `BernsteinPsi`
+- `SubordinatedHeatOperator1D`
+
+Base forward は：
+\[
+\widehat{u}_{\text{base}}(k,t)=e^{-t\psi(\lambda_k)}\widehat{a}(k)
+\]
+（既存コード通り FFT multiplier）
+
+### 1.3 Hybrid（Residual 補正）
+教師データ：\((a_i,\;u_i(x,t_j))\)
+
+- Base 予測：\(u_{\text{base},i}=S_{\psi}(t)a_i\)
+- 残差ターゲット：
+  \[
+  r_i = u_i - u_{\text{base},i}
+  \]
+- Hybrid 予測：
+  \[
+  u_{\text{pred},i}=u_{\text{base},i}+r_{\theta}(\mathcal{I}_i)
+  \]
+
+入力 \(\mathcal{I}\) の選択（実装オプション）：
+- `a_only`：\(\mathcal{I}=a\)
+- `base_only`：\(\mathcal{I}=u_{\text{base}}\)
+- `a_and_base`：\(\mathcal{I}=\text{concat}(a,\;u_{\text{base}})\)
+
+**重要（shape 仕様）**：
+- `a`：`(B,S,1)`
+- `u_base`：`(B,S,T)`
+- `I`：`(B,S,C)` where
+  - `a_only` → `C=1`
+  - `base_only` → `C=T`
+  - `a_and_base` → `C=1+T`
+- Residual 出力：`(B,S,T)`（全ての時間を一括で補正）
+
+---
+
+## 2. 追加/変更するファイル
+
+### 2.1 追加（必須）
+1) **`residual_models_1d.py`**（新規：Residual モデル集）
+- `ResidualMLP1D`
+- `ResidualCNN1D`
+- `ResidualFNO1D`（fourier_1d.py を import しない。必要クラスをここに実装する）
+- `ELMResidual1D`（fit/predict を持つ）
+
+2) **`hybrid_subordination_1d_time.py`**（新規：学習・評価スクリプト）
+- Base（ψ）学習 + Residual 学習/同定 + 評価 + 可視化
+- `--residual {none,mlp,cnn,fno,elm}` を提供
+- `--res-input {a_only,base_only,a_and_base}` を提供
+- ELM は closed-form（ridge）で学習（Adam ではない）
+
+### 2.2 変更（必須）
+- `README.md` に以下を追記：
+  - `hybrid_subordination_1d_time.py` の目的・概念図（短く）
+  - Residual の選択肢（FNO/CNN/MLP/ELM）
+  - 実行例（fractional diffusion データで sanity check）
+
+---
+
+## 3. データフォーマット（.mat）
+既存 `MatReader`（utilities3.py）で読む。
+
+必須：
+- `a`: `(N,S)` float
+- `u`: `(N,S,T)` float
+- `t`: `(T,)` float
+
+任意：
+- `alpha`（分数拡散検証用）
+
+---
+
+## 4. Training 方針（実装仕様）
+
+### 4.1 学習モード
+`hybrid_subordination_1d_time.py` は以下をサポート：
+
+- `two_stage`（デフォルト推奨）
+  1. Base ψ を `base_epochs` だけ学習（Residual なし）
+  2. ψ を freeze して Residual を学習/同定
+     - MLP/CNN/FNO：Adam で `res_epochs`
+     - ELM：ridge の closed-form で一発 fit
+
+- `joint`（任意）
+  - MLP/CNN/FNO のみ対応
+  - ψ と Residual を同時に Adam 学習（ELM は不可）
+  - `--joint-warmup-epochs`（最初に ψ のみ pretrain）を用意してもよいが、必須ではない
+
+### 4.2 Loss（統一）
+損失は既存流儀に合わせ **relative L2** を基本とする：
+
+\[
+\text{relL2}(u_{\text{pred}},u)=\frac{\|u_{\text{pred}}-u\|_2}{\|u\|_2+\varepsilon}
+\]
+
+- Base 学習時：`loss = relL2(u_base, u_gt)`
+- Residual 学習時：`loss = relL2(u_base + r, u_gt)`
+
+---
+
+## 5. Residual モデル仕様（residual_models_1d.py）
+
+### 5.1 共通：入力と grid
+- MLP/CNN は `include_x` オプションを持つ（x を追加チャネルにする）
+- FNO は常に x-grid を内部で concat（FNO の標準）
+
+grid は周期に合わせて `endpoint=False`：
+- `x = linspace(0,1,S, endpoint=False)`
+
+### 5.2 ResidualMLP1D（点ごとの MLP）
+- 入力：`(B,S,C)`（必要なら x を加えて `C+1`）
+- 点ごとに同一 MLP を適用して `T` 出力を生成：
+  - 実装は `view(B*S, C_in)` → `Linear/GELU/.../Linear(out=T)` → reshape `(B,S,T)`
+- CLI ハイパラ：
+  - `--mlp-width`
+  - `--mlp-depth`
+  - `--mlp-include-x`
+
+### 5.3 ResidualCNN1D（1D Conv）
+- 入力：`(B,S,C)`（必要なら x を concat）
+- Conv1d は `(B,C,S)` に permute して適用
+- 例：`depth` 層の Conv（kernel>1）＋最後に `Conv1d(width, T, 1)`
+- CLI：
+  - `--cnn-width`
+  - `--cnn-depth`
+  - `--cnn-kernel`
+  - `--cnn-include-x`
+
+### 5.4 ResidualFNO1D（1D FNO：多チャネル入力→T出力）
+- fourier_1d.py を import すると top-level 実行される可能性があるため **import禁止**。
+- 必要なクラスを `residual_models_1d.py` に実装する：
+  - `SpectralConv1d`
+  - `PointwiseMLP1d`（1x1 conv の小MLP）
+  - `ResidualFNO1D`
+
+仕様（概略）：
+- 入力：`(B,S,C)` → concat grid → `Linear(C+1→width)` → `(B,width,S)`
+- `n_layers` 回：
+  - spectral conv（modes）＋ 1x1 conv skip ＋ GELU
+- 最終：`Conv1d(width→T,1)` or `PointwiseMLP1d(width→T)`
+- CLI：
+  - `--fno-width`
+  - `--fno-modes`
+  - `--fno-layers`
+
+### 5.5 ELMResidual1D（Extreme Learning Machine：ランダム特徴 + リッジ回帰）
+ELM は **学習するのは出力線形層のみ**。隠れ層は固定ランダム。
+
+#### 定義
+- 入力ベクトル \(x_i\in\mathbb{R}^{D_{\text{in}}}\)（`res-input` により決まる）
+  - `a_only`：`x = vec(a)`（D_in = S）
+  - `base_only`：`x = vec(u_base)`（D_in = S*T）
+  - `a_and_base`：`x = concat(vec(a), vec(u_base))`（D_in = S + S*T）
+- 出力（残差）ベクトル \(y_i\in\mathbb{R}^{D_{\text{out}}}\)：
+  - `y = vec(u_gt - u_base)`（D_out = S*T）
+
+固定ランダム層：
+\[
+H = \sigma(X W_{\text{in}}^\top + b)
+\]
+- \(X\in\mathbb{R}^{N\times D_{\text{in}}}\)
+- \(W_{\text{in}}\in\mathbb{R}^{M\times D_{\text{in}}}\) は乱数固定
+- \(b\in\mathbb{R}^{M}\) も乱数固定
+- \(\sigma\) は `tanh/relu/gelu` から選択
+
+リッジ回帰（closed-form）：
+\[
+W_{\text{out}} = (H^\top H + \lambda I)^{-1} H^\top Y
+\]
+- \(Y\in\mathbb{R}^{N\times D_{\text{out}}}\)
+- \(W_{\text{out}}\in\mathbb{R}^{M\times D_{\text{out}}}\)
+
+推論：
+\[
+\hat y = h^\top W_{\text{out}},\qquad u_{\text{pred}} = u_{\text{base}} + \text{reshape}(\hat y)
+\]
+
+実装要件：
+- `ELMResidual1D.fit(X, Y)` と `predict(X)` を提供
+- 数値安定のため、内部計算は `float64` 推奨（出力は float32 に戻してよい）
+- オプション：入力標準化（推奨）
+  - `--elm-standardize-x`：`X` を (mean,std) で標準化し、推論時も同じ変換を適用
+
+CLI：
+- `--elm-hidden`（M）
+- `--elm-lam`（ridge λ）
+- `--elm-act {tanh,relu,gelu}`
+- `--elm-seed`
+- `--elm-standardize-x`
+
+---
+
+## 6. hybrid_subordination_1d_time.py の CLI（必須）
+
+### 6.1 データ・分割（既存流儀）
+- `--data-mode {single_split,separate_files}`
+- `--data-file` / `--train-file` / `--test-file`
+- `--train-split`, `--seed`, `--shuffle`
+- `--ntrain`, `--ntest`
+- `--sub`（空間）
+- `--sub-t`（時間）
+
+### 6.2 Base（ψ）学習
+- `--psi-J`, `--learn-s`, `--psi-s-min`, `--psi-s-max`, `--psi-eps`
+- `--base-epochs`
+- `--base-lr`
+- `--base-batch-size`
+
+### 6.3 Residual
+- `--residual {none,mlp,cnn,fno,elm}`
+- `--res-input {a_only,base_only,a_and_base}`
+- `--train-mode {two_stage,joint}`
+- （MLP/CNN/FNOのみ）
+  - `--res-epochs`
+  - `--res-lr`
+  - `--res-batch-size`
+  - `--freeze-psi`（two_stage では常に true 扱いでも良いが、明示フラグにしても良い）
+
+モデル別：
+- MLP：`--mlp-width --mlp-depth --mlp-include-x`
+- CNN：`--cnn-width --cnn-depth --cnn-kernel --cnn-include-x`
+- FNO：`--fno-width --fno-modes --fno-layers`
+- ELM：`--elm-hidden --elm-lam --elm-act --elm-seed --elm-standardize-x`
+
+### 6.4 可視化
+- `--viz-dir`（例：`visualizations/hybrid_subordination_1d_time`）
+- `--plot-samples`（例：3）
+- `--plot-times`（任意：カンマ区切りで time index 指定。未指定なら `[0, T//2, T-1]`）
+
+---
+
+## 7. 出力（可視化とログ）— 必須
+`viz_utils.py` の既存関数を使い、png/pdf/svg を保存。
+
+必須出力（`viz-dir` 配下）：
+- `learning_curve_base_relL2.*`
+- `error_hist_base_test_relL2.*`
+- `error_hist_hybrid_test_relL2.*`
+- サンプル可視化：
+  - `sample_{i}_t{j}_hybrid.*`（GT / base / hybrid を `plot_1d_prediction_multi` で重ねる）
+- 標準出力ログ：
+  - base train/test relL2
+  - hybrid train/test relL2
+  - residualタイプと主要ハイパラを print
+
+---
+
+## 8. Smoke Test（完成判定）
+以下が動けばOK：
+
+1) Fractional diffusion データで sanity：
+   - residual=none → base が当たり、hybrid（どの residual でも）悪化しない（または僅差）
+2) residual=elm で実行でき、closed-form fit が走って test 推論できる
+3) residual=mlp/cnn/fno で学習が走り、loss が下降傾向
+4) `viz-dir` に required outputs が生成される
+5) 既存スクリプトを壊さない（依存追加なし）
+
+---
+
+## 9. README 追記（例）
+（例コマンド：fractional diffusion データを使う）
+
+### Hybrid（MLP residual）
+```bash
+python hybrid_subordination_1d_time.py \
+  --data-mode single_split --data-file data/fractional_diffusion_1d_alpha0.5.mat \
+  --ntrain 1000 --ntest 200 --sub 2 --sub-t 1 \
+  --psi-J 32 --learn-s --psi-s-min 1e-3 --psi-s-max 1e3 \
+  --base-epochs 200 --base-lr 1e-2 --base-batch-size 20 \
+  --residual mlp --res-input a_and_base --train-mode two_stage \
+  --res-epochs 200 --res-lr 1e-3 --res-batch-size 20 \
+  --mlp-width 256 --mlp-depth 4 --mlp-include-x \
+  --viz-dir visualizations/hybrid_subordination_1d_time_mlp
+```

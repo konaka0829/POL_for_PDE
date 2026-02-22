@@ -300,6 +300,38 @@ python subordination_1d_time.py \
   --mc-samples 256 --mc-seed 0 --mc-batch-size 20 --mc-chunk 0
 ```
 
+### Hybrid Subordination + Residual Correction（1D）
+`hybrid_subordination_1d_time.py` は、base を
+`u_base(t)=exp(-t*psi(-Delta))a`
+で計算し、Residual 補正
+`u_pred = u_base + r_theta(I(a, u_base))`
+を加えるハイブリッド予測器です。Residual は `none/mlp/cnn/fno/elm` から選択できます。
+
+### Hybrid（MLP residual）実行例
+```bash
+python hybrid_subordination_1d_time.py \
+  --data-mode single_split --data-file data/fractional_diffusion_1d_alpha0.5.mat \
+  --ntrain 1000 --ntest 200 --sub 2 --sub-t 1 \
+  --psi-J 32 --learn-s --psi-s-min 1e-3 --psi-s-max 1e3 \
+  --base-epochs 200 --base-lr 1e-2 --base-batch-size 20 \
+  --residual mlp --res-input a_and_base --train-mode two_stage \
+  --res-epochs 200 --res-lr 1e-3 --res-batch-size 20 \
+  --mlp-width 256 --mlp-depth 4 --mlp-include-x \
+  --viz-dir visualizations/hybrid_subordination_1d_time_mlp
+```
+
+### Hybrid（ELM residual）実行例
+```bash
+python hybrid_subordination_1d_time.py \
+  --data-mode single_split --data-file data/fractional_diffusion_1d_alpha0.5.mat \
+  --ntrain 1000 --ntest 200 --sub 2 --sub-t 1 \
+  --psi-J 32 --learn-s --psi-s-min 1e-3 --psi-s-max 1e3 \
+  --base-epochs 200 --base-lr 1e-2 --base-batch-size 20 \
+  --residual elm --res-input a_and_base --train-mode two_stage \
+  --elm-hidden 2000 --elm-lam 1e-6 --elm-act tanh --elm-seed 0 --elm-standardize-x \
+  --viz-dir visualizations/hybrid_subordination_1d_time_elm
+```
+
 ### データフォーマット（.mat）
 - `a`: `(N, S)` float32（初期条件）
 - `u`: `(N, S, T)` float32（解、time-last）
