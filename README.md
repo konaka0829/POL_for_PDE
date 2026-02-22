@@ -270,6 +270,21 @@ python data_generation/fractional_diffusion_1d/gen_fractional_diffusion_1d.py \
   --N 1500 --S 1024 --T 11 --t-max 1.0 --alpha 0.5 --seed 0
 ```
 
+### データ生成（1D PDE suite: Burgers / 移流拡散 / 反応拡散 / 可変係数拡散 / KS）
+```bash
+python data_generation/pde_1d/gen_pde_1d_suite.py \
+  --pde burgers \
+  --out-file data/burgers_1d_hybrid.mat \
+  --N 1200 --S 256 --T 21 --t-max 1.0 --steps-per-save 20 --seed 0
+```
+
+`--pde` は次を選べます：
+- `burgers`（`u_t + u u_x = nu u_xx`）
+- `advection_diffusion`（`u_t + c u_x = kappa u_xx`）
+- `reaction_diffusion`（`u_t = kappa u_xx + r u - beta u^3`）
+- `variable_diffusion`（`u_t = d_x(a(x) d_x u)`）
+- `ks`（`u_t + u u_x + c2 u_xx + c4 u_xxxx = 0`）
+
 ### 学習
 ```bash
 python subordination_1d_time.py \
