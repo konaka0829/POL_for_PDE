@@ -8,7 +8,15 @@ from dataclasses import asdict, dataclass
 import numpy as np
 import torch
 
-from pde_features import PDERandomFeatureMap1D, apply_heat_semigroup_1d, set_random_seed, to_torch_dtype
+from pde_features import (
+    PDERandomFeatureMap1D,
+    apply_advection_1d,
+    apply_convection_diffusion_1d,
+    apply_heat_semigroup_1d,
+    apply_wave_1d,
+    set_random_seed,
+    to_torch_dtype,
+)
 from ridge import solve_ridge
 from utilities3 import LpLoss, MatReader
 from viz_utils import plot_1d_prediction, plot_error_histogram, rel_l2
@@ -58,7 +66,19 @@ def _load_data(args: argparse.Namespace, dtype: torch.dtype):
 
         a = torch.randn(total, s, dtype=dtype)
         tau_true = 0.08
-        u = apply_heat_semigroup_1d(a, tau=tau_true, nu=args.nu)
+        nu_true = args.nu
+        c_true = 0.7
+        c_wave_true = 1.25
+        gamma_true = max(args.wave_gamma, 0.2)
+
+        if args.operator == "heat":
+            u = apply_heat_semigroup_1d(a, tau=tau_true, nu=nu_true)
+        elif args.operator == "advection":
+            u = apply_advection_1d(a, tau=tau_true, c=c_true)
+        elif args.operator == "convdiff":
+            u = apply_convection_diffusion_1d(a, tau=tau_true, nu=nu_true, c=c_true)
+        else:
+            u = apply_wave_1d(a, tau=tau_true, c_wave=c_wave_true, gamma=gamma_true)
 
         x_train = a[:ntrain].unsqueeze(-1)
         y_train = u[:ntrain]
@@ -143,11 +163,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     # PDE-RF args
     p.add_argument("--M", type=int, default=2048)
+    p.add_argument("--operator", choices=["heat", "advection", "convdiff", "wave"], default="heat")
     p.add_argument("--nu", type=float, default=1.0)
     p.add_argument("--tau-dist", choices=["loguniform", "uniform", "exponential"], default="loguniform")
     p.add_argument("--tau-min", type=float, default=1e-4)
     p.add_argument("--tau-max", type=float, default=1.0)
     p.add_argument("--tau-exp-rate", type=float, default=1.0)
+
+    p.add_argument("--c-dist", choices=["uniform", "normal", "fixed"], default="uniform")
+    p.add_argument("--c-max", type=float, default=1.0)
+    p.add_argument("--c-std", type=float, default=1.0)
+    p.add_argument("--c-fixed", type=float, default=1.0)
+
+    p.add_argument("--wave-c-dist", choices=["uniform", "loguniform", "fixed"], default="uniform")
+    p.add_argument("--wave-c-min", type=float, default=0.1)
+    p.add_argument("--wave-c-max", type=float, default=2.0)
+    p.add_argument("--wave-c-fixed", type=float, default=1.0)
+    p.add_argument("--wave-gamma", type=float, default=0.0)
+
     p.add_argument("--g-smooth-tau", type=float, default=0.0)
     p.add_argument("--activation", choices=["tanh", "gelu", "relu", "sin"], default="tanh")
     p.add_argument("--feature-scale", choices=["none", "inv_sqrt_m"], default="inv_sqrt_m")
@@ -168,6 +201,10 @@ def main() -> None:
     args = build_parser().parse_args()
     if args.ridge_lambda <= 0:
         raise ValueError("--ridge-lambda must be > 0")
+    if args.operator in {"advection", "convdiff"} and args.c_dist == "uniform" and args.c_max <= 0:
+        raise ValueError("--c-max must be > 0")
+    if args.wave_gamma < 0:
+        raise ValueError("--wave-gamma must be >= 0")
 
     set_random_seed(args.seed)
     dtype = to_torch_dtype(args.dtype)
@@ -194,6 +231,17 @@ def main() -> None:
         activation=args.activation,
         feature_scale=args.feature_scale,
         inner_product=args.inner_product,
+        operator=args.operator,
+        c_dist=args.c_dist,
+        c_min=-args.c_max,
+        c_max=args.c_max,
+        c_std=args.c_std,
+        c_fixed=args.c_fixed,
+        wave_c_dist=args.wave_c_dist,
+        wave_c_min=args.wave_c_min,
+        wave_c_max=args.wave_c_max,
+        wave_c_fixed=args.wave_c_fixed,
+        wave_gamma=args.wave_gamma,
         dtype=dtype,
         device=device,
     )

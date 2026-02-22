@@ -362,3 +362,403 @@ PDE-RF固有（1Dと同じ＋ basis）：
 - `--basis=pod` を 1Dにも適用（任意）
 - README に「PDE-RF vs FNO」の比較実行例を追記
 - “既知PDEを変える”実験のため、`--semigroup {heat,helmholtz,...}` の拡張余地をコメントで残す
+# AGENT.md — PDE-RF: Add Known-PDE Operator Families (Candidates A–E)
+
+## 0. Goal
+This repo already contains a working **PDE-induced Random Feature Operator Learning (PDE-RF)** baseline:
+
+- Random features are built from a **known linear PDE operator** \(T_\theta\) (semigroup / linear propagator / resolvent).
+- The unknown PDE solution operator \(G\) is regressed via **multi-output ridge regression**.
+
+However, the current implementation uses **only the heat semigroup** (diffusion), which can underperform for problems where **transport/phase** (e.g., Burgers) or **elliptic inverse structure** (e.g., Darcy) matters.
+
+### Your task
+Extend the PDE feature family to implement **all candidates A–E** as selectable operators:
+
+- **A (1D)**: Advection (transport) operator
+- **B (1D)**: Convection–Diffusion operator
+- **C (1D)**: Wave / Damped-wave filter operator (linear oscillatory)
+- **D (2D)**: Helmholtz / Screened-Poisson resolvent operator
+- **E (2D)**: Anisotropic diffusion operator
+
+You must integrate them into the existing PDE-RF scripts:
+
+- `pde_rf_1d.py` (Burgers-style datasets) — add operators A/B/C (heat stays available)
+- `pde_rf_2d.py` (Darcy-style datasets) — add operators D/E (heat stays available)
+
+All operators must support **random parameter sampling per-feature**, precomputation of \(h_m\), and fast feature computation on batches.
+
+---
+
+## 1. Mathematical specification (must match implementation)
+
+### 1.1 Operator learning setup
+We learn an operator
+\[
+G: H_{\text{in}} \to H_{\text{out}}
+\]
+from data \(\{(a_i,u_i)\}_{i=1}^N\), \(u_i = G(a_i)\).
+
+### 1.2 Random features using a known PDE-induced linear operator
+For each feature \(m=1,\dots,M\), sample random parameters \(\omega_m\) (includes a random test function \(g_m\) and operator parameters like \(\tau\), \(c\), \(\alpha\), etc.).
+
+Define features
+\[
+\phi_m(a) := \sigma\big(\langle g_m,\; T_{\omega_m}(a)\rangle\big) \in \mathbb{R}
+\]
+where \(\sigma\) is a non-polynomial activation (tanh/gelu/relu/sin).
+
+#### Adjoint trick (critical for speed)
+We must avoid applying \(T\) to every sample \(a\). Use
+\[
+\langle g, T(a) \rangle = \langle T^*(g), a \rangle
+\]
+and precompute
+\[
+h_m := T_{\omega_m}^*(g_m).
+\]
+Then the feature becomes
+\[
+\boxed{\phi_m(a) = \sigma(\langle h_m, a\rangle).}
+\]
+
+This reduces runtime feature extraction to **inner products only**.
+
+### 1.3 Model and learning (ridge regression)
+Let \(\Phi(a)\in\mathbb{R}^M\) be stacked features.
+
+Output is represented in a finite basis (default: grid basis = flatten):
+- 1D: \(J=S\)
+- 2D: \(J=S^2\) (or POD basis \(J=\text{basis_dim}\))
+
+We learn weights \(W\in\mathbb{R}^{J\times M}\) via multi-output ridge regression:
+\[
+\min_W \sum_{i=1}^N \|W\Phi(a_i)-y_i\|_2^2 + \lambda\|W\|_F^2
+\]
+with closed-form solution
+\[
+W^\top = (\Phi^\top\Phi + \lambda I)^{-1}\Phi^\top Y.
+\]
+Implementation should use **Cholesky** for SPD stability.
+
+---
+
+## 2. Discrete setting (what tensors mean)
+
+### 2.1 Discrete inner product
+Use the repo’s current convention:
+- `inner_product = "mean"`: \(\langle h,a\rangle \approx \mathrm{mean}(h\odot a)\)
+- `inner_product = "sum"`: \(\langle h,a\rangle \approx \mathrm{sum}(h\odot a)\)
+
+(Keeping this configurable is required for backward compatibility.)
+
+### 2.2 FFT grid conventions
+All operators A–E will be implemented on periodic grids using FFTs:
+- 1D: `torch.fft.rfft / irfft`
+- 2D: `torch.fft.rfft2 / irfft2`
+Frequencies use:
+- 1D: `torch.fft.rfftfreq(S, d=1.0/S)`
+- 2D: `kx = fftfreq(S)`, `ky = rfftfreq(S)` to match `rfft2` shapes.
+
+---
+
+## 3. Candidate operators A–E (exact Fourier multipliers)
+
+Below, \(k\) denotes integer frequency index (as returned by `fftfreq/rfftfreq`), and **physical wavenumber** is \(2\pi k\). Always use \( (2\pi)^2 \) factors exactly as written.
+
+### 3.1 (Existing) Heat semigroup (keep)
+PDE: \(u_t = \nu \Delta u\)
+
+Fourier multiplier:
+\[
+\widehat{T_{\text{heat}}(\tau)a}(k) = \exp\!\left(-\nu\tau(2\pi)^2|k|^2\right)\hat a(k).
+\]
+Self-adjoint: \(T^*=T\).
+
+### 3.2 Candidate A — 1D Advection (transport)
+PDE: \(u_t + c\,u_x = 0\)
+
+Semigroup = shift:
+\[
+(T_{\text{adv}}(\tau;c)a)(x) = a(x-c\tau).
+\]
+
+Fourier multiplier (periodic):
+\[
+\widehat{T_{\text{adv}}(\tau;c)a}(k)=\exp\!\left(-i(2\pi)(c\tau)k\right)\hat a(k).
+\]
+
+Adjoint in \(L^2\) (periodic) flips velocity:
+\[
+T_{\text{adv}}(\tau;c)^* = T_{\text{adv}}(\tau;-c)
+\]
+because the multiplier conjugates.
+
+**Implementation rule for features:** precompute \(h = T^* g\) by applying advection with `c_adj = -c`.
+
+### 3.3 Candidate B — 1D Convection–Diffusion
+PDE: \(u_t + c\,u_x = \nu u_{xx}\)
+
+Fourier multiplier:
+\[
+\widehat{T_{\text{cd}}(\tau;\nu,c)a}(k)
+=
+\exp\!\left(-\nu\tau(2\pi)^2k^2\right)\cdot
+\exp\!\left(-i(2\pi)(c\tau)k\right)\hat a(k).
+\]
+
+Adjoint flips the advection sign (diffusion is self-adjoint):
+\[
+T_{\text{cd}}(\tau;\nu,c)^* = T_{\text{cd}}(\tau;\nu,-c).
+\]
+
+**Implementation rule for features:** precompute \(h=T^*g\) using `c_adj=-c`.
+
+### 3.4 Candidate C — 1D Wave / Damped Wave filter
+We use the *mapping from initial displacement \(a(x)\) to displacement at time \(\tau\)* with zero initial velocity.
+
+Option 1 (undamped wave filter):
+\[
+u_{tt} = c_w^2 u_{xx},\quad u(0)=a,\ u_t(0)=0
+\]
+\[
+\widehat{T_{\text{wave}}(\tau;c_w)a}(k) = \cos\!\big((2\pi)c_w\tau |k|\big)\,\hat a(k).
+\]
+
+Option 2 (damped wave filter, recommended for stability):
+\[
+u_{tt} + \gamma u_t = c_w^2 u_{xx},\ u(0)=a,\ u_t(0)=0
+\]
+Use the simplified multiplier:
+\[
+\widehat{T_{\text{dwave}}(\tau;c_w,\gamma)a}(k)
+=
+e^{-\gamma\tau/2}\cos\!\big((2\pi)c_w\tau |k|\big)\,\hat a(k).
+\]
+(This is real, even in \(k\), and works well as a linear oscillatory filter.)
+
+Self-adjoint (real multiplier): \(T^*=T\).
+
+**Implementation rule for features:** \(h = T g\).
+
+### 3.5 Candidate D — 2D Helmholtz / Screened Poisson resolvent
+Solve for \(u\):
+\[
+(\alpha I - \nu\Delta)u = a,\qquad \alpha>0
+\]
+so the operator is
+\[
+T_{\text{helm}}(\alpha)a = (\alpha I - \nu\Delta)^{-1}a.
+\]
+
+Fourier multiplier:
+\[
+\widehat{T_{\text{helm}}(\alpha)a}(k)
+=
+\frac{1}{\alpha + \nu(2\pi)^2|k|^2}\,\hat a(k).
+\]
+Self-adjoint: \(T^*=T\).
+
+**Notes:**
+- This is not a time semigroup; treat `alpha` as the per-feature parameter (sampled similarly to `tau`).
+- This operator decays high frequencies polynomially, often preserving more detail than heat.
+
+### 3.6 Candidate E — 2D Anisotropic diffusion
+PDE:
+\[
+u_t = \nabla\cdot(D\nabla u)
+\]
+with \(D\in\mathbb{R}^{2\times2}\) symmetric positive definite (SPD).
+
+Fourier multiplier:
+\[
+\widehat{T_{\text{aniso}}(\tau;D)a}(k)
+=
+\exp\!\left(-(2\pi)^2\tau\,(k^\top D k)\right)\hat a(k),
+\]
+where \(k=(k_x,k_y)\) matches the FFT frequency grids.
+
+Self-adjoint for SPD \(D\): \(T^*=T\).
+
+**Parameterization for random SPD \(D\) (must implement):**
+Sample per-feature:
+- rotation angle \(\theta\sim \mathrm{Uniform}(0,\pi)\)
+- eigenvalues \(d_1,d_2>0\) (uniform or loguniform in \([d_{\min}, d_{\max}]\))
+
+Let \(R(\theta)=\begin{bmatrix}\cos\theta&-\sin\theta\\ \sin\theta&\cos\theta\end{bmatrix}\),
+\[
+D = R\operatorname{diag}(d_1,d_2)R^\top.
+\]
+Store components \(D_{11},D_{12},D_{22}\) per feature.
+
+---
+
+## 4. What to change in code (exact integration plan)
+
+### 4.1 `pde_features.py` — extend to multi-operator feature maps
+You must implement:
+
+#### (A) Operator application functions (vectorized over batch/feature dims)
+1D:
+- `apply_advection_1d(x, tau, c)`
+- `apply_convection_diffusion_1d(x, tau, nu, c)`
+- `apply_wave_1d(x, tau, c_wave, gamma)`  (gamma may be 0)
+(Heat already exists.)
+
+2D:
+- `apply_helmholtz_2d(x, alpha, nu)`
+- `apply_anisotropic_diffusion_2d(x, tau, d11, d12, d22)` (or accept `D` packed)
+(Heat already exists.)
+
+All functions must support:
+- `x` with leading batch dims and last dims = spatial dims
+- `tau/alpha/c/...` as either python floats or `torch.Tensor` with shape broadcastable to leading dims (esp. per-feature tensors of shape `(M,)`).
+- correct `device`/`dtype`
+- output real-valued tensor of same real dtype as input.
+
+#### (B) Parameter samplers
+Keep existing `_sample_tau`. Add:
+- `_sample_c(m, dist, c_min, c_max, c_std, c_fixed, ...) -> Tensor`
+- `_sample_alpha(m, dist, alpha_min, alpha_max, ...) -> Tensor`
+- `_sample_spd_2x2(m, eig_dist, eig_min, eig_max, theta_dist, ...) -> (d11,d12,d22)`
+
+#### (C) Update feature map classes to accept `operator` and operator-specific params
+Update `PDERandomFeatureMap1D` and `PDERandomFeatureMap2D` signatures to include:
+- `operator: str` with choices:
+  - 1D: `heat`, `advection`, `convdiff`, `wave`
+  - 2D: `heat`, `helmholtz`, `aniso`
+(Keep `heat` default to maintain backward compatibility.)
+
+Feature map initialization must:
+1. sample `tau` (for time-like operators: heat/advection/convdiff/wave/aniso)
+2. sample operator parameters (e.g., c for advection; alpha for helmholtz; D for aniso; c_wave/gamma for wave)
+3. sample random test functions `g ~ N(0,I)`
+4. optional: `g_smooth_tau` pre-smoothing (keep existing behavior; use heat smoothing as pre-filter)
+5. compute `h = T^* g` using the correct adjoint rule:
+   - heat: `h = apply_heat_semigroup(g, tau, nu)`
+   - advection: `h = apply_advection_1d(g, tau, c=-c)`
+   - convdiff: `h = apply_convection_diffusion_1d(g, tau, nu, c=-c)`
+   - wave: `h = apply_wave_1d(g, tau, c_wave, gamma)` (self-adjoint)
+   - helmholtz: `h = apply_helmholtz_2d(g, alpha, nu)` (self-adjoint)
+   - aniso: `h = apply_anisotropic_diffusion_2d(g, tau, d11, d12, d22)` (self-adjoint)
+6. store buffers for all parameters (`tau`, `c`, `alpha`, `d11/d12/d22`, etc.) and `h` (and `h_flat` in 2D).
+
+Feature extraction remains:
+- 1D: `inner = a_batch @ h.T`
+- 2D: `inner = a_flat @ h_flat.T`
+
+Keep:
+- `inner_product` scaling
+- `feature_scale` option (`inv_sqrt_m`)
+
+### 4.2 `pde_rf_1d.py` — add CLI flags and wire operator selection
+Add new CLI args:
+- `--operator {heat,advection,convdiff,wave}` (default: heat)
+
+Advection / Convection–Diffusion parameters:
+- `--c-dist {uniform,normal,fixed}` (default: uniform)
+- `--c-max` (default: 1.0)  (uniform uses [-c_max, c_max])
+- `--c-std` (default: 1.0)  (normal uses N(0, c_std^2))
+- `--c-fixed` (default: 1.0) (fixed uses this constant)
+
+Wave parameters:
+- `--wave-c-dist {uniform,loguniform,fixed}` (default: uniform)
+- `--wave-c-min` (default: 0.1)
+- `--wave-c-max` (default: 2.0)
+- `--wave-c-fixed` (default: 1.0)
+- `--wave-gamma` (default: 0.0)  # damping coefficient (>=0)
+
+Keep existing `--nu`, `--tau-*`, `--activation`, etc. `--nu` is used for heat and convdiff.
+
+Update feature map construction to pass all operator params.
+
+Update `--smoke-test` to work with *the selected operator*:
+- If `--smoke-test` is set, generate synthetic data where the true mapping is exactly the same operator family with fixed “true” parameters:
+  - heat: `u = apply_heat_semigroup_1d(a, tau_true, nu_true)`
+  - advection: `u = apply_advection_1d(a, tau_true, c_true)`
+  - convdiff: `u = apply_convection_diffusion_1d(a, tau_true, nu_true, c_true)`
+  - wave: `u = apply_wave_1d(a, tau_true, c_wave_true, gamma_true)`
+This ensures each operator path is exercised end-to-end.
+
+### 4.3 `pde_rf_2d.py` — add CLI flags and wire operator selection
+Add new CLI arg:
+- `--operator {heat,helmholtz,aniso}` (default: heat)
+
+Helmholtz parameters:
+- `--alpha-dist {uniform,loguniform,fixed}` (default: loguniform)
+- `--alpha-min` (default: 1e-2)
+- `--alpha-max` (default: 10.0)
+- `--alpha-fixed` (default: 1.0)
+
+Anisotropic diffusion parameters:
+- `--aniso-eig-dist {uniform,loguniform}` (default: loguniform)
+- `--aniso-eig-min` (default: 1e-3)
+- `--aniso-eig-max` (default: 1.0)
+- `--aniso-theta-dist {uniform}` (default: uniform)  # theta ~ U(0, pi)
+
+`--nu` is used for heat and helmholtz.
+
+Update feature map construction to pass these operator params.
+
+Update `--smoke-test` to work with the selected operator:
+- heat: `u = apply_heat_semigroup_2d(a, tau_true, nu_true)`
+- helmholtz: `u = apply_helmholtz_2d(a, alpha_true, nu_true)`
+- aniso: `u = apply_anisotropic_diffusion_2d(a, tau_true, D_true)`
+
+### 4.4 README (optional but recommended)
+Add a short section showing how to run each operator:
+- 1D: `--operator advection|convdiff|wave`
+- 2D: `--operator helmholtz|aniso`
+
+---
+
+## 5. Numerical stability & correctness checks (must do)
+
+### 5.1 Correctness checks in code
+Add lightweight asserts / shape checks:
+- outputs are real dtype (`torch.is_floating_point`)
+- shapes match input shapes
+- broadcasting works for per-feature params (tau shape `(M,)`)
+
+### 5.2 Solve stability
+Keep ridge solve as-is (Cholesky with jitter fallback). Do not remove chunked `Phi.T@Y`.
+
+### 5.3 Compatibility
+Try to avoid Python 3.10-only syntax in NEW code (e.g., avoid `Tensor | float` in new functions).
+If you refactor existing annotations, keep behavior identical.
+
+---
+
+## 6. Acceptance criteria (Definition of Done)
+
+### 6.1 CLI help works
+- `python pde_rf_1d.py --help` shows new flags.
+- `python pde_rf_2d.py --help` shows new flags.
+
+### 6.2 Smoke tests: **all operators must run**
+1D:
+- `python pde_rf_1d.py --smoke-test --operator heat`
+- `python pde_rf_1d.py --smoke-test --operator advection`
+- `python pde_rf_1d.py --smoke-test --operator convdiff`
+- `python pde_rf_1d.py --smoke-test --operator wave`
+
+2D:
+- `python pde_rf_2d.py --smoke-test --operator heat`
+- `python pde_rf_2d.py --smoke-test --operator helmholtz`
+- `python pde_rf_2d.py --smoke-test --operator aniso`
+
+Each run must:
+- complete without crashing
+- save visualizations into `visualizations/pde_rf_1d/` or `visualizations/pde_rf_2d/`
+
+### 6.3 Syntax check
+- `python -m py_compile pde_features.py ridge.py basis.py pde_rf_1d.py pde_rf_2d.py` passes.
+
+---
+
+## 7. Notes: why these operators
+- A/B/C add **phase/transport/oscillation** structure (critical for Burgers-like dynamics).
+- D matches elliptic inverse structure better than heat (often improves Darcy-like tasks).
+- E adds **directional multi-scale smoothing** (captures anisotropic patterns).
+
+Implement them exactly as specified, keeping existing heat functionality intact.

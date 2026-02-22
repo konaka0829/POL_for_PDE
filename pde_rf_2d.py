@@ -9,7 +9,14 @@ import numpy as np
 import torch
 
 from basis import GridBasis, PODBasis
-from pde_features import PDERandomFeatureMap2D, apply_heat_semigroup_2d, set_random_seed, to_torch_dtype
+from pde_features import (
+    PDERandomFeatureMap2D,
+    apply_anisotropic_diffusion_2d,
+    apply_heat_semigroup_2d,
+    apply_helmholtz_2d,
+    set_random_seed,
+    to_torch_dtype,
+)
 from ridge import solve_ridge
 from utilities3 import LpLoss, MatReader, UnitGaussianNormalizer
 from viz_utils import plot_2d_comparison, plot_error_histogram, rel_l2
@@ -60,7 +67,24 @@ def _load_data(args: argparse.Namespace, dtype: torch.dtype):
 
         a = torch.randn(total, s, s, dtype=dtype)
         tau_true = 0.08
-        u = apply_heat_semigroup_2d(a, tau=tau_true, nu=args.nu)
+        nu_true = args.nu
+        alpha_true = 0.7
+        d11_true = 0.2
+        d12_true = 0.05
+        d22_true = 0.6
+
+        if args.operator == "heat":
+            u = apply_heat_semigroup_2d(a, tau=tau_true, nu=nu_true)
+        elif args.operator == "helmholtz":
+            u = apply_helmholtz_2d(a, alpha=alpha_true, nu=nu_true)
+        else:
+            u = apply_anisotropic_diffusion_2d(
+                a,
+                tau=tau_true,
+                d11=d11_true,
+                d12=d12_true,
+                d22=d22_true,
+            )
 
         x_train = a[:ntrain]
         y_train = u[:ntrain]
@@ -130,11 +154,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     # PDE-RF args
     p.add_argument("--M", type=int, default=2048)
+    p.add_argument("--operator", choices=["heat", "helmholtz", "aniso"], default="heat")
     p.add_argument("--nu", type=float, default=1.0)
     p.add_argument("--tau-dist", choices=["loguniform", "uniform", "exponential"], default="loguniform")
     p.add_argument("--tau-min", type=float, default=1e-4)
     p.add_argument("--tau-max", type=float, default=1.0)
     p.add_argument("--tau-exp-rate", type=float, default=1.0)
+
+    p.add_argument("--alpha-dist", choices=["uniform", "loguniform", "fixed"], default="loguniform")
+    p.add_argument("--alpha-min", type=float, default=1e-2)
+    p.add_argument("--alpha-max", type=float, default=10.0)
+    p.add_argument("--alpha-fixed", type=float, default=1.0)
+
+    p.add_argument("--aniso-eig-dist", choices=["uniform", "loguniform"], default="loguniform")
+    p.add_argument("--aniso-eig-min", type=float, default=1e-3)
+    p.add_argument("--aniso-eig-max", type=float, default=1.0)
+    p.add_argument("--aniso-theta-dist", choices=["uniform"], default="uniform")
+
     p.add_argument("--g-smooth-tau", type=float, default=0.0)
     p.add_argument("--activation", choices=["tanh", "gelu", "relu", "sin"], default="tanh")
     p.add_argument("--feature-scale", choices=["none", "inv_sqrt_m"], default="inv_sqrt_m")
@@ -195,6 +231,15 @@ def main() -> None:
         activation=args.activation,
         feature_scale=args.feature_scale,
         inner_product=args.inner_product,
+        operator=args.operator,
+        alpha_dist=args.alpha_dist,
+        alpha_min=args.alpha_min,
+        alpha_max=args.alpha_max,
+        alpha_fixed=args.alpha_fixed,
+        aniso_eig_dist=args.aniso_eig_dist,
+        aniso_eig_min=args.aniso_eig_min,
+        aniso_eig_max=args.aniso_eig_max,
+        aniso_theta_dist=args.aniso_theta_dist,
         dtype=dtype,
         device=device,
     )
