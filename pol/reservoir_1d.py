@@ -59,7 +59,13 @@ class Reservoir1DSolver:
         ux_hat = (1j * k) * z_hat
         return torch.fft.irfft(ux_hat, n=z.shape[-1], dim=-1)
 
-    def _step_reaction_diffusion(self, z: torch.Tensor, dt: float, k: torch.Tensor) -> torch.Tensor:
+    def _step_reaction_diffusion(
+        self,
+        z: torch.Tensor,
+        dt: float,
+        k: torch.Tensor,
+        forcing_hat: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         nu = self.config.rd_nu
         alpha = self.config.rd_alpha
         beta = self.config.rd_beta
@@ -67,26 +73,44 @@ class Reservoir1DSolver:
         z_hat = torch.fft.rfft(z, dim=-1)
         nonlinear = alpha * z - beta * z.pow(3)
         rhs_hat = z_hat + dt * torch.fft.rfft(nonlinear, dim=-1)
+        if forcing_hat is not None:
+            rhs_hat = rhs_hat + dt * forcing_hat
         denom = 1.0 + dt * nu * (k.pow(2))
         next_hat = rhs_hat / denom
         return torch.fft.irfft(next_hat, n=z.shape[-1], dim=-1)
 
-    def _step_burgers(self, z: torch.Tensor, dt: float, k: torch.Tensor) -> torch.Tensor:
+    def _step_burgers(
+        self,
+        z: torch.Tensor,
+        dt: float,
+        k: torch.Tensor,
+        forcing_hat: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         nu = self.config.res_burgers_nu
         z_hat = torch.fft.rfft(z, dim=-1)
         zx = self._ux(z, k)
         nonlinear = -z * zx
         rhs_hat = z_hat + dt * torch.fft.rfft(nonlinear, dim=-1)
+        if forcing_hat is not None:
+            rhs_hat = rhs_hat + dt * forcing_hat
         denom = 1.0 + dt * nu * (k.pow(2))
         next_hat = rhs_hat / denom
         return torch.fft.irfft(next_hat, n=z.shape[-1], dim=-1)
 
-    def _step_ks(self, z: torch.Tensor, dt: float, k: torch.Tensor) -> torch.Tensor:
+    def _step_ks(
+        self,
+        z: torch.Tensor,
+        dt: float,
+        k: torch.Tensor,
+        forcing_hat: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         z_hat = torch.fft.rfft(z, dim=-1)
         zx = self._ux(z, k)
         nonlinear = -z * zx
         n_hat = torch.fft.rfft(nonlinear, dim=-1)
         n_hat = self._apply_dealias(n_hat)
+        if forcing_hat is not None:
+            n_hat = n_hat + forcing_hat
 
         l_hat = k.pow(2) - k.pow(4)
         denom = 1.0 - dt * l_hat
@@ -101,6 +125,9 @@ class Reservoir1DSolver:
         dt: float,
         Tr: float,
         obs_steps: Iterable[int],
+        *,
+        forcing: Optional[torch.Tensor] = None,
+        forcing_steps: Optional[tuple[int, int]] = None,
     ) -> List[torch.Tensor]:
         if z0.ndim != 2:
             raise ValueError(f"z0 must have shape (B, s), got {tuple(z0.shape)}")
@@ -118,6 +145,23 @@ class Reservoir1DSolver:
         z = z0
         s = z.shape[-1]
         k = self._wavenumbers(s, z.device, z.dtype)
+        forcing_hat: Optional[torch.Tensor] = None
+        if forcing is not None:
+            if forcing.shape != z0.shape:
+                raise ValueError(
+                    f"forcing must have shape {tuple(z0.shape)}, got {tuple(forcing.shape)}"
+                )
+            forcing = forcing.to(device=z.device, dtype=z.dtype)
+            forcing_hat = torch.fft.rfft(forcing, dim=-1)
+            if self.config.reservoir == "ks" and self.config.ks_dealias:
+                forcing_hat = self._apply_dealias(forcing_hat)
+
+        if forcing_steps is not None:
+            start_step, end_step = int(forcing_steps[0]), int(forcing_steps[1])
+            if start_step < 1:
+                raise ValueError("forcing_steps start_step must be >= 1")
+        else:
+            start_step, end_step = 1, 10**18
 
         t_steps = int(round(Tr / dt))
         if t_steps < obs_sorted[-1]:
@@ -130,12 +174,16 @@ class Reservoir1DSolver:
         max_obs = obs_sorted[-1]
 
         for step in range(1, max_obs + 1):
+            active_forcing_hat = None
+            if forcing_hat is not None and start_step <= step <= end_step:
+                active_forcing_hat = forcing_hat
+
             if self.config.reservoir == "reaction_diffusion":
-                z = self._step_reaction_diffusion(z, dt, k)
+                z = self._step_reaction_diffusion(z, dt, k, forcing_hat=active_forcing_hat)
             elif self.config.reservoir == "ks":
-                z = self._step_ks(z, dt, k)
+                z = self._step_ks(z, dt, k, forcing_hat=active_forcing_hat)
             elif self.config.reservoir == "burgers":
-                z = self._step_burgers(z, dt, k)
+                z = self._step_burgers(z, dt, k, forcing_hat=active_forcing_hat)
             else:
                 raise ValueError(f"Unsupported reservoir: {self.config.reservoir}")
 

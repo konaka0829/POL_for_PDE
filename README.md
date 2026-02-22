@@ -475,3 +475,24 @@ Here are the pre-trained models. It can be evaluated using _eval.py_ or _super_r
       primaryClass={cs.LG}
 }
 ```
+
+### 入力エンコーダ強化 + forcing 注入（reservoir_burgers_1d.py / rfm_burgers_1d.py）
+
+入力 `a` から初期値 `z0` を作るエンコーダを拡張しました。
+
+- 前処理: `--encoder-center`, `--encoder-standardize`
+- エンコーダ本体: `--encoder linear|fourier_filter|randconv|fourier_rfm|poly_deriv`
+- 後段非線形: `--encoder-post none|tanh|clip`
+- `fourier_rfm` は `--encoder-fourier-rfm-mode sum|mean|ensemble` をサポート
+- forcing 注入: `--forcing-mode none|constant|window`, `--forcing-source raw|pre|z0`, `--forcing-gamma`
+
+`forcing-mode=window` の場合は `--forcing-tstart`, `--forcing-tend` で注入窓を指定します。
+
+**dry-run 例**
+
+```bash
+python reservoir_burgers_1d.py --dry-run --encoder linear --encoder-center 1 --encoder-standardize 1 --encoder-post tanh --encoder-tanh-gamma 1.0
+python reservoir_burgers_1d.py --dry-run --encoder fourier_filter --encoder-fourier-mode randphase --encoder-fourier-kmax 16 --encoder-fourier-seed 0
+python reservoir_burgers_1d.py --dry-run --encoder fourier_rfm --encoder-fourier-rfm-mode ensemble --encoder-fourier-rfm-C 4
+python reservoir_burgers_1d.py --dry-run --forcing-mode constant --forcing-gamma 0.5 --forcing-source pre
+```

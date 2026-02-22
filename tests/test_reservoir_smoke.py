@@ -115,3 +115,26 @@ def test_ridge_standardized_matches_raw_prediction():
     pred_std = predict_linear(phi_std, state["W_std"])
 
     assert torch.allclose(pred_raw, pred_std, atol=1e-8, rtol=1e-6)
+
+
+def test_reservoir_forcing_changes_trajectory():
+    b, s = 3, 128
+    z0 = torch.randn(b, s)
+    forcing = 0.5 * torch.randn(b, s)
+    obs_steps = [2, 4, 6]
+
+    solver = Reservoir1DSolver(ReservoirConfig(reservoir="reaction_diffusion"))
+    states_no = solver.simulate(z0, dt=1e-2, Tr=0.1, obs_steps=obs_steps)
+    states_force = solver.simulate(
+        z0,
+        dt=1e-2,
+        Tr=0.1,
+        obs_steps=obs_steps,
+        forcing=forcing,
+        forcing_steps=None,
+    )
+
+    diff = 0.0
+    for a, b_state in zip(states_no, states_force):
+        diff += torch.linalg.norm(a - b_state).item()
+    assert diff > 0.0

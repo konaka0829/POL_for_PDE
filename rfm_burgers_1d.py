@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from cli_utils import add_data_mode_args, add_split_args, validate_data_mode_args
+from pol.encoder_1d import FixedEncoder1D
 from pol.features_1d import build_time_grid
 from pol.reservoir_1d import Reservoir1DSolver, ReservoirConfig
 from viz_utils import plot_1d_prediction, plot_error_histogram, rel_l2
@@ -55,6 +56,56 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--input-scale", type=float, default=1.0)
     parser.add_argument("--input-shift", type=float, default=0.0)
+    parser.add_argument(
+        "--encoder",
+        choices=("linear", "fourier_filter", "randconv", "fourier_rfm", "poly_deriv"),
+        default="linear",
+    )
+    parser.add_argument("--encoder-center", type=int, choices=(0, 1), default=0)
+    parser.add_argument("--encoder-standardize", type=int, choices=(0, 1), default=0)
+    parser.add_argument("--encoder-standardize-eps", type=float, default=1e-6)
+    parser.add_argument("--encoder-post", choices=("none", "tanh", "clip"), default="none")
+    parser.add_argument("--encoder-tanh-gamma", type=float, default=1.0)
+    parser.add_argument("--encoder-clip-c", type=float, default=3.0)
+
+    parser.add_argument(
+        "--encoder-fourier-mode",
+        choices=("lowpass", "bandpass", "randphase", "randamp", "randcomplex"),
+        default="lowpass",
+    )
+    parser.add_argument("--encoder-fourier-kmin", type=int, default=0)
+    parser.add_argument("--encoder-fourier-kmax", type=int, default=16)
+    parser.add_argument("--encoder-fourier-seed", type=int, default=0)
+    parser.add_argument("--encoder-fourier-amp-std", type=float, default=0.5)
+    parser.add_argument("--encoder-fourier-output-scale", type=float, default=1.0)
+
+    parser.add_argument("--encoder-randconv-kernel-size", type=int, default=33)
+    parser.add_argument("--encoder-randconv-seed", type=int, default=0)
+    parser.add_argument("--encoder-randconv-std", type=float, default=1.0)
+    parser.add_argument("--encoder-randconv-normalize", choices=("none", "l1", "l2"), default="l2")
+
+    parser.add_argument("--encoder-fourier-rfm-C", type=int, default=1)
+    parser.add_argument("--encoder-fourier-rfm-mode", choices=("sum", "mean", "ensemble"), default="sum")
+    parser.add_argument(
+        "--encoder-fourier-rfm-activation",
+        choices=("tanh", "relu", "identity"),
+        default="tanh",
+    )
+    parser.add_argument("--encoder-fourier-rfm-kmin", type=int, default=0)
+    parser.add_argument("--encoder-fourier-rfm-kmax", type=int, default=16)
+    parser.add_argument("--encoder-fourier-rfm-seed", type=int, default=0)
+    parser.add_argument("--encoder-fourier-rfm-theta-scale", type=float, default=1.0)
+    parser.add_argument("--encoder-fourier-rfm-output-scale", type=float, default=1.0)
+
+    parser.add_argument("--encoder-poly-a1", type=float, default=1.0)
+    parser.add_argument("--encoder-poly-a2", type=float, default=0.0)
+    parser.add_argument("--encoder-poly-a3", type=float, default=0.0)
+
+    parser.add_argument("--forcing-mode", choices=("none", "constant", "window"), default="none")
+    parser.add_argument("--forcing-gamma", type=float, default=0.0)
+    parser.add_argument("--forcing-source", choices=("raw", "pre", "z0"), default="pre")
+    parser.add_argument("--forcing-tstart", type=float, default=0.0)
+    parser.add_argument("--forcing-tend", type=float, default=0.0)
 
     parser.add_argument("--m", type=int, default=256)
     parser.add_argument(
@@ -93,6 +144,24 @@ def parse_args() -> argparse.Namespace:
         parser.error("--ridge-lambda must be non-negative")
     if args.m <= 0:
         parser.error("--m must be positive")
+    if args.encoder_standardize_eps <= 0.0:
+        parser.error("--encoder-standardize-eps must be positive")
+    if args.encoder_clip_c <= 0.0:
+        parser.error("--encoder-clip-c must be positive")
+    if args.encoder_fourier_rfm_C <= 0:
+        parser.error("--encoder-fourier-rfm-C must be positive")
+    if args.forcing_mode == "window":
+        if args.forcing_tstart > args.forcing_tend:
+            parser.error("--forcing-tstart must be <= --forcing-tend")
+        if args.forcing_tstart < 0.0:
+            parser.error("--forcing-tstart must be >= 0")
+        if args.forcing_tend < 0.0:
+            parser.error("--forcing-tend must be >= 0")
+    if args.forcing_mode != "none" and args.forcing_gamma == 0.0:
+        warnings.warn(
+            "forcing-mode is enabled but forcing-gamma is zero; forcing becomes inactive.",
+            RuntimeWarning,
+        )
 
     return args
 
@@ -111,6 +180,26 @@ def ridge_dtype_from_name(name: str) -> torch.dtype:
     if name == "float32":
         return torch.float32
     return torch.float64
+
+
+def resolve_forcing_steps(
+    *,
+    forcing_mode: str,
+    forcing_tstart: float,
+    forcing_tend: float,
+    dt: float,
+    Tr: float,
+    max_obs_step: int,
+) -> tuple[int, int] | None:
+    if forcing_mode != "window":
+        return None
+    if forcing_tstart > forcing_tend:
+        raise ValueError("forcing_tstart must be <= forcing_tend")
+    if forcing_tstart < 0.0 or forcing_tend > Tr:
+        raise ValueError("forcing window must satisfy 0 <= tstart <= tend <= Tr")
+    start_step = max(1, int(round(forcing_tstart / dt)))
+    end_step = min(max_obs_step, int(round(forcing_tend / dt)))
+    return (start_step, end_step)
 
 
 def make_dry_run_data(ntrain: int, ntest: int, s: int, seed: int) -> tuple[torch.Tensor, ...]:
@@ -200,6 +289,12 @@ def main() -> None:
 
     times, obs_steps = build_time_grid(Tr=args.Tr, dt=dt, K=args.K, feature_times=args.feature_times)
     k_obs = len(obs_steps)
+    max_obs_step = obs_steps[-1]
+    if args.forcing_mode == "window":
+        if args.forcing_tstart > args.forcing_tend:
+            raise ValueError("forcing_tstart must be <= forcing_tend")
+        if args.forcing_tstart < 0.0 or args.forcing_tend > args.Tr:
+            raise ValueError("forcing window must satisfy 0 <= tstart <= tend <= Tr")
 
     x_train, y_train, x_test, y_test = load_data(args, s)
     x_train = x_train.reshape(args.ntrain, s).float()
@@ -233,25 +328,68 @@ def main() -> None:
             ks_dealias=args.ks_dealias,
         )
     )
+    encoder = FixedEncoder1D(s=s, device=device, dtype=torch.float32, args=args)
+    forcing_steps = resolve_forcing_steps(
+        forcing_mode=args.forcing_mode,
+        forcing_tstart=args.forcing_tstart,
+        forcing_tend=args.forcing_tend,
+        dt=dt,
+        Tr=args.Tr,
+        max_obs_step=max_obs_step,
+    )
+
+    num_members = 1
+    if args.encoder == "fourier_rfm" and args.encoder_fourier_rfm_mode == "ensemble":
+        num_members = args.encoder_fourier_rfm_C
+    k_obs_total = k_obs * num_members
 
     gen = torch.Generator(device="cpu")
     gen.manual_seed(args.rfm_seed)
     weight_scale = args.rfm_weight_scale
     if weight_scale <= 0.0:
-        weight_scale = 1.0 / math.sqrt(float(k_obs))
-    A = weight_scale * torch.randn((args.m, k_obs), generator=gen, dtype=torch.float32, device="cpu")
+        weight_scale = 1.0 / math.sqrt(float(k_obs_total))
+    A = weight_scale * torch.randn((args.m, k_obs_total), generator=gen, dtype=torch.float32, device="cpu")
     b = args.rfm_bias_scale * torch.randn((args.m,), generator=gen, dtype=torch.float32, device="cpu")
     A = A.to(device)
     b = b.to(device)
 
     @torch.no_grad()
     def function_features(x_batch: torch.Tensor) -> torch.Tensor:
-        x = x_batch.to(device=device, dtype=torch.float32)
-        z0 = args.input_scale * x + args.input_shift
-        states = reservoir.simulate(z0, dt=dt, Tr=args.Tr, obs_steps=obs_steps)
-        Z = torch.stack(states, dim=1)
-        mixed = torch.einsum("bks,mk->bms", Z, A) + b.view(1, args.m, 1)
-        return apply_activation(mixed, args.rfm_activation)
+        enc = encoder.encode(x_batch.to(device=device, dtype=torch.float32))
+        forcing_active = args.forcing_mode != "none" and args.forcing_gamma != 0.0
+
+        z_members = []
+        for i, z0_member in enumerate(enc.z0_list):
+            forcing_member = None
+            if forcing_active:
+                if args.forcing_source == "raw":
+                    source = enc.x_raw
+                elif args.forcing_source == "pre":
+                    source = enc.x_pre_list[i]
+                elif args.forcing_source == "z0":
+                    source = enc.z0_list[i]
+                else:
+                    raise ValueError(f"Unsupported forcing source: {args.forcing_source}")
+                forcing_member = args.forcing_gamma * source
+
+            states = reservoir.simulate(
+                z0_member,
+                dt=dt,
+                Tr=args.Tr,
+                obs_steps=obs_steps,
+                forcing=forcing_member,
+                forcing_steps=forcing_steps,
+            )
+            z_members.append(torch.stack(states, dim=1))
+
+        if len(z_members) == 1:
+            Z_total = z_members[0]
+        else:
+            Z_total = torch.cat(z_members, dim=1)
+
+        mixed = torch.einsum("bks,mk->bms", Z_total, A) + b.view(1, args.m, 1)
+        feat = apply_activation(mixed, args.rfm_activation)
+        return torch.nan_to_num(feat, nan=0.0, posinf=1e6, neginf=-1e6)
 
     probe = function_features(x_train[: min(2, args.ntrain)])
     if probe.shape[-2:] != (args.m, s):
@@ -303,7 +441,7 @@ def main() -> None:
     elapsed = time.time() - t0
 
     print(f"reservoir={args.reservoir} m={args.m} act={args.rfm_activation}")
-    print(f"dt={dt} Tr={args.Tr} K={k_obs} s={s}")
+    print(f"dt={dt} Tr={args.Tr} K={k_obs_total} s={s}")
     print(f"train relL2: {train_rel:.6f}")
     print(f"test  relL2: {test_rel:.6f}")
     print(f"elapsed sec: {elapsed:.3f}")

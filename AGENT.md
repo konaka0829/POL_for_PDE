@@ -614,3 +614,541 @@ device:
 乱数生成は torch.Generator(device="cpu") を使い、生成後に .to(device) する（再現性が高い）。
 
 fourier観測は complex なので、必ず Re/Im を実数結合して返すこと。
+
+# AGENT.md — 入力エンコーダ強化（正規化/混合/非線形）＋ forcing注入 を実装する
+
+## 0. リポジトリ現状（Codexが迷わないため）
+このリポジトリは backprop-free の PDE リザーバ手法を実装している。
+
+主要ファイル:
+- `reservoir_burgers_1d.py`
+  - PDEリザーバ → 観測 (obs) → flatten → (任意)ELM → ridge
+  - `obs` は `full|points|fourier|proj` に対応済み
+  - `--standardize-features` により `fit_ridge_streaming_standardized` を使用可能
+- `rfm_burgers_1d.py`
+  - 関数値RFM（m×m Gram）を実装済み（Z(t_k)の時間チャネルをランダム混合し関数値特徴を作る）
+- `pol/reservoir_1d.py`
+  - 1D periodic reservoir PDE solver（reaction_diffusion / burgers / ks）
+- `pol/features_1d.py`
+  - time grid / obs / flatten
+- `pol/ridge.py`
+  - streaming ridge + standardized ridge（1パス）
+- `tests/test_reservoir_smoke.py`
+  - obs fourier/proj と standardized ridge のテストあり
+
+今回のタスクは **入力エンコーダ（z0の作り方）を大幅に強化**し、さらに **入力をforcingとして注入**できるようにする。
+既存の機能（観測、ELM、ridge、RFM）は壊さないこと（新機能OFFなら従来挙動と一致）。
+
+---
+
+## 1. ゴール（実装したい内容：2.1〜2.4 全部）
+以下をすべて実装し、CLIで切り替えられるようにする。
+
+### 1.1 まず効きやすい：正規化・脱平均・クリップ（ほぼノーリスク）
+(A) サンプル毎の平均除去（定数モードを落とす）
+- `center`: `x <- x - mean(x, dim=-1, keepdim=True)`
+
+(B) サンプル毎の標準化（エネルギー揃え）
+- `standardize`: `x <- (x - mu(x)) / (std(x) + eps)`（mu/std はサンプルごと）
+
+(C) クリップ / 飽和非線形
+- `tanh`: `x <- tanh(gamma * x)`
+- `clip`: `x <- clip(x, [-c, c])`
+
+### 1.2 “空間を混ぜる” 固定線形エンコーダ
+(A) 固定Fourierフィルタ（帯域制御）
+- `fourier_filter`: `x <- irfft( g(k) * rfft(x) )`
+- g(k) には `lowpass/bandpass/randphase/randamp/randcomplex` を用意
+
+(B) ランダム円周畳み込み（固定Conv）
+- `randconv`: `x <- w * x`（周期畳み込み）
+- 実装は FFT（`irfft(rfft(x) * rfft(w_padded))`）推奨
+
+### 1.3 固定“非線形”エンコーダ
+(A) PDFっぽいランダム特徴エンコーダ（式(3.5)系）
+- `fourier_rfm`: `x <- combine_{c=1..C} σ( irfft( χ(k) * rfft(x) * rfft(theta_c) ) )`
+- `theta_c` はランダム固定
+- `χ(k)` は帯域マスク（kmin〜kmax）
+- combine は `sum/mean` を実装
+- さらに「複数回リザーバを回して特徴をconcatする」 `ensemble` モードも実装する（計算は増えるが強い）
+
+(B) 多項式・微分入り
+- `poly_deriv`: `x <- a1*x + a2*x^2 + a3*x_x`
+- `x_x` はスペクトル微分 `irfft( (i*k) * rfft(x) )`
+
+### 1.4 入力を forcing として注入（RC定番の強化）
+- `forcing`: リザーバPDEの右辺に入力由来の外力を加える
+  - `z_t = F(z) + γ * f(a)`
+- `f(a)` のソースを選べるようにする:
+  - `raw`: 元入力
+  - `pre`: エンコーダ本体の出力（スケール/シフト前）
+  - `z0`: リザーバ初期条件（スケール/シフト・非線形後）
+- `forcing` は
+  - `constant`: 全時間で注入
+  - `window`: `[tstart, tend]` の窓だけ注入
+  をサポート
+
+---
+
+## 2. 数式仕様（実装の定義を固定する）
+
+入力 `a ∈ R^s`（バッチで `x`）、初期条件 `z0(a)` を以下で作る。
+
+### 2.1 エンコーダの処理順（この順で固定）
+**処理順は固定**として実装する（順序が曖昧だと検証不能になるため）。
+
+(0) `x_raw = x`（(B,s)）
+
+(1) optional: center / standardize（サンプルごと）
+- center:
+  - `x <- x - mean(x)`
+- standardize:
+  - `x <- (x - mean(x)) / (std(x) + eps)`
+
+(2) main encoder（--encoder で選択、1つだけ適用）
+- linear:
+  - `x <- x`（何もしない）
+- fourier_filter:
+  - `x <- irfft( g(k) * rfft(x) )`
+- randconv:
+  - `x <- irfft( rfft(x) * rfft(w_padded) )`
+- fourier_rfm:
+  - `x <- combine_{c=1..C} σ( irfft( χ(k) * rfft(x) * rfft(theta_c) ) )`
+  - **ensembleモード**では「xを返す」のではなく `z0_list` をC本返す（後述）
+- poly_deriv:
+  - `x <- a1*x + a2*x^2 + a3*x_x`（x_xはスペクトル微分）
+
+(3) affine（既存互換）
+- `x_aff = input_scale * x + input_shift`（input_shiftはスカラーで全点加算）
+
+(4) optional: saturating nonlinearity（安定化）
+- none: 何もしない
+- tanh: `z0 = tanh(gamma * x_aff)`
+- clip: `z0 = clip(x_aff, [-c, c])`
+
+通常はこの `z0` を `reservoir.simulate(z0, ...)` に渡す。
+
+### 2.2 fourier_rfm の ensemble モード（特徴concat）
+`encoder=fourier_rfm` かつ `--encoder-fourier-rfm-mode ensemble` のとき
+- 初期条件は `z0_c` を C本作る（各theta_cで別）
+- `reservoir_burgers_1d.py`:
+  - 各 `z0_c` で `simulate` し観測→flatten
+  - flatten結果（ベクトル特徴）を `concat` して最終特徴にする
+- `rfm_burgers_1d.py`:
+  - 各 `z0_c` で `simulate` し `Z_c`（(B,K,s)）を得る
+  - `Z_total = concat(Z_1,...,Z_C, dim=1)`（(B,C*K,s)）
+  - time-mix 行列 `A` の入力次元も `C*K` にする（k_obs_total）
+
+### 2.3 forcing の定義
+forcing field `f` を選択し、`forcing = forcing_gamma * f` を注入する。
+
+- `forcing_mode=none` or `forcing_gamma==0` -> forcing無効
+- `forcing_mode=constant` -> 全 step に注入
+- `forcing_mode=window` -> stepが `[start_step, end_step]` に入るときだけ注入
+  - `start_step = max(1, round(tstart/dt))`
+  - `end_step = min(max_obs, round(tend/dt))`
+
+solver側は semi-implicit Euler の **明示項**に forcing を足す（最小改造）。
+例（reaction_diffusion の既存式）:
+- 既存: `rhs_hat = z_hat + dt * rfft(nonlinear)`
+- 変更: `rhs_hat = z_hat + dt * ( rfft(nonlinear) + forcing_hat )`（forcingを使うstepのみ）
+※ `forcing_hat = rfft(forcing)` は `simulate` の外側で1回だけ計算して使い回す（毎step rfftしない）
+
+---
+
+## 3. 実装要件（具体的変更点）
+
+### 3.1 新規モジュール `pol/encoder_1d.py` を追加する（推奨・重複回避）
+目的: `reservoir_burgers_1d.py` と `rfm_burgers_1d.py` の両方で同一エンコーダを使えるようにする。
+
+#### API（これに合わせて実装）
+```python
+from dataclasses import dataclass
+from typing import List, Optional
+import torch
+
+@dataclass
+class EncoderOutputs:
+    x_raw: torch.Tensor              # (B,s) device上 float32
+    x_pre_list: List[torch.Tensor]   # (B,s) のリスト: step(2)終了時点（affine前）
+    z0_list: List[torch.Tensor]      # (B,s) のリスト: reservoirに入れる初期条件（step(4)後）
+
+class FixedEncoder1D:
+    def __init__(self, *, s: int, device: torch.device, dtype: torch.dtype, args: argparse.Namespace): ...
+    @torch.no_grad()
+    def encode(self, x_batch: torch.Tensor) -> EncoderOutputs: ...
+```
+
+要件:
+
+乱数を使うエンコーダ（fourier_filter の rand系 / randconv / fourier_rfm）は 初期化時にパラメータを固定生成し保持する（バッチ毎に再生成しない）。
+
+乱数生成は torch.Generator(device="cpu") + seed で再現性を担保し、作ったテンソルを .to(device) する。
+
+encode() は必ず torch.no_grad() で動くこと。
+
+fourier_filter の g(k) の作り方（最低限これを実装）
+
+k は “周波数インデックス”で良い（0..s//2）。物理k(2π…)は不要。
+
+lowpass:
+
+mask = (idx <= kmax)
+
+g = mask.to(complex)
+
+bandpass:
+
+mask = (kmin <= idx <= kmax)
+
+randphase:
+
+phase ~ Uniform(0, 2π) をサンプルし g = mask * exp(i*phase)
+
+ただし idx==0 と idx==s//2（Nyquist, sが偶数のため存在）では位相=0にして gを実数にする
+
+randamp:
+
+amp = 1 + amp_std * randn（real）
+
+g = mask * amp（complexにcastして乗算）
+
+randcomplex:
+
+phase ~ Uniform(0,2π), amp = abs(randn) * amp_std など
+
+g = mask * amp * exp(i*phase)（0/Nyquistは実数）
+
+オプションで --encoder-fourier-output-scale を掛けてよい。
+
+randconv の w の作り方
+
+kernel長 L = --encoder-randconv-kernel-size
+
+w_small ~ Normal(0, std)（L）
+
+normalize:
+
+none: 何もしない
+
+l1: w_small /= (sum(abs(w_small)) + eps)
+
+l2: w_small /= (sqrt(sum(w_small^2)) + eps)
+
+w_padded は長さsにゼロパディングし、周期畳み込みのために “中心が0番” になるようにロール（FFT畳み込みでの位相ずれを避ける）
+
+例: shift = -L//2 で torch.roll(w_padded, shifts=shift)
+
+w_hat = rfft(w_padded) を保持し、x_hat*w_hat で畳み込み
+
+fourier_rfm の theta
+
+theta_c ~ Normal(0, theta_scale) を C本生成（長さs）
+
+theta_hat_c = rfft(theta_c) を保持
+
+chi_mask は bandpass と同様（kmin,kmax）
+
+conv_c = irfft( chi * x_hat * theta_hat_c )
+
+activation: tanh/relu/identity を実装
+
+combine（sum/mean）:
+
+sum: x = (1/sqrt(C)) * Σ conv_c_act（推奨: 1/sqrt(C) でスケール安定）
+
+mean: x = (1/C) * Σ conv_c_act
+
+ensemble:
+
+x_pre_list と z0_list をC本にする（後段がconcatできるように）
+
+poly_deriv
+
+k = 2π * rfftfreq(s, d=1/s) を使い、x_x = irfft((1j*k) * rfft(x))
+
+x = a1*x + a2*x^2 + a3*x_x
+
+3.2 pol/reservoir_1d.py を拡張（forcing注入）
+
+Reservoir1DSolver.simulate(...) に以下を追加（後方互換必須）:
+
+def simulate(self, z0, dt, Tr, obs_steps, *, forcing: Optional[torch.Tensor] = None,
+             forcing_steps: Optional[tuple[int,int]] = None) -> List[torch.Tensor]:
+    ...
+
+要件:
+
+forcingが与えられたら shapeが z0 と同じ (B,s) であることを確認
+
+forcing_hat = rfft(forcing) を 1回だけ計算して使い回す
+
+forcing_steps が None の場合は全stepで注入
+
+window の場合 start<=step<=end のときだけ注入
+
+KS で ks_dealias がONなら forcing_hat も同じmaskで dealias してよい（推奨）
+
+実装方法（最小改造）:
+
+_step_reaction_diffusion/_step_burgers/_step_ks に forcing_hat: Optional[Tensor]=None 引数を追加し、
+
+rhs_hat 構成時に + dt*forcing_hat（注入するstepのみ）を足す
+
+あるいは step関数はそのままで、simulate側で “注入するstepではzをz+dt*forcing” してもよいが、FFT再計算が増えるので非推奨
+
+3.3 reservoir_burgers_1d.py を更新（エンコーダ＆forcing＆ensemble concat）
+CLI追加（既存引数は維持）
+
+追加する引数（例。名前は揃えること）:
+
+基本:
+
+--encoder choices: linear|fourier_filter|randconv|fourier_rfm|poly_deriv（default linear）
+
+--encoder-center (0/1, default 0)
+
+--encoder-standardize (0/1, default 0)
+
+--encoder-standardize-eps (float, default 1e-6)
+
+post-nonlinearity:
+
+--encoder-post choices: none|tanh|clip（default none）
+
+--encoder-tanh-gamma (float, default 1.0)
+
+--encoder-clip-c (float, default 3.0)
+
+fourier_filter params:
+
+--encoder-fourier-mode choices: lowpass|bandpass|randphase|randamp|randcomplex（default lowpass）
+
+--encoder-fourier-kmin int default 0
+
+--encoder-fourier-kmax int default 16
+
+--encoder-fourier-seed int default 0
+
+--encoder-fourier-amp-std float default 0.5
+
+--encoder-fourier-output-scale float default 1.0
+
+randconv params:
+
+--encoder-randconv-kernel-size int default 33
+
+--encoder-randconv-seed int default 0
+
+--encoder-randconv-std float default 1.0
+
+--encoder-randconv-normalize choices: none|l1|l2 default l2
+
+fourier_rfm params:
+
+--encoder-fourier-rfm-C int default 1
+
+--encoder-fourier-rfm-mode choices: sum|mean|ensemble default sum
+
+sum/mean は “1本のz0に合成”
+
+ensemble は “C本のz0を返す”
+
+--encoder-fourier-rfm-activation choices: tanh|relu|identity default tanh
+
+--encoder-fourier-rfm-kmin int default 0
+
+--encoder-fourier-rfm-kmax int default 16
+
+--encoder-fourier-rfm-seed int default 0
+
+--encoder-fourier-rfm-theta-scale float default 1.0
+
+--encoder-fourier-rfm-output-scale float default 1.0
+
+poly_deriv params:
+
+--encoder-poly-a1 float default 1.0
+
+--encoder-poly-a2 float default 0.0
+
+--encoder-poly-a3 float default 0.0
+
+forcing params:
+
+--forcing-mode choices: none|constant|window default none
+
+--forcing-gamma float default 0.0
+
+--forcing-source choices: raw|pre|z0 default pre
+
+--forcing-tstart float default 0.0
+
+--forcing-tend float default 0.0
+
+validation要件:
+
+kmax/kmin は 0 <= kmin <= kmax <= s//2 を満たすこと
+
+forcing window のとき tstart <= tend、かつ tstart,tend が [0, Tr] に収まること（端は許容）
+
+forcing_mode != none なのに forcing_gamma == 0 の場合は警告（or none扱い）
+
+実装方針
+
+FixedEncoder1D を main() 内で1回だけ生成
+
+phi_fn は以下の流れにする:
+
+enc = encoder.encode(x_batch)（enc.z0_list が1本 or C本）
+
+forcing を構成（必要なら）:
+
+source = raw/pre/z0 を選び、forcing = forcing_gamma * source
+
+ensemble時:
+
+raw: 全member共通
+
+pre/z0: memberごと
+
+windowの場合は forcing_steps=(start_step,end_step) を作る
+
+各 member について:
+
+states = reservoir.simulate(z0_member, dt, Tr, obs_steps, forcing=forcing_member, forcing_steps=...)
+
+obs_list = collect_observations(...)
+
+phi_member = flatten_observations(obs_list)
+
+member が複数なら phi = concat([phi_member], dim=-1)（特徴次元を増やす）
+
+ELM があれば elm(phi)、なければ phi
+
+※ 既存の NaN probe チェックは ensemble 全体で行う。
+
+3.4 rfm_burgers_1d.py を更新（同じエンコーダ＆forcing、ensembleはKチャネル拡張）
+
+reservoir_burgers_1d.py と同じ encoder/forcing CLI を追加
+
+FixedEncoder1D を使い、function_features 内で:
+
+enc = encoder.encode(x_batch)
+
+memberごとに simulate（forcingも同様）
+
+Z_member = stack(states, dim=1) -> (B,K,s)
+
+ensembleなら Z_total = cat(Z_members, dim=1) -> (B,C*K,s)
+
+以後の mixed = einsum("bks,mk->bms", Z_total, A)+b を適用
+
+A の生成は k_obs_total = len(obs_steps) * num_members を使う
+
+weight_scale default が 1/sqrt(k_obs_total) になるようにする（現在ロジックを拡張）
+
+3.5 pol/__init__.py（任意だが推奨）
+
+FixedEncoder1D と EncoderOutputs を export してよい（必須ではない）
+
+4. テスト追加（必須）
+
+外部データなしで pytest が通ること。
+
+4.1 新規テスト tests/test_encoder_1d.py を追加（推奨）
+
+以下を軽量にテストする（sは64や128でOK）:
+
+center/standardize の性質
+
+center後に abs(mean) < 1e-5 程度
+
+standardize後に std が ~1（ただし入力が定数の場合はstd=0なのでepsで扱う。テスト入力はランダムにする）
+
+tanh/clip の有界性
+
+tanh: |z0| <= 1
+
+clip: z0 in [-c,c]
+
+fourier_filter の決定性
+
+同じ seed で encoderを2回作り、同じ入力で同じ出力（allclose）
+
+randconv の決定性＆shape
+
+同上
+
+poly_deriv の導関数項チェック
+
+定数入力 x=const のとき、x_x がほぼ0（allclose）になることを確認
+
+例: a3=1, a1=a2=0 で出力がほぼ0
+
+fourier_rfm の sum/ensemble shape
+
+sum: z0_list が1本
+
+ensemble: z0_list がC本
+
+4.2 forcing のテスト（tests/test_reservoir_smoke.py に追加でもOK）
+
+同じ z0 で forcing無しと forcing有りで simulate したとき、観測状態が一致しない（norm差 > 0）ことを確認
+
+forcingは小さすぎると差が出ない可能性があるので gamma=0.5 等でOK
+
+5. README 更新（推奨）
+
+README.md に以下を追加:
+
+encoderの概要（center/standardize、fourier_filter、randconv、fourier_rfm、poly_deriv、tanh/clip）
+
+forcingの概要（constant/window, source）
+
+実行例（dry-runでOK）
+
+center+standardize+tanh:
+
+python reservoir_burgers_1d.py --dry-run --encoder linear --encoder-center 1 --encoder-standardize 1 --encoder-post tanh --encoder-tanh-gamma 1.0
+
+fourier_filter randphase:
+
+python reservoir_burgers_1d.py --dry-run --encoder fourier_filter --encoder-fourier-mode randphase --encoder-fourier-kmax 16 --encoder-fourier-seed 0
+
+fourier_rfm ensemble:
+
+python reservoir_burgers_1d.py --dry-run --encoder fourier_rfm --encoder-fourier-rfm-mode ensemble --encoder-fourier-rfm-C 4
+
+forcing constant:
+
+python reservoir_burgers_1d.py --dry-run --forcing-mode constant --forcing-gamma 0.5 --forcing-source pre
+
+6. 受け入れ条件（Definition of Done）
+
+python -m pytest -q が成功する
+
+既存の3コマンド（以前の改善点）も引き続き動く:
+
+python reservoir_burgers_1d.py --dry-run --ntrain 8 --ntest 4 --sub 256 --obs fourier --J 16 --standardize-features 1
+
+python reservoir_burgers_1d.py --dry-run --ntrain 8 --ntest 4 --sub 256 --obs proj --J 16 --sensor-seed 1 --standardize-features 1
+
+python rfm_burgers_1d.py --dry-run --ntrain 8 --ntest 4 --sub 256 --m 32 --K 3 --Tr 0.1 --dt 0.01
+
+追加機能のdry-runがクラッシュせず動く:
+
+python reservoir_burgers_1d.py --dry-run --encoder linear --encoder-center 1 --encoder-standardize 1 --encoder-post tanh --encoder-tanh-gamma 1.0
+
+python reservoir_burgers_1d.py --dry-run --encoder fourier_filter --encoder-fourier-mode randphase --encoder-fourier-kmax 16 --encoder-fourier-seed 0
+
+python reservoir_burgers_1d.py --dry-run --encoder fourier_rfm --encoder-fourier-rfm-mode ensemble --encoder-fourier-rfm-C 3
+
+python reservoir_burgers_1d.py --dry-run --forcing-mode window --forcing-gamma 0.5 --forcing-source pre --forcing-tstart 0.02 --forcing-tend 0.06
+
+python rfm_burgers_1d.py --dry-run --encoder poly_deriv --encoder-poly-a1 1.0 --encoder-poly-a2 0.2 --encoder-poly-a3 0.1 --forcing-mode constant --forcing-gamma 0.2 --forcing-source pre
+
+新機能をOFFにした場合（encoder=linear, center=0, standardize=0, post=none, forcing=none）、
+z0 = input_scale*x + input_shift の従来挙動と一致する
+
+生成物（pycache 等）をコミットしない

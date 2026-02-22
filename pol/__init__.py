@@ -1,6 +1,7 @@
 """PDE Operator Learning (POL) modules for backprop-free reservoir methods."""
 
 from .elm import FixedRandomELM
+from .encoder_1d import EncoderOutputs, FixedEncoder1D
 from .features_1d import (
     build_sensor_indices,
     build_time_grid,
@@ -12,6 +13,8 @@ from .ridge import fit_ridge_streaming, fit_ridge_streaming_standardized, predic
 
 __all__ = [
     "FixedRandomELM",
+    "FixedEncoder1D",
+    "EncoderOutputs",
     "Reservoir1DSolver",
     "build_time_grid",
     "build_sensor_indices",
