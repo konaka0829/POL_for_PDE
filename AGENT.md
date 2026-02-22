@@ -331,7 +331,7 @@ for batch_u_full in loader:  # (B, T_total, X)
   backprop
 ```
 
-### 出力（可視化）
+#### 出力（可視化）
 
 `image/conjugacy_1d_time_<config>/` に
 
@@ -345,46 +345,37 @@ for batch_u_full in loader:  # (B, T_total, X)
 
 #### 主なCLI引数（必須）
 
-データ:
-
-- `--data-mode` (`single_split` / `separate_files`)
-- `--data-file` / `--train-file` / `--test-file`
-- `--train-split`, `--seed`, `--shuffle`
-
-学習:
-
-- `--ntrain`, `--ntest`, `--batch-size`, `--epochs`, `--learning-rate`
-
-形状:
-
-- `--sub`（空間間引き）
-- `--S`（間引き後の期待格子サイズ）
-- `--T`（予測ホライズン）
-- `--dt`
-- 任意: `--sub-t`（時間間引き、無いなら追加して良い）
-
-モデル:
-
-- `--modes`, `--width`
-- `--cz`, `--mu`, `--lambda-ae`, `--nu`, `--learn-nu`, `--use-2pi`
-- `--use-instance-norm`（デフォルト True 推奨。既存 `fourier_2d_time.py` に倣う）
-
-時間窓:
-
-- `--random-t0`（デフォルト True）
+- データ:
+  - `--data-mode` (`single_split` / `separate_files`)
+  - `--data-file` / `--train-file` / `--test-file`
+  - `--train-split`, `--seed`, `--shuffle`
+- 学習:
+  - `--ntrain`, `--ntest`, `--batch-size`, `--epochs`, `--learning-rate`
+- 形状:
+  - `--sub`（空間間引き）
+  - `--S`（間引き後の期待格子サイズ）
+  - `--T`（予測ホライズン）
+  - `--dt`
+  - 任意: `--sub-t`（時間間引き、無いなら追加して良い）
+- モデル:
+  - `--modes`, `--width`
+  - `--cz`, `--mu`, `--lambda-ae`, `--nu`, `--learn-nu`, `--use-2pi`
+  - `--use-instance-norm`（デフォルト True 推奨。既存 `fourier_2d_time.py` に倣う）
+- 時間窓:
+  - `--random-t0`（デフォルト True）
 
 #### データ整形
 
-- `u_full`: `(N, S, S, T_total)`
+- `u_full`: (N, S, S, T_total)
 - `sub` で `u_full[:, ::sub, ::sub, :]`
-- `S` と一致するか `assert`。
+- `S` と一致するか assert。
 
 #### 学習ループ（要点）
 
-1Dと同様だが形が `(B,S,S,T_total)`。
+1Dと同様だが形が (B,S,S,T_total)。
 
-- `u0 = u_gt[...,0]` を `(B,S,S,1)` にして encoder
-- 予測は `pred_seq` を time last に cat して `(B,S,S,T+1)`
+- `u0 = u_gt[...,0]` を (B,S,S,1) にして encoder
+- 予測は `pred_seq` を time last に cat して (B,S,S,T+1)
 
 #### 可視化
 
@@ -401,24 +392,25 @@ for batch_u_full in loader:  # (B, T_total, X)
 
 を保存する。
 
+---
+
 ## 7. 実装タスク（Codex CLI がやること）
 
 ### 7.1 新規ファイル
 
 - `semigroup_layers.py`
-- `HeatSemigroup1d`, `HeatSemigroup2d`
-- `learnable nu`, `use_2pi`, `domain_length`
-- 入力shape変換（`(B,X,C) ↔ (B,C,X)`, `(B,S,S,C) ↔ (B,C,S,S)`）
+  - `HeatSemigroup1d`, `HeatSemigroup2d`
+  - learnable nu, use_2pi, domain_length
+  - 入力shape変換（(B,X,C) ↔ (B,C,X), (B,S,S,C) ↔ (B,C,S,S)）
 
 - `fno_generic.py`（推奨）
-- `SpectralConv1d`, `SpectralConv2d`
-- `MLP1d/MLP2d`
-- `FNO1dGeneric(in_dim,out_dim,...)`
-- `FNO2dGeneric(in_dim,out_dim,...)`
-- `grid concat` オプション
+  - `SpectralConv1d`, `SpectralConv2d`
+  - `MLP1d/MLP2d`
+  - `FNO1dGeneric(in_dim,out_dim,...)`
+  - `FNO2dGeneric(in_dim,out_dim,...)`
+  - grid concat オプション
 
 - `conjugacy_1d_time.py`
-
 - `conjugacy_2d_time.py`
 
 ### 7.2 README 追記
@@ -432,6 +424,8 @@ for batch_u_full in loader:  # (B, T_total, X)
 
 `fourier_1d.py`, `fourier_2d_time.py` など既存スクリプトはそのまま動くこと。
 
+---
+
 ## 8. 受け入れ条件（Done の定義）
 
 - `python conjugacy_1d_time.py --help` と `python conjugacy_2d_time.py --help` が動く。
@@ -439,6 +433,8 @@ for batch_u_full in loader:  # (B, T_total, X)
 - `image/` 配下に学習曲線とサンプル可視化が保存される。
 - semigroup レイヤが勾配伝播可能（nu 学習時に nu が更新される）。
 - 1D/2Dともに、入力と出力のテンソルshapeが一貫している。
+
+---
 
 ## 9. 推奨デフォルト値・実行例（READMEにも反映すること）
 

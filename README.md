@@ -320,3 +320,143 @@ Here are the pre-trained models. It can be evaluated using _eval.py_ or _super_r
       primaryClass={cs.LG}
 }
 ```
+
+## 共役学習（Koopman固有汎関数ベース）
+このリポジトリには、未知PDEの流れを既知の線形PDE半群（heat semigroup）に共役させる学習スクリプトを追加しています。
+
+### 追加スクリプト
+- `conjugacy_1d_time.py`: 1D 時系列共役学習（Burgers想定）
+- `conjugacy_2d_time.py`: 2D 時系列共役学習（Navier-Stokes想定）
+- `semigroup_layers.py`: `HeatSemigroup1d` / `HeatSemigroup2d`
+- `fno_generic.py`: 可変入出力チャネル対応の FNO1D/2D ブロック
+
+### データ形状（.mat）
+- 1D (`conjugacy_1d_time.py`)
+- `a`: `(N, X)`
+- `u`: `(N, X)` または `(N, T, X)` または `(N, X, T)`
+- 内部では `u_full: (N, T_total, X)` に整形して時間窓をサンプル
+
+- 2D (`conjugacy_2d_time.py`)
+- `u`: `(N, S, S, T_total)`
+- 内部では空間・時間の間引き後、時間窓 `(T+1)` をサンプル
+
+### 主要引数（共通）
+- データ: `--data-mode`, `--data-file`, `--train-file`, `--test-file`, `--train-split`, `--seed`, `--shuffle`
+- 学習: `--ntrain`, `--ntest`, `--batch-size`, `--epochs`, `--learning-rate`
+- 共役学習: `--T`, `--dt`, `--cz`, `--mu`, `--lambda-ae`, `--nu`, `--learn-nu`, `--use-2pi`
+
+### 1D 実行例
+```bash
+python conjugacy_1d_time.py \
+  --data-mode single_split --data-file data/burgers_data_R10.mat \
+  --ntrain 1000 --ntest 100 --sub 8 \
+  --T 1 --dt 1.0 --cz 8 --mu 1.0 --lambda-ae 0.1 \
+  --modes 16 --width 64 \
+  --epochs 500 --batch-size 20 --learning-rate 1e-3
+```
+
+時間系列 `u` がある場合:
+```bash
+python conjugacy_1d_time.py \
+  --data-mode single_split --data-file data/burgers_time_series.mat \
+  --T 20 --dt 0.005 --random-t0 \
+  --prepend-a-as-t0
+```
+
+### 2D 実行例
+```bash
+python conjugacy_2d_time.py \
+  --data-mode separate_files \
+  --train-file data/ns_data_V100_N1000_T50_1.mat \
+  --test-file  data/ns_data_V100_N1000_T50_2.mat \
+  --ntrain 1000 --ntest 200 --sub 1 --S 64 \
+  --T 40 --dt 1.0 --cz 8 --mu 1.0 --lambda-ae 0.1 \
+  --modes 12 --width 20 \
+  --epochs 500 --batch-size 20 --learning-rate 1e-3
+```
+
+### 出力
+- 学習・評価の可視化は `image/conjugacy_1d_time_*` と `image/conjugacy_2d_time_*` に保存されます。
+- 学習曲線、サンプル予測、エラーヒストグラムを `viz_utils.py` で出力します。
+
+### 実行手順（推奨）
+1. Python 3.10+ 環境で依存をインストールします（`requirements.txt`）。
+2. `.mat` データを `data/` 以下に配置します。
+3. まずは `--help` で引数を確認します。
+```bash
+python3 conjugacy_1d_time.py --help
+python3 conjugacy_2d_time.py --help
+```
+4. 小規模設定でスモーク学習を実行し、損失が出ることを確認します。
+```bash
+python3 conjugacy_1d_time.py \
+  --data-mode single_split --data-file data/burgers_data_R10.mat \
+  --ntrain 16 --ntest 4 --sub 8 --T 1 --epochs 2 --batch-size 4 \
+  --modes 8 --width 16 --cz 4
+
+python3 conjugacy_2d_time.py \
+  --data-mode separate_files \
+  --train-file data/ns_data_V100_N1000_T50_1.mat \
+  --test-file  data/ns_data_V100_N1000_T50_2.mat \
+  --ntrain 16 --ntest 4 --sub 1 --S 64 --T 4 --epochs 2 --batch-size 2 \
+  --modes 6 --width 12 --cz 4
+```
+5. 本番設定（`ntrain` / `epochs` / `modes` / `width` / `cz`）を段階的に増やします。
+
+### 引数一覧（`conjugacy_1d_time.py`）
+- `--data-mode`（デフォルト: `single_split`）: データ読込方式。`single_split` / `separate_files`。
+- `--data-file`（デフォルト: `data/burgers_data_R10.mat`）: `single_split` 時の入力ファイル。
+- `--train-file`（デフォルト: `None`）: `separate_files` 時の訓練ファイル。
+- `--test-file`（デフォルト: `None`）: `separate_files` 時のテストファイル。
+- `--train-split`（デフォルト: `0.8`）: `single_split` 時の訓練割合。
+- `--seed`（デフォルト: `0`）: 乱数シード。
+- `--shuffle`（デフォルト: `False`）: `single_split` 時に分割前シャッフル。
+- `--ntrain`（デフォルト: `1000`）: 訓練サンプル数。
+- `--ntest`（デフォルト: `100`）: テストサンプル数。
+- `--batch-size`（デフォルト: `20`）: ミニバッチサイズ。
+- `--epochs`（デフォルト: `500`）: 学習エポック数。
+- `--learning-rate`（デフォルト: `1e-3`）: 学習率。
+- `--sub`（デフォルト: `8`）: 空間間引き率。
+- `--T`（デフォルト: `1`）: 予測ホライズン（窓長は `T+1`）。
+- `--dt`（デフォルト: `1.0`）: 潜在半群1ステップの時間幅。
+- `--modes`（デフォルト: `16`）: FNOの低周波モード数。
+- `--width`（デフォルト: `64`）: FNOのチャネル幅。
+- `--cz`（デフォルト: `8`）: 潜在チャネル数。
+- `--mu`（デフォルト: `1.0`）: 半群整合損失 `L_sg` の重み。
+- `--lambda-ae`（デフォルト: `0.1`）: 自己再構成損失 `L_ae` の重み。
+- `--nu`（デフォルト: `0.01`）: heat 半群の拡散係数。
+- `--learn-nu`（デフォルト: `False`）: `nu` を学習パラメータ化。
+- `--use-2pi` / `--no-use-2pi`（デフォルト: `--use-2pi`）: 周波数に `2π` を掛けるか。
+- `--domain-length`（デフォルト: `1.0`）: 物理領域長 `L`。
+- `--prepend-a-as-t0` / `--no-prepend-a-as-t0`（デフォルト: `--prepend-a-as-t0`）: 時系列 `u` 読込時に `a` を先頭時刻に追加するか。
+- `--random-t0` / `--no-random-t0`（デフォルト: `--random-t0`）: 学習時に開始時刻 `t0` をランダム化するか。
+
+### 引数一覧（`conjugacy_2d_time.py`）
+- `--data-mode`（デフォルト: `separate_files`）: データ読込方式。`single_split` / `separate_files`。
+- `--data-file`（デフォルト: `data/ns_data_V100_N1000_T50_1.mat`）: `single_split` 時の入力ファイル。
+- `--train-file`（デフォルト: `data/ns_data_V100_N1000_T50_1.mat`）: `separate_files` 時の訓練ファイル。
+- `--test-file`（デフォルト: `data/ns_data_V100_N1000_T50_2.mat`）: `separate_files` 時のテストファイル。
+- `--train-split`（デフォルト: `0.8`）: `single_split` 時の訓練割合。
+- `--seed`（デフォルト: `0`）: 乱数シード。
+- `--shuffle`（デフォルト: `False`）: `single_split` 時に分割前シャッフル。
+- `--ntrain`（デフォルト: `1000`）: 訓練サンプル数。
+- `--ntest`（デフォルト: `200`）: テストサンプル数。
+- `--batch-size`（デフォルト: `20`）: ミニバッチサイズ。
+- `--epochs`（デフォルト: `500`）: 学習エポック数。
+- `--learning-rate`（デフォルト: `1e-3`）: 学習率。
+- `--sub`（デフォルト: `1`）: 空間間引き率。
+- `--S`（デフォルト: `64`）: 間引き後の期待格子サイズ。
+- `--sub-t`（デフォルト: `1`）: 時間間引き率。
+- `--T`（デフォルト: `40`）: 予測ホライズン（窓長は `T+1`）。
+- `--dt`（デフォルト: `1.0`）: 潜在半群1ステップの時間幅。
+- `--modes`（デフォルト: `12`）: FNOの低周波モード数。
+- `--width`（デフォルト: `20`）: FNOのチャネル幅。
+- `--cz`（デフォルト: `8`）: 潜在チャネル数。
+- `--mu`（デフォルト: `1.0`）: 半群整合損失 `L_sg` の重み。
+- `--lambda-ae`（デフォルト: `0.1`）: 自己再構成損失 `L_ae` の重み。
+- `--nu`（デフォルト: `0.01`）: heat 半群の拡散係数。
+- `--learn-nu`（デフォルト: `False`）: `nu` を学習パラメータ化。
+- `--use-2pi` / `--no-use-2pi`（デフォルト: `--use-2pi`）: 周波数に `2π` を掛けるか。
+- `--domain-length`（デフォルト: `1.0`）: 物理領域長 `L`。
+- `--use-instance-norm` / `--no-use-instance-norm`（デフォルト: `--use-instance-norm`）: 2D FNOの InstanceNorm 有効化。
+- `--random-t0` / `--no-random-t0`（デフォルト: `--random-t0`）: 学習時に開始時刻 `t0` をランダム化するか。
