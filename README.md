@@ -52,6 +52,58 @@ which takes the 2D spatial + 1D temporal equation directly as a 3D problem. The 
 - The lowrank methods are similar. These scripts are the Lowrank neural operators for the corresponding settings.
 - `data_generation` are the conventional solvers we used to generate the datasets for the Burgers equation, Darcy flow, and Navier-Stokes equation.
 
+## PDE-RF Baselines (Random Feature Operator)
+This repository also includes PDE-induced random feature (PDE-RF) operator-learning baselines:
+
+- `pde_rf_1d.py`: 1D Burgers-style operator regression with heat-semigroup-induced random features + multi-output ridge.
+- `pde_rf_2d.py`: 2D Darcy-style operator regression with the same feature construction, optional `grid`/`pod` output basis.
+- `pde_features.py`: heat semigroup and random feature map implementations.
+- `ridge.py`: stable multi-output ridge solver (Cholesky + jitter fallback, chunked `Phi^T Y`).
+- `basis.py`: `GridBasis` and optional `PODBasis`.
+
+### Quick start
+- 1D smoke test:
+  - `python pde_rf_1d.py --smoke-test`
+- 2D smoke test:
+  - `python pde_rf_2d.py --smoke-test`
+
+### Real-data examples
+- 1D single-file split:
+  - `python pde_rf_1d.py --data-mode single_split --data-file data/burgers_data_R10.mat --ntrain 1000 --ntest 100`
+- 2D separate train/test files:
+  - `python pde_rf_2d.py --data-mode separate_files --train-file data/piececonst_r421_N1024_smooth1.mat --test-file data/piececonst_r421_N1024_smooth2.mat --ntrain 1000 --ntest 100 --r 5 --grid-size 421`
+
+### Main PDE-RF hyperparameters (defaults)
+- Shared core:
+  - `--M` (number of random features): `2048`
+  - `--nu` (diffusion coeff. in heat semigroup): `1.0`
+  - `--tau-dist` (`loguniform|uniform|exponential`): `loguniform`
+  - `--tau-min`: `1e-4`
+  - `--tau-max`: `1.0`
+  - `--tau-exp-rate` (used when `--tau-dist exponential`): `1.0`
+  - `--g-smooth-tau` (pre-smoothing time for random test functions): `0.0`
+  - `--activation` (`tanh|gelu|relu|sin`): `tanh`
+  - `--feature-scale` (`none|inv_sqrt_m`): `inv_sqrt_m`
+  - `--ridge-lambda`: `1e-6`
+  - `--solve-device` (`auto|cpu|cuda`): `auto`
+  - `--dtype` (`float32|float64`): `float32`
+  - `--inner-product` (`mean|sum`): `mean`
+- 1D-specific:
+  - `--sub`: `8`
+  - `--train-split`: `0.8`
+  - `--viz-dir`: `visualizations/pde_rf_1d`
+  - `--num-viz`: `3`
+- 2D-specific:
+  - `--r`: `5`
+  - `--grid-size`: `421`
+  - `--basis` (`grid|pod`): `grid`
+  - `--basis-dim`: `256`
+  - `--pod-center` (default ON)
+  - `--viz-dir`: `visualizations/pde_rf_2d`
+  - `--num-viz`: `3`
+
+Both PDE-RF scripts save prediction visualizations and test-error histograms in PNG/PDF/SVG via `viz_utils.py`.
+
 ## Datasets
 We provide the Burgers equation, Darcy flow, and Navier-Stokes equation datasets we used in the paper. 
 The data generation configuration can be found in the paper.
