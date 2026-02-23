@@ -343,14 +343,16 @@ Here are the pre-trained models. It can be evaluated using _eval.py_ or _super_r
 ### 主要引数（共通）
 - データ: `--data-mode`, `--data-file`, `--train-file`, `--test-file`, `--train-split`, `--seed`, `--shuffle`
 - 学習: `--ntrain`, `--ntest`, `--batch-size`, `--epochs`, `--learning-rate`
-- 共役学習: `--T`, `--dt`, `--cz`, `--mu`, `--lambda-ae`, `--nu`, `--learn-nu`, `--use-2pi`
+- 共役学習: `--T`, `--dt`, `--cz`, `--mu`, `--mu-warmup-epochs`, `--lambda-ae`, `--nu`, `--learn-nu`, `--use-2pi`
 
 ### 1D 実行例
 ```bash
 python conjugacy_1d_time.py \
   --data-mode single_split --data-file data/burgers_data_R10.mat \
   --ntrain 1000 --ntest 100 --sub 8 \
-  --T 1 --dt 1.0 --cz 8 --mu 1.0 --lambda-ae 0.1 \
+  --T 1 --dt 1.0 --cz 8 \
+  --mu 0.1 --mu-warmup-epochs 50 --lambda-ae 1.0 \
+  --nu 0.1 --learn-nu \
   --modes 16 --width 64 \
   --epochs 500 --batch-size 20 --learning-rate 1e-3
 ```
@@ -370,10 +372,16 @@ python conjugacy_2d_time.py \
   --train-file data/ns_data_V100_N1000_T50_1.mat \
   --test-file  data/ns_data_V100_N1000_T50_2.mat \
   --ntrain 1000 --ntest 200 --sub 1 --S 64 \
-  --T 40 --dt 1.0 --cz 8 --mu 1.0 --lambda-ae 0.1 \
+  --T 40 --dt 1.0 --cz 8 \
+  --mu 0.1 --mu-warmup-epochs 50 --lambda-ae 1.0 \
+  --nu 0.01 --learn-nu \
   --modes 12 --width 20 \
   --epochs 500 --batch-size 20 --learning-rate 1e-3
 ```
+
+### 学習安定化の注意
+- `pred` / `sg` は未来ステップ `n=1..T` のみで計算し、`n=0` は AE が担当します。
+- `--mu-warmup-epochs` で `mu` を 0 から線形に立ち上げると、初期崩壊（relL2≈1）を避けやすくなります。
 
 ### 出力
 - 学習・評価の可視化は `image/conjugacy_1d_time_*` と `image/conjugacy_2d_time_*` に保存されます。
@@ -422,9 +430,10 @@ python3 conjugacy_2d_time.py \
 - `--modes`（デフォルト: `16`）: FNOの低周波モード数。
 - `--width`（デフォルト: `64`）: FNOのチャネル幅。
 - `--cz`（デフォルト: `8`）: 潜在チャネル数。
-- `--mu`（デフォルト: `1.0`）: 半群整合損失 `L_sg` の重み。
-- `--lambda-ae`（デフォルト: `0.1`）: 自己再構成損失 `L_ae` の重み。
-- `--nu`（デフォルト: `0.01`）: heat 半群の拡散係数。
+- `--mu`（デフォルト: `0.1`）: 半群整合損失 `L_sg` の重み。
+- `--mu-warmup-epochs`（デフォルト: `50`）: `mu` を 0→`mu` に線形ウォームアップするエポック数（`0` で無効）。
+- `--lambda-ae`（デフォルト: `1.0`）: 自己再構成損失 `L_ae` の重み。
+- `--nu`（デフォルト: `0.1`）: heat 半群の拡散係数。
 - `--learn-nu`（デフォルト: `False`）: `nu` を学習パラメータ化。
 - `--use-2pi` / `--no-use-2pi`（デフォルト: `--use-2pi`）: 周波数に `2π` を掛けるか。
 - `--domain-length`（デフォルト: `1.0`）: 物理領域長 `L`。
@@ -452,8 +461,9 @@ python3 conjugacy_2d_time.py \
 - `--modes`（デフォルト: `12`）: FNOの低周波モード数。
 - `--width`（デフォルト: `20`）: FNOのチャネル幅。
 - `--cz`（デフォルト: `8`）: 潜在チャネル数。
-- `--mu`（デフォルト: `1.0`）: 半群整合損失 `L_sg` の重み。
-- `--lambda-ae`（デフォルト: `0.1`）: 自己再構成損失 `L_ae` の重み。
+- `--mu`（デフォルト: `0.1`）: 半群整合損失 `L_sg` の重み。
+- `--mu-warmup-epochs`（デフォルト: `50`）: `mu` を 0→`mu` に線形ウォームアップするエポック数（`0` で無効）。
+- `--lambda-ae`（デフォルト: `1.0`）: 自己再構成損失 `L_ae` の重み。
 - `--nu`（デフォルト: `0.01`）: heat 半群の拡散係数。
 - `--learn-nu`（デフォルト: `False`）: `nu` を学習パラメータ化。
 - `--use-2pi` / `--no-use-2pi`（デフォルト: `--use-2pi`）: 周波数に `2π` を掛けるか。

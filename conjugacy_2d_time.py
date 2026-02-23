@@ -4,7 +4,6 @@ from timeit import default_timer
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 from cli_utils import add_data_mode_args, add_split_args, validate_data_mode_args
 from fno_generic import FNO2dGeneric
@@ -47,8 +46,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--width", type=int, default=20, help="FNO width.")
     parser.add_argument("--cz", type=int, default=8, help="Latent channel dimension.")
 
-    parser.add_argument("--mu", type=float, default=1.0, help="Weight for semigroup consistency loss.")
-    parser.add_argument("--lambda-ae", type=float, default=0.1, help="Weight for auto-encoding loss.")
+    parser.add_argument("--mu", type=float, default=0.1, help="Weight for semigroup consistency loss.")
+    parser.add_argument("--mu-warmup-epochs", type=int, default=50, help="Linear warmup epochs for mu. 0 disables.")
+    parser.add_argument("--lambda-ae", type=float, default=1.0, help="Weight for auto-encoding loss.")
 
     parser.add_argument("--nu", type=float, default=0.01, help="Heat semigroup diffusion coefficient.")
     parser.add_argument("--learn-nu", action="store_true", help="Make nu learnable (positive via softplus).")
@@ -92,6 +92,8 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         parser.error("--dt must be positive")
     if args.cz <= 0:
         parser.error("--cz must be positive")
+    if args.mu_warmup_epochs < 0:
+        parser.error("--mu-warmup-epochs must be >= 0")
 
 
 def _load_u_full(path: str, sub: int, sub_t: int) -> torch.Tensor:
@@ -145,6 +147,11 @@ def _sample_window(u_full: torch.Tensor, T: int, random_t0: bool) -> torch.Tenso
 def _rel_lp_loss(myloss: LpLoss, pred: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
     b = pred.shape[0]
     return myloss(pred.reshape(b, -1), gt.reshape(b, -1))
+
+
+def _sg_loss_2d(z_enc: torch.Tensor, z_ref: torch.Tensor) -> torch.Tensor:
+    # Sum over batch of per-sample mean squared error in latent space.
+    return ((z_enc - z_ref) ** 2).mean(dim=(1, 2, 3)).sum()
 
 
 def _rollout_2d(
@@ -244,7 +251,8 @@ def main() -> None:
 
     run_name = (
         f"conjugacy_2d_time_n{args.ntrain}_T{args.T}_m{args.modes}_w{args.width}"
-        f"_cz{args.cz}_mu{args.mu}_lae{args.lambda_ae}"
+        f"_cz{args.cz}_mu{args.mu}_muw{args.mu_warmup_epochs}_lae{args.lambda_ae}"
+        f"_nu{args.nu}{'_lnu' if args.learn_nu else ''}"
     )
     image_dir = os.path.join("image", run_name)
     os.makedirs(image_dir, exist_ok=True)
@@ -257,6 +265,10 @@ def main() -> None:
 
     for ep in range(args.epochs):
         t1 = default_timer()
+        if args.mu_warmup_epochs <= 0:
+            mu_eff = args.mu
+        else:
+            mu_eff = args.mu * min(1.0, ep / args.mu_warmup_epochs)
         enc.train()
         dec.train()
         heat.train()
@@ -268,7 +280,6 @@ def main() -> None:
         for (u_batch,) in train_loader:
             u_batch = u_batch.to(device)
             u_gt = _sample_window(u_batch, T=args.T, random_t0=args.random_t0)
-            b = u_gt.shape[0]
 
             u0 = u_gt[..., 0].unsqueeze(-1)
             z = enc(u0)
@@ -276,33 +287,31 @@ def main() -> None:
             pred_acc = 0.0
             sg_acc = 0.0
             ae_acc = 0.0
-            for n in range(args.T + 1):
-                if n > 0:
-                    z = heat(z, args.dt)
+            ae_acc = ae_acc + _rel_lp_loss(myloss, dec(z), u0)  # n=0 AE only
+
+            for n in range(1, args.T + 1):
+                z = heat(z, args.dt)
                 gt_n = u_gt[..., n].unsqueeze(-1)
                 u_hat = dec(z)
-
-                l_pred = _rel_lp_loss(myloss, u_hat, gt_n)
                 z_enc = enc(gt_n)
-                l_sg = F.mse_loss(z_enc, z, reduction="mean")
-                u_ae = dec(z_enc)
-                l_ae = _rel_lp_loss(myloss, u_ae, gt_n)
 
-                pred_acc = pred_acc + l_pred
-                sg_acc = sg_acc + l_sg
-                ae_acc = ae_acc + l_ae
+                pred_acc = pred_acc + _rel_lp_loss(myloss, u_hat, gt_n)
+                sg_acc = sg_acc + _sg_loss_2d(z_enc, z)
+                ae_acc = ae_acc + _rel_lp_loss(myloss, dec(z_enc), gt_n)
 
-            # pred/ae are batch-summed relative errors (LpLoss size_average=False),
-            # so scale sg(mean-over-batch) by batch to keep weighting batch-size invariant.
-            loss = (pred_acc + args.mu * (sg_acc * b) + args.lambda_ae * ae_acc) / ((args.T + 1) * b)
+            pred_term = pred_acc / args.T
+            sg_term = sg_acc / args.T
+            ae_term = ae_acc / (args.T + 1)
+            loss = pred_term + mu_eff * sg_term + args.lambda_ae * ae_term
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             scheduler.step()
 
-            train_pred_sum += (pred_acc / ((args.T + 1) * b)).item() * b
-            train_total_sum += loss.item() * b
+            b = u_gt.shape[0]
+            train_pred_sum += pred_acc.item()
+            train_total_sum += loss.item()
             train_count += b
 
         enc.eval()
@@ -317,7 +326,6 @@ def main() -> None:
             for (u_batch,) in test_loader:
                 u_batch = u_batch.to(device)
                 u_gt = _sample_window(u_batch, T=args.T, random_t0=False)
-                b = u_gt.shape[0]
 
                 u0 = u_gt[..., 0].unsqueeze(-1)
                 z = enc(u0)
@@ -325,30 +333,31 @@ def main() -> None:
                 pred_acc = 0.0
                 sg_acc = 0.0
                 ae_acc = 0.0
-                for n in range(args.T + 1):
-                    if n > 0:
-                        z = heat(z, args.dt)
+                ae_acc = ae_acc + _rel_lp_loss(myloss, dec(z), u0)  # n=0 AE only
+
+                for n in range(1, args.T + 1):
+                    z = heat(z, args.dt)
                     gt_n = u_gt[..., n].unsqueeze(-1)
                     u_hat = dec(z)
-
-                    l_pred = _rel_lp_loss(myloss, u_hat, gt_n)
                     z_enc = enc(gt_n)
-                    l_sg = F.mse_loss(z_enc, z, reduction="mean")
-                    u_ae = dec(z_enc)
-                    l_ae = _rel_lp_loss(myloss, u_ae, gt_n)
 
-                    pred_acc = pred_acc + l_pred
-                    sg_acc = sg_acc + l_sg
-                    ae_acc = ae_acc + l_ae
+                    pred_acc = pred_acc + _rel_lp_loss(myloss, u_hat, gt_n)
+                    sg_acc = sg_acc + _sg_loss_2d(z_enc, z)
+                    ae_acc = ae_acc + _rel_lp_loss(myloss, dec(z_enc), gt_n)
 
-                loss = (pred_acc + args.mu * (sg_acc * b) + args.lambda_ae * ae_acc) / ((args.T + 1) * b)
-                test_pred_sum += (pred_acc / ((args.T + 1) * b)).item() * b
-                test_total_sum += loss.item() * b
+                pred_term = pred_acc / args.T
+                sg_term = sg_acc / args.T
+                ae_term = ae_acc / (args.T + 1)
+                loss = pred_term + mu_eff * sg_term + args.lambda_ae * ae_term
+
+                b = u_gt.shape[0]
+                test_pred_sum += pred_acc.item()
+                test_total_sum += loss.item()
                 test_count += b
 
-        train_pred_epoch = train_pred_sum / max(1, train_count)
+        train_pred_epoch = train_pred_sum / max(1, train_count * args.T)
         train_total_epoch = train_total_sum / max(1, train_count)
-        test_pred_epoch = test_pred_sum / max(1, test_count)
+        test_pred_epoch = test_pred_sum / max(1, test_count * args.T)
         test_total_epoch = test_total_sum / max(1, test_count)
 
         hist_ep.append(ep)
@@ -366,6 +375,7 @@ def main() -> None:
             f"train_total={train_total_epoch:.4e}",
             f"test_pred={test_pred_epoch:.4e}",
             f"test_total={test_total_epoch:.4e}",
+            f"mu_eff={mu_eff:.4e}",
             f"nu={nu_val:.4e}",
         )
 
