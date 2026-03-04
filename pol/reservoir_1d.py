@@ -59,10 +59,10 @@ class Reservoir1DSolver:
         mask = self._dealias_mask(s, u_hat.device, u_hat.real.dtype)
         return u_hat * mask.unsqueeze(0)
 
-    def _ux(self, z: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
-        z_hat = torch.fft.rfft(z, dim=-1)
+    def _ux(self, z: torch.Tensor, k: torch.Tensor, *, fft_norm: str = "backward") -> torch.Tensor:
+        z_hat = torch.fft.rfft(z, dim=-1, norm=fft_norm)
         ux_hat = (1j * k) * z_hat
-        return torch.fft.irfft(ux_hat, n=z.shape[-1], dim=-1)
+        return torch.fft.irfft(ux_hat, n=z.shape[-1], dim=-1, norm=fft_norm)
 
     def _step_reaction_diffusion(
         self,
@@ -92,15 +92,15 @@ class Reservoir1DSolver:
         forcing_hat: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         nu = self.config.res_burgers_nu
-        z_hat = torch.fft.rfft(z, dim=-1)
-        zx = self._ux(z, k)
+        z_hat = torch.fft.rfft(z, dim=-1, norm="forward")
+        zx = self._ux(z, k, fft_norm="forward")
         nonlinear = -z * zx
-        rhs_hat = z_hat + dt * torch.fft.rfft(nonlinear, dim=-1)
+        rhs_hat = z_hat + dt * torch.fft.rfft(nonlinear, dim=-1, norm="forward")
         if forcing_hat is not None:
             rhs_hat = rhs_hat + dt * forcing_hat
         denom = 1.0 + dt * nu * (k.pow(2))
         next_hat = rhs_hat / denom
-        return torch.fft.irfft(next_hat, n=z.shape[-1], dim=-1)
+        return torch.fft.irfft(next_hat, n=z.shape[-1], dim=-1, norm="forward")
 
     def _step_ks(
         self,
@@ -177,7 +177,10 @@ class Reservoir1DSolver:
                     f"forcing must have shape {tuple(z0.shape)}, got {tuple(forcing.shape)}"
                 )
             forcing = forcing.to(device=z.device, dtype=z.dtype)
-            forcing_hat = torch.fft.rfft(forcing, dim=-1)
+            if self.config.reservoir == "burgers":
+                forcing_hat = torch.fft.rfft(forcing, dim=-1, norm="forward")
+            else:
+                forcing_hat = torch.fft.rfft(forcing, dim=-1)
             if self.config.reservoir == "ks" and self.config.ks_dealias:
                 forcing_hat = self._apply_dealias(forcing_hat)
 

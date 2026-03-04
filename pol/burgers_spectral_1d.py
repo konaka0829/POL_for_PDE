@@ -43,8 +43,8 @@ def burgers_nonlinear_hat(
     mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     s = (u_hat.shape[-1] - 1) * 2
-    u = torch.fft.irfft(u_hat, n=s, dim=-1)
-    n_hat = -0.5j * k * torch.fft.rfft(u * u, dim=-1)
+    u = torch.fft.irfft(u_hat, n=s, dim=-1, norm="forward")
+    n_hat = -0.5j * k * torch.fft.rfft(u * u, dim=-1, norm="forward")
     return _apply_dealias(n_hat, dealias=dealias, mask=mask)
 
 
@@ -121,7 +121,7 @@ def simulate_burgers_split_step(
         if forcing.shape != z0.shape:
             raise ValueError(f"forcing must have shape {tuple(z0.shape)}, got {tuple(forcing.shape)}")
         forcing = forcing.to(device=z0.device, dtype=z0.dtype)
-        forcing_hat = torch.fft.rfft(forcing, dim=-1)
+        forcing_hat = torch.fft.rfft(forcing, dim=-1, norm="forward")
         forcing_hat = _apply_dealias(forcing_hat, dealias=dealias, mask=mask)
 
     if forcing_steps is not None:
@@ -134,7 +134,7 @@ def simulate_burgers_split_step(
     observed: list[torch.Tensor] = []
     obs_ptr = 0
     max_obs = obs_sorted[-1]
-    u_hat = torch.fft.rfft(z0, dim=-1)
+    u_hat = torch.fft.rfft(z0, dim=-1, norm="forward")
     u_hat = _apply_dealias(u_hat, dealias=dealias, mask=mask)
 
     for step in range(1, max_obs + 1):
@@ -152,7 +152,7 @@ def simulate_burgers_split_step(
             mask=mask,
         )
         while obs_ptr < len(obs_sorted) and step == obs_sorted[obs_ptr]:
-            observed.append(torch.fft.irfft(u_hat, n=s, dim=-1).clone())
+            observed.append(torch.fft.irfft(u_hat, n=s, dim=-1, norm="forward").clone())
             obs_ptr += 1
 
     return observed

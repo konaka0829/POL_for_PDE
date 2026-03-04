@@ -111,7 +111,9 @@ def sample_periodic_grf(
     if grid_size % 2 == 0:
         coeff[:, -1] = coeff[:, -1].real + 0j
 
-    u0 = torch.fft.irfft(coeff, n=grid_size, dim=-1)
+    # Use forward-normalized inverse FFT so coefficient amplitude does not
+    # shrink by 1/grid_size when sampling physical-space initial conditions.
+    u0 = torch.fft.irfft(coeff, n=grid_size, dim=-1, norm="forward")
     if mean != 0.0:
         u0 = u0 + mean
     return u0
