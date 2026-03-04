@@ -5,6 +5,8 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import torch
 
+from .burgers_spectral_1d import simulate_burgers_split_step
+
 
 KeyType = Tuple[int, str, str]
 
@@ -17,6 +19,9 @@ class ReservoirConfig:
     rd_beta: float = 1.0
     res_burgers_nu: float = 5e-2
     ks_dealias: bool = False
+    burgers_scheme: str = "semi_implicit"
+    burgers_fine_dt: float = 0.0
+    burgers_dealias: bool = False
 
 
 class Reservoir1DSolver:
@@ -141,6 +146,26 @@ class Reservoir1DSolver:
             raise ValueError("obs_steps must be non-empty")
         if obs_sorted[0] < 1:
             raise ValueError("obs_steps must be >= 1")
+
+        if self.config.reservoir == "burgers":
+            if self.config.burgers_scheme not in {"semi_implicit", "split_step"}:
+                raise ValueError(
+                    f"Unsupported burgers_scheme: {self.config.burgers_scheme}"
+                )
+            if self.config.burgers_fine_dt < 0.0:
+                raise ValueError("burgers_fine_dt must be non-negative")
+            if self.config.burgers_scheme == "split_step":
+                return simulate_burgers_split_step(
+                    z0,
+                    dt=dt,
+                    Tr=Tr,
+                    obs_steps=obs_sorted,
+                    nu=self.config.res_burgers_nu,
+                    fine_dt=self.config.burgers_fine_dt,
+                    forcing=forcing,
+                    forcing_steps=forcing_steps,
+                    dealias=self.config.burgers_dealias,
+                )
 
         z = z0
         s = z.shape[-1]

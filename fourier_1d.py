@@ -189,8 +189,6 @@ ntrain = args.ntrain
 ntest = args.ntest
 
 sub = args.sub #subsampling rate
-h = 2**13 // sub #total grid size divided by the subsampling rate
-s = h
 
 batch_size = args.batch_size
 learning_rate = args.learning_rate
@@ -238,6 +236,14 @@ else:
     y_train = train_reader.read_field('u')[:ntrain,::sub]
     x_test = test_reader.read_field('a')[-ntest:,::sub]
     y_test = test_reader.read_field('u')[-ntest:,::sub]
+
+s = int(x_train.shape[1])
+if x_test.shape[1] != s or y_train.shape[1] != s or y_test.shape[1] != s:
+    raise ValueError(
+        "Train/test a/u resolutions must match after subsampling: "
+        f"train_x={x_train.shape[1]}, test_x={x_test.shape[1]}, "
+        f"train_y={y_train.shape[1]}, test_y={y_test.shape[1]}"
+    )
 
 x_train = x_train.reshape(ntrain,s,1)
 x_test = x_test.reshape(ntest,s,1)

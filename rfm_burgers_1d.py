@@ -53,6 +53,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rd-beta", type=float, default=1.0)
     parser.add_argument("--res-burgers-nu", type=float, default=5e-2)
     parser.add_argument("--ks-dealias", action="store_true")
+    parser.add_argument(
+        "--burgers-scheme",
+        choices=("semi_implicit", "split_step"),
+        default="semi_implicit",
+    )
+    parser.add_argument("--burgers-fine-dt", type=float, default=0.0)
+    parser.add_argument("--burgers-dealias", action="store_true")
 
     parser.add_argument("--input-scale", type=float, default=1.0)
     parser.add_argument("--input-shift", type=float, default=0.0)
@@ -150,6 +157,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--encoder-clip-c must be positive")
     if args.encoder_fourier_rfm_C <= 0:
         parser.error("--encoder-fourier-rfm-C must be positive")
+    if args.burgers_fine_dt < 0.0:
+        parser.error("--burgers-fine-dt must be non-negative")
     if args.forcing_mode == "window":
         if args.forcing_tstart > args.forcing_tend:
             parser.error("--forcing-tstart must be <= --forcing-tend")
@@ -220,9 +229,10 @@ def make_dry_run_data(ntrain: int, ntest: int, s: int, seed: int) -> tuple[torch
     return x_train, y_train, x_test, y_test
 
 
-def load_data(args: argparse.Namespace, s: int) -> tuple[torch.Tensor, ...]:
+def load_data(args: argparse.Namespace) -> tuple[torch.Tensor, ...]:
+    s_dry = 2**13 // args.sub
     if args.dry_run:
-        return make_dry_run_data(args.ntrain, args.ntest, s, args.seed)
+        return make_dry_run_data(args.ntrain, args.ntest, s_dry, args.seed)
 
     from utilities3 import MatReader
 
@@ -263,6 +273,22 @@ def load_data(args: argparse.Namespace, s: int) -> tuple[torch.Tensor, ...]:
         x_test = test_reader.read_field("a")[: args.ntest, :: args.sub]
         y_test = test_reader.read_field("u")[: args.ntest, :: args.sub]
 
+    if x_train.shape[1] != y_train.shape[1]:
+        raise ValueError(
+            f"Train a/u resolution mismatch: {x_train.shape[1]} vs {y_train.shape[1]}"
+        )
+    if x_test.shape[1] != y_test.shape[1]:
+        raise ValueError(
+            f"Test a/u resolution mismatch: {x_test.shape[1]} vs {y_test.shape[1]}"
+        )
+    if x_train.shape[1] != x_test.shape[1]:
+        raise ValueError(
+            f"Train/test input resolution mismatch: {x_train.shape[1]} vs {x_test.shape[1]}"
+        )
+    if y_train.shape[1] != y_test.shape[1]:
+        raise ValueError(
+            f"Train/test output resolution mismatch: {y_train.shape[1]} vs {y_test.shape[1]}"
+        )
     return x_train, y_train, x_test, y_test
 
 
@@ -281,11 +307,17 @@ def main() -> None:
     np.random.seed(args.seed)
 
     dt = args.ks_dt if args.reservoir == "ks" and args.ks_dt > 0.0 else args.dt
-    s = 2**13 // args.sub
 
     device = resolve_device(args.device)
     out_dir = args.out_dir
     os.makedirs(out_dir, exist_ok=True)
+
+    x_train, y_train, x_test, y_test = load_data(args)
+    s = int(x_train.shape[1])
+    x_train = x_train.reshape(args.ntrain, s).float()
+    y_train = y_train.reshape(args.ntrain, s).float()
+    x_test = x_test.reshape(args.ntest, s).float()
+    y_test = y_test.reshape(args.ntest, s).float()
 
     times, obs_steps = build_time_grid(Tr=args.Tr, dt=dt, K=args.K, feature_times=args.feature_times)
     k_obs = len(obs_steps)
@@ -295,12 +327,6 @@ def main() -> None:
             raise ValueError("forcing_tstart must be <= forcing_tend")
         if args.forcing_tstart < 0.0 or args.forcing_tend > args.Tr:
             raise ValueError("forcing window must satisfy 0 <= tstart <= tend <= Tr")
-
-    x_train, y_train, x_test, y_test = load_data(args, s)
-    x_train = x_train.reshape(args.ntrain, s).float()
-    y_train = y_train.reshape(args.ntrain, s).float()
-    x_test = x_test.reshape(args.ntest, s).float()
-    y_test = y_test.reshape(args.ntest, s).float()
 
     train_loader = torch.utils.data.DataLoader(
         torch.utils.data.TensorDataset(x_train, y_train),
@@ -326,6 +352,9 @@ def main() -> None:
             rd_beta=args.rd_beta,
             res_burgers_nu=args.res_burgers_nu,
             ks_dealias=args.ks_dealias,
+            burgers_scheme=args.burgers_scheme,
+            burgers_fine_dt=args.burgers_fine_dt,
+            burgers_dealias=args.burgers_dealias,
         )
     )
     encoder = FixedEncoder1D(s=s, device=device, dtype=torch.float32, args=args)
@@ -440,7 +469,10 @@ def main() -> None:
     test_rel, pred_test, y_test_all, x_test_all = run_eval(test_loader)
     elapsed = time.time() - t0
 
-    print(f"reservoir={args.reservoir} m={args.m} act={args.rfm_activation}")
+    print(
+        f"reservoir={args.reservoir} burgers_scheme={args.burgers_scheme} "
+        f"m={args.m} act={args.rfm_activation}"
+    )
     print(f"dt={dt} Tr={args.Tr} K={k_obs_total} s={s}")
     print(f"train relL2: {train_rel:.6f}")
     print(f"test  relL2: {test_rel:.6f}")

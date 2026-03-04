@@ -1,7 +1,10 @@
 import torch
 import numpy as np
 import scipy.io
-import h5py
+try:
+    import h5py
+except ImportError:  # pragma: no cover - optional dependency
+    h5py = None
 import torch.nn as nn
 
 import operator
@@ -35,6 +38,8 @@ class MatReader(object):
             self.data = scipy.io.loadmat(self.file_path)
             self.old_mat = True
         except:
+            if h5py is None:
+                raise
             self.data = h5py.File(self.file_path)
             self.old_mat = False
 

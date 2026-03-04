@@ -128,8 +128,6 @@ ntrain = 1000
 ntest = 200
 
 sub = 1 #subsampling rate
-h = 2**13 // sub
-s = h
 
 batch_size = 5
 learning_rate = 0.001
@@ -146,6 +144,13 @@ x_train = x_data[:ntrain,:]
 y_train = y_data[:ntrain,:]
 x_test = x_data[-ntest:,:]
 y_test = y_data[-ntest:,:]
+s = int(x_train.shape[1])
+if x_test.shape[1] != s or y_train.shape[1] != s or y_test.shape[1] != s:
+    raise ValueError(
+        "Train/test a/u resolutions must match after subsampling: "
+        f"train_x={x_train.shape[1]}, test_x={x_test.shape[1]}, "
+        f"train_y={y_train.shape[1]}, test_y={y_test.shape[1]}"
+    )
 
 x_normalizer = UnitGaussianNormalizer(x_train)
 x_train = x_normalizer.encode(x_train)
