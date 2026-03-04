@@ -22,7 +22,12 @@ from pol.features_1d import (
 from pol.reservoir_1d import Reservoir1DSolver, ReservoirConfig
 from pol.ridge import fit_ridge_streaming, predict_linear
 from pol.ridge import fit_ridge_streaming_standardized
-from viz_utils import plot_1d_prediction, plot_error_histogram, rel_l2
+from viz_utils import (
+    plot_1d_prediction,
+    plot_1d_reservoir_evolution,
+    plot_error_histogram,
+    rel_l2,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -156,6 +161,15 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--plot-reservoir-evolution", type=int, choices=(0, 1), default=1)
+    parser.add_argument(
+        "--reservoir-evolution-samples",
+        type=str,
+        default="",
+        help="Comma-separated test sample indices for reservoir evolution plots. Empty uses 0,1,2.",
+    )
+    parser.add_argument("--reservoir-evolution-max-curves", type=int, default=8)
+    parser.add_argument("--reservoir-evolution-member", type=int, default=0)
 
     args = parser.parse_args()
     if not args.dry_run:
@@ -191,6 +205,10 @@ def parse_args() -> argparse.Namespace:
             "forcing-mode is enabled but forcing-gamma is zero; forcing becomes inactive.",
             RuntimeWarning,
         )
+    if args.reservoir_evolution_max_curves <= 0:
+        parser.error("--reservoir-evolution-max-curves must be positive")
+    if args.reservoir_evolution_member < 0:
+        parser.error("--reservoir-evolution-member must be >= 0")
 
     return args
 
@@ -247,6 +265,19 @@ def make_dry_run_data(ntrain: int, ntest: int, s: int, seed: int) -> tuple[torch
     y_train = make_target(x_train)
     y_test = make_target(x_test)
     return x_train, y_train, x_test, y_test
+
+
+def parse_index_list(text: str) -> list[int]:
+    text = text.strip()
+    if text == "":
+        return []
+    out: list[int] = []
+    for token in text.split(","):
+        token = token.strip()
+        if token == "":
+            continue
+        out.append(int(token))
+    return out
 
 
 def load_data(args: argparse.Namespace) -> tuple[torch.Tensor, ...]:
@@ -420,6 +451,41 @@ def main() -> None:
             return phi_members[0]
         return torch.cat(phi_members, dim=-1)
 
+    @torch.no_grad()
+    def simulate_reservoir_member_states(
+        x_batch: torch.Tensor, member_idx: int
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        enc = encoder.encode(x_batch.to(device=device, dtype=torch.float32))
+        if member_idx < 0 or member_idx >= len(enc.z0_list):
+            raise ValueError(
+                f"reservoir evolution member index {member_idx} is out of range "
+                f"for encoder output size {len(enc.z0_list)}"
+            )
+
+        forcing_member = None
+        forcing_active = args.forcing_mode != "none" and args.forcing_gamma != 0.0
+        if forcing_active:
+            if args.forcing_source == "raw":
+                source = enc.x_raw
+            elif args.forcing_source == "pre":
+                source = enc.x_pre_list[member_idx]
+            elif args.forcing_source == "z0":
+                source = enc.z0_list[member_idx]
+            else:
+                raise ValueError(f"Unsupported forcing source: {args.forcing_source}")
+            forcing_member = args.forcing_gamma * source
+
+        z0 = enc.z0_list[member_idx]
+        states = reservoir.simulate(
+            z0,
+            dt=dt,
+            Tr=args.Tr,
+            obs_steps=obs_steps,
+            forcing=forcing_member,
+            forcing_steps=forcing_steps,
+        )
+        return z0, states
+
     # Probe feature dimension.
     probe_phi = phi_fn(x_train[: min(2, args.ntrain)])
     if torch.isnan(probe_phi).any():
@@ -521,6 +587,30 @@ def main() -> None:
                 out_path_no_ext=os.path.join(out_dir, f"sample_{idx:03d}"),
                 title_prefix=f"sample {idx}: ",
             )
+
+        if args.plot_reservoir_evolution == 1:
+            evo_ids = parse_index_list(args.reservoir_evolution_samples)
+            if len(evo_ids) == 0:
+                evo_ids = sample_ids
+            for idx in evo_ids:
+                if idx < 0 or idx >= pred_test.shape[0]:
+                    raise ValueError(
+                        f"reservoir evolution sample index {idx} is out of range for ntest={pred_test.shape[0]}"
+                    )
+                x_one = x_test_all[idx : idx + 1]
+                z0_one, states_one = simulate_reservoir_member_states(
+                    x_one, args.reservoir_evolution_member
+                )
+                state_series = [st[0].cpu() for st in states_one]
+                plot_1d_reservoir_evolution(
+                    x=x_grid,
+                    states=state_series,
+                    times=times,
+                    input_u0=z0_one[0].cpu(),
+                    out_path_no_ext=os.path.join(out_dir, f"sample_{idx:03d}_reservoir_evolution"),
+                    title_prefix=f"sample {idx}, member {args.reservoir_evolution_member}: ",
+                    max_curves=args.reservoir_evolution_max_curves,
+                )
     except Exception as exc:
         print(f"[viz] visualization failed: {exc}")
 

@@ -211,6 +211,64 @@ def plot_1d_prediction(
     return paths
 
 
+def plot_1d_reservoir_evolution(
+    x: Optional[ArrayLike],
+    states: Sequence[ArrayLike],
+    times: Sequence[float],
+    out_path_no_ext: str,
+    input_u0: Optional[ArrayLike] = None,
+    title_prefix: str = "",
+    max_curves: int = 8,
+) -> Tuple[str, str, str]:
+    """Plot 1D reservoir trajectories at selected times.
+
+    Args:
+        x: Spatial grid. If None, use uniform grid on [0,1].
+        states: Sequence of states z(t_k). Each has shape (s,).
+        times: Times corresponding to states.
+        input_u0: Optional curve to plot as t=0 (typically reservoir initial state).
+        max_curves: If len(states) is large, subsample curves for readability.
+    """
+    if len(states) == 0:
+        raise ValueError("states must be non-empty")
+    if len(states) != len(times):
+        raise ValueError(f"states/times length mismatch: {len(states)} vs {len(times)}")
+    if max_curves <= 0:
+        raise ValueError("max_curves must be positive")
+
+    y0 = _to_numpy(states[0]).reshape(-1)
+    if x is None:
+        x_np = np.linspace(0.0, 1.0, num=y0.shape[0])
+    else:
+        x_np = _to_numpy(x).reshape(-1)
+
+    n = len(states)
+    if n <= max_curves:
+        keep_idx = np.arange(n, dtype=int)
+    else:
+        keep_idx = np.linspace(0, n - 1, num=max_curves, dtype=int)
+        keep_idx = np.unique(keep_idx)
+
+    fig, ax = plt.subplots(figsize=(8.0, 4.8))
+    if input_u0 is not None:
+        u0 = _to_numpy(input_u0).reshape(-1)
+        ax.plot(x_np, u0, label="reservoir init (t=0)", linewidth=2.0, alpha=0.9)
+
+    for j in keep_idx:
+        yj = _to_numpy(states[j]).reshape(-1)
+        ax.plot(x_np, yj, linewidth=1.5, alpha=0.9, label=f"t={float(times[j]):.3g}")
+
+    ax.set_xlabel("x")
+    ax.set_ylabel("z")
+    ax.grid(True, alpha=0.3)
+    ax.legend(ncol=2, fontsize=9)
+    ax.set_title(f"{title_prefix} reservoir evolution ({len(keep_idx)}/{n} curves)".strip())
+    fig.tight_layout()
+    paths = save_figure_all_formats(fig, out_path_no_ext)
+    plt.close(fig)
+    return paths
+
+
 def plot_2d_comparison(
     gt: ArrayLike,
     pred: ArrayLike,
