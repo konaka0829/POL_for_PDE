@@ -32,6 +32,12 @@ import matplotlib.pyplot as plt
 
 ArrayLike = Union[np.ndarray, "torch.Tensor"]
 
+# Shared semantic colors for 1D plots.
+COLOR_INPUT = "tab:blue"
+COLOR_GT = "tab:orange"
+COLOR_PRED = "tab:green"
+COLOR_RESERVOIR_EVOLUTION = "tab:red"
+
 
 def _to_numpy(x: ArrayLike) -> np.ndarray:
     """Convert torch tensor / numpy array to numpy array on CPU."""
@@ -196,9 +202,9 @@ def plot_1d_prediction(
     fig, ax = plt.subplots(figsize=(8.0, 4.5))
     if input_u0 is not None:
         u0 = _to_numpy(input_u0).reshape(-1)
-        ax.plot(x_np, u0, label="input (u0)", linewidth=1.0, alpha=0.7)
-    ax.plot(x_np, y, label="GT", linewidth=2.0)
-    ax.plot(x_np, p, label="Pred", linewidth=2.0, linestyle="--")
+        ax.plot(x_np, u0, label="input (u0)", linewidth=1.0, alpha=0.7, color=COLOR_INPUT)
+    ax.plot(x_np, y, label="GT", linewidth=2.0, color=COLOR_GT)
+    ax.plot(x_np, p, label="Pred", linewidth=2.0, linestyle="--", color=COLOR_PRED)
     ax.set_xlabel("x")
     ax.set_ylabel("u")
     ax.grid(True, alpha=0.3)
@@ -217,6 +223,8 @@ def plot_1d_reservoir_evolution(
     times: Sequence[float],
     out_path_no_ext: str,
     input_u0: Optional[ArrayLike] = None,
+    gt: Optional[ArrayLike] = None,
+    pred: Optional[ArrayLike] = None,
     title_prefix: str = "",
     max_curves: int = 8,
 ) -> Tuple[str, str, str]:
@@ -227,6 +235,8 @@ def plot_1d_reservoir_evolution(
         states: Sequence of states z(t_k). Each has shape (s,).
         times: Times corresponding to states.
         input_u0: Optional curve to plot as t=0 (typically reservoir initial state).
+        gt: Optional ground-truth curve to overlay.
+        pred: Optional prediction curve to overlay.
         max_curves: If len(states) is large, subsample curves for readability.
     """
     if len(states) == 0:
@@ -252,11 +262,39 @@ def plot_1d_reservoir_evolution(
     fig, ax = plt.subplots(figsize=(8.0, 4.8))
     if input_u0 is not None:
         u0 = _to_numpy(input_u0).reshape(-1)
-        ax.plot(x_np, u0, label="reservoir init (t=0)", linewidth=2.0, alpha=0.9)
+        ax.plot(
+            x_np,
+            u0,
+            label="reservoir init (t=0)",
+            linewidth=2.0,
+            alpha=0.9,
+            color=COLOR_INPUT,
+        )
 
     for j in keep_idx:
         yj = _to_numpy(states[j]).reshape(-1)
-        ax.plot(x_np, yj, linewidth=1.5, alpha=0.9, label=f"t={float(times[j]):.3g}")
+        ax.plot(
+            x_np,
+            yj,
+            linewidth=1.5,
+            alpha=0.9,
+            label=f"t={float(times[j]):.3g}",
+            color=COLOR_RESERVOIR_EVOLUTION,
+        )
+
+    if gt is not None:
+        y_gt = _to_numpy(gt).reshape(-1)
+        ax.plot(x_np, y_gt, label="GT", linewidth=2.4, color=COLOR_GT)
+    if pred is not None:
+        y_pred = _to_numpy(pred).reshape(-1)
+        ax.plot(
+            x_np,
+            y_pred,
+            label="Pred",
+            linewidth=2.4,
+            linestyle="--",
+            color=COLOR_PRED,
+        )
 
     ax.set_xlabel("x")
     ax.set_ylabel("z")

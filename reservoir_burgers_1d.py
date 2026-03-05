@@ -607,6 +607,8 @@ def main() -> None:
                     states=state_series,
                     times=times,
                     input_u0=z0_one[0].cpu(),
+                    gt=y_test_all[idx],
+                    pred=pred_test[idx],
                     out_path_no_ext=os.path.join(out_dir, f"sample_{idx:03d}_reservoir_evolution"),
                     title_prefix=f"sample {idx}, member {args.reservoir_evolution_member}: ",
                     max_curves=args.reservoir_evolution_max_curves,
