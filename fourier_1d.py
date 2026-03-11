@@ -3,9 +3,11 @@
 This file is the Fourier Neural Operator for 1D problem such as the (time-independent) Burgers equation discussed in Section 5.1 in the [paper](https://arxiv.org/pdf/2010.08895.pdf).
 """
 
+import argparse
 import torch.nn.functional as F
 from timeit import default_timer
 from utilities3 import *
+from cli_utils import add_data_mode_args, add_split_args, validate_data_mode_args
 
 # ------------------------------------------------------------
 # Visualization helpers (PNG/PDF/SVG)
@@ -148,37 +150,94 @@ class FNO1d(nn.Module):
         gridx = gridx.reshape(1, size_x, 1).repeat([batchsize, 1, 1])
         return gridx.to(device)
 
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Fourier Neural Operator 1D")
+    add_data_mode_args(
+        parser,
+        default_data_mode="single_split",
+        default_data_file="data/burgers_data_R10.mat",
+        default_train_file=None,
+        default_test_file=None,
+    )
+    parser.add_argument("--ntrain", type=int, default=1000, help="Number of training samples.")
+    parser.add_argument("--ntest", type=int, default=100, help="Number of test samples.")
+    parser.add_argument("--sub", type=int, default=2**3, help="Subsampling rate.")
+    parser.add_argument("--batch-size", type=int, default=20, help="Batch size.")
+    parser.add_argument("--learning-rate", type=float, default=0.001, help="Learning rate.")
+    parser.add_argument("--epochs", type=int, default=500, help="Number of epochs.")
+    parser.add_argument("--modes", type=int, default=16, help="Number of Fourier modes.")
+    parser.add_argument("--width", type=int, default=64, help="Model width.")
+    add_split_args(parser, default_train_split=0.8, default_seed=0)
+    return parser
+
+
+def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    validate_data_mode_args(args, parser)
+
+
 ################################################################
 #  configurations
 ################################################################
-ntrain = 1000
-ntest = 100
+parser = _build_parser()
+args = parser.parse_args()
+_validate_args(args, parser)
 
-sub = 2**3 #subsampling rate
+torch.manual_seed(args.seed)
+np.random.seed(args.seed)
+
+ntrain = args.ntrain
+ntest = args.ntest
+
+sub = args.sub #subsampling rate
 h = 2**13 // sub #total grid size divided by the subsampling rate
 s = h
 
-batch_size = 20
-learning_rate = 0.001
-epochs = 500
+batch_size = args.batch_size
+learning_rate = args.learning_rate
+epochs = args.epochs
 iterations = epochs*(ntrain//batch_size)
 
-modes = 16
-width = 64
+modes = args.modes
+width = args.width
 
 ################################################################
 # read data
 ################################################################
 
 # Data is of the shape (number of samples, grid size)
-dataloader = MatReader('data/burgers_data_R10.mat')
-x_data = dataloader.read_field('a')[:,::sub]
-y_data = dataloader.read_field('u')[:,::sub]
+if args.data_mode == "single_split":
+    dataloader = MatReader(args.data_file)
+    x_data = dataloader.read_field('a')[:,::sub]
+    y_data = dataloader.read_field('u')[:,::sub]
+    total = x_data.shape[0]
+    indices = np.arange(total)
+    if args.shuffle:
+        np.random.shuffle(indices)
+    split_idx = int(total * args.train_split)
+    train_idx = indices[:split_idx]
+    test_idx = indices[split_idx:]
 
-x_train = x_data[:ntrain,:]
-y_train = y_data[:ntrain,:]
-x_test = x_data[-ntest:,:]
-y_test = y_data[-ntest:,:]
+    if ntrain > len(train_idx) or ntest > len(test_idx):
+        raise ValueError(
+            f"Not enough samples for ntrain={ntrain}, ntest={ntest} with train split "
+            f"{args.train_split} (total={total})."
+        )
+
+    train_idx = train_idx[:ntrain]
+    test_idx = test_idx[:ntest]
+
+    x_train = x_data[train_idx]
+    y_train = y_data[train_idx]
+    x_test = x_data[test_idx]
+    y_test = y_data[test_idx]
+else:
+    train_reader = MatReader(args.train_file)
+    test_reader = MatReader(args.test_file)
+
+    x_train = train_reader.read_field('a')[:ntrain,::sub]
+    y_train = train_reader.read_field('u')[:ntrain,::sub]
+    x_test = test_reader.read_field('a')[-ntest:,::sub]
+    y_test = test_reader.read_field('u')[-ntest:,::sub]
 
 x_train = x_train.reshape(ntrain,s,1)
 x_test = x_test.reshape(ntest,s,1)
