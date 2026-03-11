@@ -52,6 +52,183 @@ which takes the 2D spatial + 1D temporal equation directly as a 3D problem. The 
 - The lowrank methods are similar. These scripts are the Lowrank neural operators for the corresponding settings.
 - `data_generation` are the conventional solvers we used to generate the datasets for the Burgers equation, Darcy flow, and Navier-Stokes equation.
 
+## 実行例とコマンドライン引数（日本語）
+以下では各スクリプトの実行例と、主要なコマンドライン引数・デフォルト値をまとめます。
+
+### fourier_1d.py
+**実行例**
+```bash
+python fourier_1d.py --data-mode single_split --data-file data/burgers_data_R10.mat
+python fourier_1d.py --data-mode separate_files --train-file data/burgers_train.mat --test-file data/burgers_test.mat
+```
+
+**引数とデフォルト値**
+- `--data-mode`：`single_split` / `separate_files`（デフォルト: `single_split`）
+- `--data-file`：単一ファイル読み込み時のデータパス（デフォルト: `data/burgers_data_R10.mat`）
+- `--train-file` / `--test-file`：分割済みファイルのパス（デフォルト: `None`）
+- `--train-split`：単一ファイル時の学習割合（デフォルト: `0.8`）
+- `--seed`：分割用シード（デフォルト: `0`）
+- `--shuffle`：分割前にシャッフル（デフォルト: `False`）
+- `--ntrain`（デフォルト: `1000`）、`--ntest`（デフォルト: `100`）
+- `--sub`（デフォルト: `8`）
+- `--batch-size`（デフォルト: `20`）
+- `--learning-rate`（デフォルト: `0.001`）
+- `--epochs`（デフォルト: `500`）
+- `--modes`（デフォルト: `16`）
+- `--width`（デフォルト: `64`）
+
+### fourier_2d.py
+**実行例**
+```bash
+python fourier_2d.py --data-mode separate_files \
+  --train-file data/piececonst_r421_N1024_smooth1.mat \
+  --test-file data/piececonst_r421_N1024_smooth2.mat
+python fourier_2d.py --data-mode single_split --data-file data/piececonst_r421_N1024_smooth1.mat
+```
+
+**引数とデフォルト値**
+- `--data-mode`（デフォルト: `separate_files`）
+- `--data-file`（デフォルト: `data/piececonst_r421_N1024_smooth1.mat`）
+- `--train-file`（デフォルト: `data/piececonst_r421_N1024_smooth1.mat`）
+- `--test-file`（デフォルト: `data/piececonst_r421_N1024_smooth2.mat`）
+- `--ntrain`（デフォルト: `1000`）、`--ntest`（デフォルト: `100`）
+- `--batch-size`（デフォルト: `20`）
+- `--learning-rate`（デフォルト: `0.001`）
+- `--epochs`（デフォルト: `500`）
+- `--modes`（デフォルト: `12`）
+- `--width`（デフォルト: `32`）
+- `--r`（デフォルト: `5`）
+- `--grid-size`（デフォルト: `421`）
+
+### rno_2d.py
+**実行例**
+```bash
+python rno_2d.py --data-mode separate_files \
+  --train-file data/piececonst_r421_N1024_smooth1.mat \
+  --test-file data/piececonst_r421_N1024_smooth2.mat \
+  --fit-mode supervised_sgd
+python rno_2d.py --data-mode single_split --data-file data/piececonst_r421_N1024_smooth1.mat --fit-mode pde_ridge
+```
+
+**引数とデフォルト値（主要）**
+- `--data-mode`（デフォルト: `separate_files`）
+- `--data-file`（デフォルト: `data/piececonst_r421_N1024_smooth1.mat`）
+- `--train-file`（デフォルト: `data/piececonst_r421_N1024_smooth1.mat`）
+- `--test-file`（デフォルト: `data/piececonst_r421_N1024_smooth2.mat`）
+- `--ntrain`（デフォルト: `1000`）、`--ntest`（デフォルト: `100`）
+- `--batch-size`（デフォルト: `20`）
+- `--learning-rate`（デフォルト: `0.001`）
+- `--epochs`（デフォルト: `500`）
+- `--width`（デフォルト: `32`）
+- `--r`（デフォルト: `5`）
+- `--grid-size`（デフォルト: `421`）
+- `--fit-mode`：`supervised_sgd` / `supervised_ridge` / `pde_ridge` / `pde_rls`（デフォルト: `supervised_sgd`）
+- `--reservoir-layers`（デフォルト: `4`）
+- `--mask-modes`（デフォルト: `12`）
+- `--alpha`（デフォルト: `1.0`）
+- `--beta`（デフォルト: `1.0`）
+- `--nonlinearity`：`tanh` / `gelu` / `relu` / `identity`（デフォルト: `tanh`）
+- `--ridge-lam`（デフォルト: `1e-6`）
+- `--pde-samples`（デフォルト: `2048`）
+- `--rls-rho`（デフォルト: `0.999`）
+- `--rls-delta`（デフォルト: `1.0`）
+- `--smoke`（デフォルト: `False`、有効時は合成データで動作確認）
+
+`rno_2d.py` の可視化は `visualizations/rno_2d/` に `png/pdf/svg` で保存されます。
+
+### fourier_2d_time.py
+**実行例**
+```bash
+python fourier_2d_time.py --data-mode separate_files \
+  --train-file data/ns_data_V100_N1000_T50_1.mat \
+  --test-file data/ns_data_V100_N1000_T50_2.mat
+python fourier_2d_time.py --data-mode single_split --data-file data/ns_data_V100_N1000_T50_1.mat --train-split 0.8 --shuffle
+```
+
+**引数とデフォルト値**
+- `--data-mode`（デフォルト: `separate_files`）
+- `--data-file`（デフォルト: `data/ns_data_V100_N1000_T50_1.mat`）
+- `--train-file`（デフォルト: `data/ns_data_V100_N1000_T50_1.mat`）
+- `--test-file`（デフォルト: `data/ns_data_V100_N1000_T50_2.mat`）
+- `--train-split`（デフォルト: `0.8`）
+- `--seed`（デフォルト: `0`）
+- `--shuffle`（デフォルト: `False`）
+- `--ntrain`（デフォルト: `1000`）、`--ntest`（デフォルト: `200`）
+- `--modes`（デフォルト: `12`）
+- `--width`（デフォルト: `20`）
+- `--batch-size`（デフォルト: `20`）
+- `--learning-rate`（デフォルト: `0.001`）
+- `--epochs`（デフォルト: `500`）
+- `--sub`（デフォルト: `1`）
+- `--S`（デフォルト: `64`）
+- `--T-in`（デフォルト: `10`）
+- `--T`（デフォルト: `40`）
+- `--step`（デフォルト: `1`）
+
+### fourier_3d.py
+**実行例**
+```bash
+python fourier_3d.py --data-mode separate_files \
+  --train-file data/ns_data_V100_N1000_T50_1.mat \
+  --test-file data/ns_data_V100_N1000_T50_2.mat
+python fourier_3d.py --data-mode single_split --data-file data/ns_data_V100_N1000_T50_1.mat --train-split 0.8 --shuffle
+```
+
+**引数とデフォルト値**
+- `--data-mode`（デフォルト: `separate_files`）
+- `--data-file`（デフォルト: `data/ns_data_V100_N1000_T50_1.mat`）
+- `--train-file`（デフォルト: `data/ns_data_V100_N1000_T50_1.mat`）
+- `--test-file`（デフォルト: `data/ns_data_V100_N1000_T50_2.mat`）
+- `--train-split`（デフォルト: `0.8`）
+- `--seed`（デフォルト: `0`）
+- `--shuffle`（デフォルト: `False`）
+- `--ntrain`（デフォルト: `1000`）、`--ntest`（デフォルト: `200`）
+- `--modes`（デフォルト: `8`）
+- `--width`（デフォルト: `20`）
+- `--batch-size`（デフォルト: `10`）
+- `--learning-rate`（デフォルト: `0.001`）
+- `--epochs`（デフォルト: `500`）
+- `--sub`（デフォルト: `1`）
+- `--S`（デフォルト: `64`）
+- `--T-in`（デフォルト: `10`）
+- `--T`（デフォルト: `40`）
+
+### scripts/eval.py
+**実行例**
+```bash
+python scripts/eval.py --data-file data/ns_data_V1e-4_N20_T50_R256test.mat \
+  --model-file model/ns_fourier_V1e-4_T20_N9800_ep200_m12_w32
+```
+
+**引数とデフォルト値**
+- `--data-file`（デフォルト: `data/ns_data_V1e-4_N20_T50_R256test.mat`）
+- `--model-file`（デフォルト: `model/ns_fourier_V1e-4_T20_N9800_ep200_m12_w32`）
+- `--ntest`（デフォルト: `20`）
+- `--sub`（デフォルト: `4`）
+- `--sub-t`（デフォルト: `4`）
+- `--S`（デフォルト: `64`）
+- `--T-in`（デフォルト: `10`）
+- `--T`（デフォルト: `20`）
+- `--indent`（デフォルト: `3`）
+
+### scripts/super_resolution.py
+**実行例**
+```bash
+python scripts/super_resolution.py --data-file data/ns_data_V1e-4_N20_T50_test.mat \
+  --model-file model/ns_fourier_V1e-4_T20_N9800_ep200_m12_w32
+```
+
+**引数とデフォルト値**
+- `--data-file`（デフォルト: `data/ns_data_V1e-4_N20_T50_test.mat`）
+- `--model-file`（デフォルト: `model/ns_fourier_V1e-4_T20_N9800_ep200_m12_w32`）
+- `--ntest`（デフォルト: `20`）
+- `--sub`（デフォルト: `1`）
+- `--sub-t`（デフォルト: `1`）
+- `--S`（デフォルト: `64`）
+- `--T-in`（デフォルト: `10`）
+- `--T`（デフォルト: `20`）
+- `--indent`（デフォルト: `1`）
+
 ## Datasets
 We provide the Burgers equation, Darcy flow, and Navier-Stokes equation datasets we used in the paper. 
 The data generation configuration can be found in the paper.
