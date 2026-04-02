@@ -18,7 +18,11 @@ class ReservoirConfig:
     rd_alpha: float = 1.0
     rd_beta: float = 1.0
     res_burgers_nu: float = 5e-2
+    res_burgers_b: float = 1.0
     ks_dealias: bool = False
+    ks_b: float = 1.0
+    ks_eta: float = 1.0
+    ks_kappa: float = 1.0
     burgers_scheme: str = "semi_implicit"
     burgers_fine_dt: float = 0.0
     burgers_dealias: bool = False
@@ -92,9 +96,10 @@ class Reservoir1DSolver:
         forcing_hat: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         nu = self.config.res_burgers_nu
+        b = self.config.res_burgers_b
         z_hat = torch.fft.rfft(z, dim=-1, norm="forward")
         zx = self._ux(z, k, fft_norm="forward")
-        nonlinear = -z * zx
+        nonlinear = -b * z * zx
         rhs_hat = z_hat + dt * torch.fft.rfft(nonlinear, dim=-1, norm="forward")
         if forcing_hat is not None:
             rhs_hat = rhs_hat + dt * forcing_hat
@@ -111,13 +116,13 @@ class Reservoir1DSolver:
     ) -> torch.Tensor:
         z_hat = torch.fft.rfft(z, dim=-1)
         zx = self._ux(z, k)
-        nonlinear = -z * zx
+        nonlinear = -self.config.ks_b * z * zx
         n_hat = torch.fft.rfft(nonlinear, dim=-1)
         n_hat = self._apply_dealias(n_hat)
         if forcing_hat is not None:
             n_hat = n_hat + forcing_hat
 
-        l_hat = k.pow(2) - k.pow(4)
+        l_hat = self.config.ks_eta * k.pow(2) - self.config.ks_kappa * k.pow(4)
         denom = 1.0 - dt * l_hat
         next_hat = (z_hat + dt * n_hat) / denom
         next_hat = self._apply_dealias(next_hat)
@@ -162,6 +167,7 @@ class Reservoir1DSolver:
                     obs_steps=obs_sorted,
                     nu=self.config.res_burgers_nu,
                     fine_dt=self.config.burgers_fine_dt,
+                    b=self.config.res_burgers_b,
                     forcing=forcing,
                     forcing_steps=forcing_steps,
                     dealias=self.config.burgers_dealias,

@@ -23,7 +23,10 @@ def build_time_grid(
     else:
         if K <= 0:
             raise ValueError("K must be positive when feature-times is not provided")
-        times = np.linspace(dt, Tr, num=K).tolist()
+        if K == 1:
+            times = [Tr]
+        else:
+            times = np.linspace(dt, Tr, num=K).tolist()
 
     for t in times:
         if t <= 0.0 or t > Tr + 1e-12:

@@ -17,6 +17,7 @@ from .features_1d import (
 )
 from .reservoir_1d import Reservoir1DSolver
 from .ridge import fit_ridge_streaming, fit_ridge_streaming_standardized, predict_linear
+from .model123_1d import DatasetBundle, DatasetConfig, ExperimentConfig, build_dataset, run_experiment, save_dataset_bundle
 
 __all__ = [
     "FixedRandomELM",
@@ -35,4 +36,10 @@ __all__ = [
     "fit_ridge_streaming",
     "fit_ridge_streaming_standardized",
     "predict_linear",
+    "DatasetBundle",
+    "DatasetConfig",
+    "ExperimentConfig",
+    "build_dataset",
+    "run_experiment",
+    "save_dataset_bundle",
 ]

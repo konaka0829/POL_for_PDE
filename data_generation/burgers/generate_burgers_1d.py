@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import math
 from pathlib import Path
 import sys
 
@@ -14,6 +13,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from pol.burgers_spectral_1d import simulate_burgers_split_step
+from pol.model123_1d.initial_conditions import sample_gaussian_random_field_initial_conditions
 
 
 def parse_args() -> argparse.Namespace:
@@ -91,32 +91,17 @@ def sample_periodic_grf(
     device: torch.device,
     dtype: torch.dtype,
 ) -> torch.Tensor:
-    nfreq = grid_size // 2 + 1
-    n = torch.arange(nfreq, dtype=dtype, device=device)
-    omega = 2.0 * torch.pi * n
-    spectrum = (sigma**2) * ((omega.pow(2) + tau**2).pow(-gamma))
-
-    gen = torch.Generator(device="cpu")
-    gen.manual_seed(seed)
-
-    real = torch.randn((num_samples, nfreq), generator=gen, dtype=torch.float32)
-    imag = torch.randn((num_samples, nfreq), generator=gen, dtype=torch.float32)
-    real = real.to(device=device, dtype=dtype)
-    imag = imag.to(device=device, dtype=dtype)
-
-    coeff = (real + 1j * imag) / math.sqrt(2.0)
-    coeff = coeff * spectrum.sqrt().unsqueeze(0).to(dtype=dtype)
-
-    coeff[:, 0] = coeff[:, 0].real + 0j
-    if grid_size % 2 == 0:
-        coeff[:, -1] = coeff[:, -1].real + 0j
-
-    # Use forward-normalized inverse FFT so coefficient amplitude does not
-    # shrink by 1/grid_size when sampling physical-space initial conditions.
-    u0 = torch.fft.irfft(coeff, n=grid_size, dim=-1, norm="forward")
-    if mean != 0.0:
-        u0 = u0 + mean
-    return u0
+    return sample_gaussian_random_field_initial_conditions(
+        num_samples,
+        grid_size,
+        seed=seed,
+        gamma=gamma,
+        tau=tau,
+        sigma=sigma,
+        mean=mean,
+        device=device,
+        dtype=dtype,
+    )
 
 
 @torch.no_grad()

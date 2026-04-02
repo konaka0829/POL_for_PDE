@@ -39,12 +39,13 @@ def _apply_dealias(
 def burgers_nonlinear_hat(
     u_hat: torch.Tensor,
     k: torch.Tensor,
+    b: float = 1.0,
     dealias: bool = False,
     mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     s = (u_hat.shape[-1] - 1) * 2
     u = torch.fft.irfft(u_hat, n=s, dim=-1, norm="forward")
-    n_hat = -0.5j * k * torch.fft.rfft(u * u, dim=-1, norm="forward")
+    n_hat = -0.5j * b * k * torch.fft.rfft(u * u, dim=-1, norm="forward")
     return _apply_dealias(n_hat, dealias=dealias, mask=mask)
 
 
@@ -54,6 +55,7 @@ def burgers_split_step_outer(
     nu: float,
     k: torch.Tensor,
     fine_dt: float,
+    b: float = 1.0,
     forcing_hat: Optional[torch.Tensor] = None,
     dealias: bool = False,
     mask: Optional[torch.Tensor] = None,
@@ -73,7 +75,7 @@ def burgers_split_step_outer(
     out_hat = u_hat
     for _ in range(n_sub):
         out_hat = out_hat * heat
-        n_hat = burgers_nonlinear_hat(out_hat, k, dealias=dealias, mask=mask)
+        n_hat = burgers_nonlinear_hat(out_hat, k, b=b, dealias=dealias, mask=mask)
         if forcing_hat is not None:
             n_hat = n_hat + forcing_hat
         out_hat = out_hat + h * n_hat
@@ -89,6 +91,7 @@ def simulate_burgers_split_step(
     obs_steps: Iterable[int],
     nu: float,
     fine_dt: float,
+    b: float = 1.0,
     forcing: Optional[torch.Tensor] = None,
     forcing_steps: Optional[tuple[int, int]] = None,
     dealias: bool = False,
@@ -147,6 +150,7 @@ def simulate_burgers_split_step(
             nu=nu,
             k=k,
             fine_dt=fine_dt,
+            b=b,
             forcing_hat=active_forcing_hat,
             dealias=dealias,
             mask=mask,

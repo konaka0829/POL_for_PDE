@@ -22,8 +22,8 @@ class FixedRandomELM:
     ):
         if in_dim <= 0 or hidden_dim <= 0:
             raise ValueError("in_dim and hidden_dim must be positive")
-        if activation not in {"tanh", "relu"}:
-            raise ValueError("activation must be tanh or relu")
+        if activation not in {"tanh", "relu", "identity"}:
+            raise ValueError("activation must be tanh, relu, or identity")
 
         self.in_dim = in_dim
         self.hidden_dim = hidden_dim
@@ -52,4 +52,6 @@ class FixedRandomELM:
         h = phi @ self.weight.t() + self.bias
         if self.activation == "tanh":
             return torch.tanh(h)
-        return F.relu(h)
+        if self.activation == "relu":
+            return F.relu(h)
+        return h
