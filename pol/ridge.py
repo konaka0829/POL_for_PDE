@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Callable, Dict, Tuple
+from typing import Callable, Dict
 
 import torch
 
@@ -18,17 +18,24 @@ def fit_ridge_streaming(
     *,
     dtype: torch.dtype = torch.float64,
     regularize_bias: bool = False,
+    progress_fn: Callable[[int, int | None], None] | None = None,
 ) -> Dict[str, torch.Tensor]:
     if ridge_lambda < 0.0:
         raise ValueError("ridge_lambda must be non-negative")
 
     gram = None
     cross = None
+    x_aug_batches = [] if ridge_lambda == 0.0 else None
+    y_batches = [] if ridge_lambda == 0.0 else None
 
-    for x_batch, y_batch in dataloader:
+    total_batches = len(dataloader) if hasattr(dataloader, "__len__") else None
+    for batch_idx, (x_batch, y_batch) in enumerate(dataloader, start=1):
         phi = feature_fn(x_batch).to(dtype=dtype)
         y = y_batch.to(dtype=dtype, device=phi.device)
         x_aug = _append_bias(phi)
+        if x_aug_batches is not None and y_batches is not None:
+            x_aug_batches.append(x_aug)
+            y_batches.append(y)
 
         if gram is None:
             d = x_aug.shape[1]
@@ -38,6 +45,8 @@ def fit_ridge_streaming(
 
         gram += x_aug.t() @ x_aug
         cross += x_aug.t() @ y
+        if progress_fn is not None:
+            progress_fn(batch_idx, total_batches)
 
     if gram is None or cross is None:
         raise ValueError("empty dataloader")
@@ -48,8 +57,16 @@ def fit_ridge_streaming(
         eye[-1, -1] = 0.0
     reg_gram = gram + ridge_lambda * eye
 
-    chol = torch.linalg.cholesky(reg_gram)
-    w = torch.cholesky_solve(cross, chol)
+    if ridge_lambda == 0.0 and x_aug_batches is not None and y_batches is not None:
+        x_full = torch.cat(x_aug_batches, dim=0)
+        y_full = torch.cat(y_batches, dim=0)
+        w = torch.linalg.lstsq(x_full, y_full).solution
+    else:
+        try:
+            chol = torch.linalg.cholesky(reg_gram)
+            w = torch.cholesky_solve(cross, chol)
+        except RuntimeError:
+            w = torch.linalg.lstsq(reg_gram, cross).solution
     return {
         "W": w,
         "gram": gram,
@@ -66,6 +83,7 @@ def fit_ridge_streaming_standardized(
     dtype: torch.dtype = torch.float64,
     regularize_bias: bool = False,
     eps: float = 1e-6,
+    progress_fn: Callable[[int, int | None], None] | None = None,
 ) -> Dict[str, torch.Tensor]:
     if ridge_lambda < 0.0:
         raise ValueError("ridge_lambda must be non-negative")
@@ -75,7 +93,8 @@ def fit_ridge_streaming_standardized(
     gram = None
     cross = None
 
-    for x_batch, y_batch in dataloader:
+    total_batches = len(dataloader) if hasattr(dataloader, "__len__") else None
+    for batch_idx, (x_batch, y_batch) in enumerate(dataloader, start=1):
         phi = feature_fn(x_batch).to(dtype=dtype)
         y = y_batch.to(dtype=dtype, device=phi.device)
         x_aug = _append_bias(phi)
@@ -88,6 +107,8 @@ def fit_ridge_streaming_standardized(
 
         gram += x_aug.t() @ x_aug
         cross += x_aug.t() @ y
+        if progress_fn is not None:
+            progress_fn(batch_idx, total_batches)
 
     if gram is None or cross is None:
         raise ValueError("empty dataloader")
@@ -126,8 +147,11 @@ def fit_ridge_streaming_standardized(
         eye[-1, -1] = 0.0
 
     reg_gram_std = gram_std + ridge_lambda * eye
-    chol_std = torch.linalg.cholesky(reg_gram_std)
-    w_std = torch.cholesky_solve(cross_std, chol_std)
+    try:
+        chol_std = torch.linalg.cholesky(reg_gram_std)
+        w_std = torch.cholesky_solve(cross_std, chol_std)
+    except RuntimeError:
+        w_std = torch.linalg.lstsq(reg_gram_std, cross_std).solution
 
     w_feat_std = w_std[:d, :]
     w_bias_std = w_std[-1:, :]

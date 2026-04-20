@@ -97,6 +97,23 @@ def test_model3_contains_model2_via_skip_block():
     assert torch.allclose(aug[:, : phi.shape[1]], phi, atol=1e-7, rtol=1e-7)
 
 
+def test_model2_progress_output(capsys):
+    x, y = make_data()
+    model = Model2Regressor1D(s=x.shape[1], config=base_config(obs="points", J=12))
+    model.fit(
+        make_loader(x, y),
+        progress_fn=lambda batch_idx, total_batches: print(
+            "[model2 train] batch %d/%d" % (batch_idx, total_batches),
+            flush=True,
+        ),
+        progress_label="model2 train",
+    )
+    captured = capsys.readouterr()
+    assert "[model2 train] ridge feature accumulation start" in captured.out
+    assert "[model2 train] batch" in captured.out
+    assert "[model2 train] ridge solve done" in captured.out
+
+
 def test_model123_cli_smoke(tmp_path):
     x, y = make_data(num_samples=8, s=64)
     data_file = tmp_path / "small.mat"
@@ -141,3 +158,5 @@ def test_model123_cli_smoke(tmp_path):
     proc = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
     assert proc.returncode == 0, proc.stdout + "\n" + proc.stderr
     assert (out_dir / "run_config.json").exists()
+    assert "[model2 train]" in proc.stdout
+    assert "[model2 eval-test]" in proc.stdout

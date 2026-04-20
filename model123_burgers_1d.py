@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from dataclasses import asdict
+import time
 import warnings
 
 import numpy as np
@@ -244,12 +245,14 @@ def build_model_config(args: argparse.Namespace) -> Model123Config:
 
 
 @torch.no_grad()
-def evaluate_model(model, loader):
+def evaluate_model(model, loader, *, progress_label: str | None = None):
     rels = []
     preds = []
     ys = []
     xs = []
-    for xb, yb in loader:
+    total_batches = len(loader) if hasattr(loader, "__len__") else None
+    start_time = time.perf_counter()
+    for batch_idx, (xb, yb) in enumerate(loader, start=1):
         pred = model.predict(xb).cpu()
         num = torch.linalg.norm((pred - yb).reshape(pred.shape[0], -1), dim=1)
         den = torch.linalg.norm(yb.reshape(yb.shape[0], -1), dim=1)
@@ -257,7 +260,39 @@ def evaluate_model(model, loader):
         preds.append(pred)
         ys.append(yb)
         xs.append(xb)
+        if progress_label is not None:
+            if total_batches is None:
+                print(f"[{progress_label}] batch {batch_idx}", flush=True)
+            else:
+                print(f"[{progress_label}] batch {batch_idx}/{total_batches}", flush=True)
+    if progress_label is not None:
+        elapsed = time.perf_counter() - start_time
+        print(f"[{progress_label}] done in {elapsed:.2f}s", flush=True)
     return float(torch.cat(rels).mean().item()), torch.cat(preds), torch.cat(ys), torch.cat(xs)
+
+
+def make_progress_fn(label: str):
+    last_emit = {"batch": 0, "time": time.perf_counter()}
+
+    def progress_fn(batch_idx: int, total_batches: int | None) -> None:
+        now = time.perf_counter()
+        should_emit = (
+            batch_idx == 1
+            or total_batches is None
+            or batch_idx == total_batches
+            or batch_idx - last_emit["batch"] >= 5
+            or (now - last_emit["time"]) >= 5.0
+        )
+        if not should_emit:
+            return
+        if total_batches is None:
+            print(f"[{label}] batch {batch_idx}", flush=True)
+        else:
+            print(f"[{label}] batch {batch_idx}/{total_batches}", flush=True)
+        last_emit["batch"] = batch_idx
+        last_emit["time"] = now
+
+    return progress_fn
 
 
 def main() -> None:
@@ -266,7 +301,9 @@ def main() -> None:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
+    stage_start = time.perf_counter()
     x_train, y_train, x_test, y_test = load_data(args)
+    print(f"[{args.model}] data loaded in {time.perf_counter() - stage_start:.2f}s", flush=True)
     s = int(x_train.shape[1])
     train_loader = torch.utils.data.DataLoader(
         torch.utils.data.TensorDataset(x_train, y_train),
@@ -290,13 +327,27 @@ def main() -> None:
         ridge_state = None
     elif args.model == "model2":
         model = Model2Regressor1D(s=s, config=model_cfg)
-        ridge_state = model.fit(train_loader)
+        ridge_state = model.fit(
+            train_loader,
+            progress_fn=make_progress_fn(f"{args.model} train"),
+            progress_label=f"{args.model} train",
+        )
     else:
         model = Model3Regressor1D(s=s, config=model_cfg)
-        ridge_state = model.fit(train_loader)
+        ridge_state = model.fit(
+            train_loader,
+            progress_fn=make_progress_fn(f"{args.model} train"),
+            progress_label=f"{args.model} train",
+        )
 
-    train_rel, _, _, _ = evaluate_model(model, eval_train_loader)
-    test_rel, pred_test, y_test_all, x_test_all = evaluate_model(model, test_loader)
+    train_eval_label = f"{args.model} eval-train" if args.model in {"model2", "model3"} else None
+    test_eval_label = f"{args.model} eval-test" if args.model in {"model2", "model3"} else None
+    train_rel, _, _, _ = evaluate_model(model, eval_train_loader, progress_label=train_eval_label)
+    test_rel, pred_test, y_test_all, x_test_all = evaluate_model(
+        model,
+        test_loader,
+        progress_label=test_eval_label,
+    )
 
     resolved_cfg = getattr(model, "config", model_cfg)
     actual_obs = resolved_cfg.obs

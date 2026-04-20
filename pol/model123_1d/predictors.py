@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import time
 from typing import Iterable, Sequence
 
 import torch
@@ -134,6 +135,19 @@ class ObservedTrajectoryFeature1D:
         )
 
     @torch.no_grad()
+    def simulate_state_at_time(self, u0_batch: torch.Tensor, t: float) -> torch.Tensor:
+        if t <= 0.0:
+            raise ValueError("t must be positive")
+        step = max(1, int(round(float(t) / self.config.dt)))
+        z0 = self.encode(u0_batch)
+        return self.reservoir.simulate(
+            z0,
+            dt=self.config.dt,
+            Tr=float(t),
+            obs_steps=[step],
+        )[0]
+
+    @torch.no_grad()
     def collect_observations(self, states: Sequence[torch.Tensor]) -> list[torch.Tensor]:
         return collect_observations(states, self.config.obs, self.operator.to(self.device))
 
@@ -184,8 +198,7 @@ class Model1Predictor1D:
 
     @torch.no_grad()
     def predict(self, u0_batch: torch.Tensor) -> torch.Tensor:
-        states = self.feature_map.simulate_states(u0_batch)
-        return states[-1]
+        return self.feature_map.simulate_state_at_time(u0_batch, self.config.Ttilde)
 
 
 class Model2Regressor1D:
@@ -201,7 +214,16 @@ class Model2Regressor1D:
     def features(self, u0_batch: torch.Tensor) -> torch.Tensor:
         return self.observation(u0_batch)
 
-    def fit(self, train_loader: Iterable) -> dict[str, torch.Tensor]:
+    def fit(
+        self,
+        train_loader: Iterable,
+        *,
+        progress_fn=None,
+        progress_label: str | None = None,
+    ) -> dict[str, torch.Tensor]:
+        if progress_label:
+            print("[%s] ridge feature accumulation start" % progress_label, flush=True)
+        start_time = time.perf_counter()
         if self.config.standardize_features:
             ridge_state = fit_ridge_streaming_standardized(
                 train_loader,
@@ -210,6 +232,7 @@ class Model2Regressor1D:
                 dtype=self.config.ridge_dtype,
                 regularize_bias=False,
                 eps=self.config.feature_std_eps,
+                progress_fn=progress_fn,
             )
         else:
             ridge_state = fit_ridge_streaming(
@@ -218,7 +241,11 @@ class Model2Regressor1D:
                 self.config.ridge_lambda,
                 dtype=self.config.ridge_dtype,
                 regularize_bias=False,
+                progress_fn=progress_fn,
             )
+        if progress_label:
+            elapsed = time.perf_counter() - start_time
+            print("[%s] ridge solve done in %.2fs" % (progress_label, elapsed), flush=True)
         self.weight = ridge_state["W"]
         self.ridge_state = ridge_state
         return ridge_state
@@ -270,10 +297,25 @@ class Model3Regressor1D:
         phi = self.phi(u0_batch)
         return self.augment_features(phi)
 
-    def fit(self, train_loader: Iterable) -> dict[str, torch.Tensor]:
+    def fit(
+        self,
+        train_loader: Iterable,
+        *,
+        progress_fn=None,
+        progress_label: str | None = None,
+    ) -> dict[str, torch.Tensor]:
+        fit_start = time.perf_counter()
+        if progress_label:
+            print("[%s] probe batch for ELM init" % progress_label, flush=True)
         probe_batch = next(iter(train_loader))[0]
         probe_phi = self.phi(probe_batch)
         self._ensure_elm(probe_phi.shape[1])
+        if progress_label:
+            print(
+                "[%s] ELM ready (in=%d, hidden=%d)"
+                % (progress_label, probe_phi.shape[1], self.config.elm_hidden_dim),
+                flush=True,
+            )
         if self.config.standardize_features:
             ridge_state = fit_ridge_streaming_standardized(
                 train_loader,
@@ -282,6 +324,7 @@ class Model3Regressor1D:
                 dtype=self.config.ridge_dtype,
                 regularize_bias=False,
                 eps=self.config.feature_std_eps,
+                progress_fn=progress_fn,
             )
         else:
             ridge_state = fit_ridge_streaming(
@@ -290,7 +333,11 @@ class Model3Regressor1D:
                 self.config.ridge_lambda,
                 dtype=self.config.ridge_dtype,
                 regularize_bias=False,
+                progress_fn=progress_fn,
             )
+        if progress_label:
+            elapsed = time.perf_counter() - fit_start
+            print("[%s] ridge solve done in %.2fs" % (progress_label, elapsed), flush=True)
         self.weight = ridge_state["W"]
         self.ridge_state = ridge_state
         return ridge_state

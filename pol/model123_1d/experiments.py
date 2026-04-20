@@ -6,13 +6,9 @@ from dataclasses import asdict, dataclass
 
 import torch
 
-from pol.features_1d import build_time_grid
-
 from .datasets import DatasetConfig, build_dataset, save_dataset_bundle
 from .metrics import rms_l2
-from .models import fit_model2, fit_model3
-from .observations import build_observation_operator, decode_model1_observation, make_model2_features, observe_states
-from .solvers import SurrogateSpec, simulate_surrogate_batches
+from .predictors import Model1Predictor1D, Model2Regressor1D, Model3Regressor1D, Model123Config
 
 
 @dataclass(frozen=True)
@@ -66,23 +62,6 @@ class ExperimentConfig:
             dtype=self.dtype,
         )
 
-    def surrogate_spec(self) -> SurrogateSpec:
-        return SurrogateSpec(
-            family=self.reservoir,
-            dt=self.dt,
-            T=self.T,
-            fine_dt=self.fine_dt,
-            rd_nu=self.rd_nu,
-            rd_alpha=self.rd_alpha,
-            rd_beta=self.rd_beta,
-            burgers_nu=self.burgers_nu,
-            burgers_b=self.burgers_b,
-            ks_dealias=self.ks_dealias,
-            ks_b=self.ks_b,
-            ks_eta=self.ks_eta,
-            ks_kappa=self.ks_kappa,
-        )
-
 
 def _resolve_device(name: str) -> torch.device:
     if name == "cuda":
@@ -94,52 +73,102 @@ def _resolve_device(name: str) -> torch.device:
     return torch.device("cpu")
 
 
+def _resolve_dtype(name: str) -> torch.dtype:
+    if name == "float32":
+        return torch.float32
+    return torch.float64
+
+
+def build_model123_config_from_experiment(cfg: ExperimentConfig) -> Model123Config:
+    # Keep synthetic path exact against DatasetConfig target builder.
+    burgers_scheme = "split_step" if cfg.reservoir == "burgers" else "semi_implicit"
+    return Model123Config(
+        reservoir=cfg.reservoir,
+        Ttilde=cfg.T,
+        dt=cfg.dt,
+        K=cfg.K,
+        feature_times=cfg.feature_times,
+        obs=cfg.obs,
+        J=cfg.J,
+        sensor_mode="equispaced",
+        sensor_seed=cfg.seed,
+        ridge_lambda=0.0,
+        ridge_dtype=_resolve_dtype(cfg.dtype),
+        elm_hidden_dim=cfg.model3_m,
+        elm_activation=cfg.model3_activation,
+        elm_seed=cfg.model3_seed,
+        elm_weight_scale=cfg.model3_weight_scale,
+        elm_bias_scale=cfg.model3_bias_scale,
+        rd_nu=cfg.rd_nu,
+        rd_alpha=cfg.rd_alpha,
+        rd_beta=cfg.rd_beta,
+        res_burgers_nu=cfg.burgers_nu,
+        res_burgers_b=cfg.burgers_b,
+        ks_dealias=cfg.ks_dealias,
+        ks_b=cfg.ks_b,
+        ks_eta=cfg.ks_eta,
+        ks_kappa=cfg.ks_kappa,
+        burgers_scheme=burgers_scheme,
+        burgers_fine_dt=cfg.fine_dt,
+        burgers_dealias=False,
+        device=str(cfg.device),
+        dtype=_resolve_dtype(cfg.dtype),
+    )
+
+
+def _jsonable_model_config(model_cfg: Model123Config) -> dict[str, object]:
+    payload = asdict(model_cfg)
+    payload["dtype"] = str(model_cfg.dtype)
+    payload["ridge_dtype"] = str(model_cfg.ridge_dtype)
+    if isinstance(payload.get("device"), torch.device):
+        payload["device"] = str(payload["device"])
+    return payload
+
+
+@torch.no_grad()
+def _predict_all(model, loader) -> torch.Tensor:
+    preds = []
+    for xb, _ in loader:
+        preds.append(model.predict(xb).detach().cpu())
+    return torch.cat(preds, dim=0)
+
+
 def run_experiment(cfg: ExperimentConfig) -> dict[str, float | str]:
     os.makedirs(cfg.out_dir, exist_ok=True)
     device = _resolve_device(cfg.device)
+
     dataset = build_dataset(cfg.dataset_config(), device=device)
     if cfg.save_dataset:
         save_dataset_bundle(dataset, os.path.join(cfg.out_dir, "dataset.pt"))
 
-    _, obs_steps = build_time_grid(Tr=cfg.T, dt=cfg.dt, K=cfg.K, feature_times=cfg.feature_times)
-    operator = build_observation_operator(obs=cfg.obs, nx=cfg.nx, J=cfg.J, sensor_seed=cfg.seed)
-    spec = cfg.surrogate_spec()
-
-    states_train = simulate_surrogate_batches(
-        dataset.u0_train.to(device=device, dtype=dataset.y_train.dtype),
-        spec=spec,
-        obs_steps=obs_steps,
+    train_loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(dataset.u0_train, dataset.y_train),
         batch_size=cfg.batch_size,
+        shuffle=False,
     )
-    states_test = simulate_surrogate_batches(
-        dataset.u0_test.to(device=device, dtype=dataset.y_test.dtype),
-        spec=spec,
-        obs_steps=obs_steps,
+    test_loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(dataset.u0_test, dataset.y_test),
         batch_size=cfg.batch_size,
+        shuffle=False,
     )
 
-    model1_obs_train = observe_states([states_train[-1]], obs=cfg.obs, operator=operator)[0]
-    model1_obs_test = observe_states([states_test[-1]], obs=cfg.obs, operator=operator)[0]
-    model1_train = decode_model1_observation(model1_obs_train, obs=cfg.obs, nx=cfg.nx, J=cfg.J)
-    model1_test = decode_model1_observation(model1_obs_test, obs=cfg.obs, nx=cfg.nx, J=cfg.J)
+    model_cfg = build_model123_config_from_experiment(cfg)
+    model1 = Model1Predictor1D(s=cfg.nx, config=model_cfg)
+    model2 = Model2Regressor1D(s=cfg.nx, config=model_cfg)
+    model3 = Model3Regressor1D(s=cfg.nx, config=model_cfg)
 
-    model2_features_train = make_model2_features(states_train, obs=cfg.obs, operator=operator)
-    model2_features_test = make_model2_features(states_test, obs=cfg.obs, operator=operator)
+    model2.fit(train_loader)
+    model3.fit(train_loader)
 
-    targets_train = dataset.y_train.to(dtype=model2_features_train.dtype)
-    targets_test = dataset.y_test.to(dtype=model2_features_test.dtype)
+    model1_train = _predict_all(model1, train_loader)
+    model1_test = _predict_all(model1, test_loader)
+    model2_train = _predict_all(model2, train_loader)
+    model2_test = _predict_all(model2, test_loader)
+    model3_train = _predict_all(model3, train_loader)
+    model3_test = _predict_all(model3, test_loader)
 
-    _, model2_train, model2_test = fit_model2(model2_features_train, targets_train, model2_features_test)
-    _, _, model3_train, model3_test = fit_model3(
-        model2_features_train,
-        targets_train,
-        model2_features_test,
-        hidden_dim=cfg.model3_m,
-        activation=cfg.model3_activation,
-        seed=cfg.model3_seed,
-        weight_scale=cfg.model3_weight_scale,
-        bias_scale=cfg.model3_bias_scale,
-    )
+    targets_train = dataset.y_train.to(dtype=model1_train.dtype)
+    targets_test = dataset.y_test.to(dtype=model1_test.dtype)
 
     metrics = {
         "reservoir": cfg.reservoir,
@@ -153,5 +182,14 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, float | str]:
     }
 
     with open(os.path.join(cfg.out_dir, "metrics.json"), "w", encoding="utf-8") as f:
-        json.dump({"config": asdict(cfg), "metrics": metrics}, f, indent=2, sort_keys=True)
+        json.dump(
+            {
+                "config": asdict(cfg),
+                "model_config": _jsonable_model_config(model_cfg),
+                "metrics": metrics,
+            },
+            f,
+            indent=2,
+            sort_keys=True,
+        )
     return metrics

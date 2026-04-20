@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+import warnings
+
 import torch
 
 from pol.features_1d import build_sensor_indices, collect_observations, flatten_observations
+
+
+warnings.warn(
+    "pol.model123_1d.observations is deprecated; use predictors.py + features_1d.py",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 
 def build_observation_operator(
@@ -36,8 +45,7 @@ def make_model2_features(
     obs: str,
     operator: torch.Tensor,
 ) -> torch.Tensor:
-    obs_list = observe_states(states, obs=obs, operator=operator)
-    return flatten_observations(obs_list)
+    return flatten_observations(observe_states(states, obs=obs, operator=operator))
 
 
 def decode_model1_observation(

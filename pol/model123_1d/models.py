@@ -1,15 +1,12 @@
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 
 import torch
 
 from pol.elm import FixedRandomELM
-
-
-def _append_bias(features: torch.Tensor) -> torch.Tensor:
-    ones = torch.ones((features.shape[0], 1), device=features.device, dtype=features.dtype)
-    return torch.cat([features, ones], dim=-1)
+from pol.ridge import fit_ridge_streaming, predict_linear
 
 
 @dataclass
@@ -17,12 +14,7 @@ class AffineModel:
     weight: torch.Tensor
 
     def predict(self, features: torch.Tensor) -> torch.Tensor:
-        return _append_bias(features) @ self.weight
-
-
-def fit_affine_model(features: torch.Tensor, targets: torch.Tensor) -> AffineModel:
-    weight = torch.linalg.pinv(_append_bias(features)) @ targets
-    return AffineModel(weight=weight)
+        return predict_linear(features, self.weight)
 
 
 @dataclass
@@ -35,12 +27,27 @@ class ModelOutputs:
     model3_test: torch.Tensor
 
 
+def _fit_affine_model(features: torch.Tensor, targets: torch.Tensor) -> AffineModel:
+    warnings.warn(
+        "pol.model123_1d.models is deprecated; use Model2Regressor1D/Model3Regressor1D in predictors.py",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(features, targets),
+        batch_size=max(1, int(features.shape[0])),
+        shuffle=False,
+    )
+    state = fit_ridge_streaming(loader, lambda xb: xb, 0.0, dtype=features.dtype, regularize_bias=False)
+    return AffineModel(weight=state["W"])
+
+
 def fit_model2(
     train_features: torch.Tensor,
     train_targets: torch.Tensor,
     test_features: torch.Tensor,
 ) -> tuple[AffineModel, torch.Tensor, torch.Tensor]:
-    model = fit_affine_model(train_features, train_targets)
+    model = _fit_affine_model(train_features, train_targets)
     return model, model.predict(train_features), model.predict(test_features)
 
 
@@ -55,6 +62,11 @@ def fit_model3(
     weight_scale: float,
     bias_scale: float,
 ) -> tuple[AffineModel, FixedRandomELM, torch.Tensor, torch.Tensor]:
+    warnings.warn(
+        "pol.model123_1d.models.fit_model3 is deprecated; use Model3Regressor1D in predictors.py",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     elm = FixedRandomELM(
         in_dim=train_features.shape[1],
         hidden_dim=hidden_dim,
@@ -69,5 +81,5 @@ def fit_model3(
     test_lift = elm(test_features)
     train_aug = torch.cat([train_features, train_lift], dim=-1)
     test_aug = torch.cat([test_features, test_lift], dim=-1)
-    model = fit_affine_model(train_aug, train_targets)
+    model = _fit_affine_model(train_aug, train_targets)
     return model, elm, model.predict(train_aug), model.predict(test_aug)
