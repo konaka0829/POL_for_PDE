@@ -246,6 +246,22 @@ python reservoir_burgers_1d.py --dry-run --ntrain 8 --ntest 4 --sub 256 --obs fo
 python reservoir_burgers_1d.py --dry-run --ntrain 8 --ntest 4 --sub 256 --obs proj --J 16 --sensor-seed 1 --standardize-features 1
 ```
 
+**実行例（Reservoir Burgers split-step）**
+```bash
+python reservoir_burgers_1d.py \
+  --data-mode single_split --data-file data/burgers_nu0p1_N100_s1024.mat \
+  --ntrain 80 --ntest 20 --sub 1 --batch-size 10 \
+  --reservoir burgers --res-burgers-nu 0.05 \
+  --burgers-scheme split_step --burgers-fine-dt 1e-4 --burgers-dealias \
+  --Tr 1.0 --dt 0.01 --K 5 --obs full \
+  --use-elm 1 --elm-h 512 \
+  --ridge-lambda 1e-4
+```
+
+**可変解像度対応**
+- `reservoir_burgers_1d.py` / `rfm_burgers_1d.py` / `fourier_1d.py` / `lowrank_operators/lowrank_1d.py` は、実データ読込後に `s = x_train.shape[1]` で解像度を決定します。
+- `--sub` で空間を間引いた後の解像度に自動追従します。
+
 **実行パターン（使い分け）**
 - 通常学習: 実データを指定して実行（`--data-mode single_split` または `--data-mode separate_files`）
 - 軽量確認: `--dry-run` でランダム疑似データを使い、shape/NaN/可視化出力を確認
@@ -285,7 +301,7 @@ python3 reservoir_burgers_1d.py \
 - `--ntrain`, `--ntest`:
   サンプル数を増やすほど汎化は安定しやすい。小さすぎると `W_out` が過学習しやすい。
 - `--sub`:
-  空間解像度 `s=2**13//sub` を決める。`sub` を小さくすると高解像度で精度向上余地はあるが、メモリと計算時間が増える。
+  空間間引き率。実データ時の解像度は `x_train.shape[1]`（間引き後）で自動決定される。`sub` を小さくすると高解像度で精度向上余地はあるが、メモリと計算時間が増える。
 - `--batch-size`:
   streaming ridge でも特徴計算のピークメモリを左右する。OOM時は最優先で下げる。
 - `--reservoir`:
@@ -340,7 +356,7 @@ python3 reservoir_burgers_1d.py \
 - `--shuffle`（デフォルト: `False`）: `single_split` で分割前シャッフル
 - `--ntrain`（デフォルト: `1000`）: 学習サンプル数
 - `--ntest`（デフォルト: `100`）: テストサンプル数
-- `--sub`（デフォルト: `8`）: 空間間引き率（`s = 2**13 // sub`）
+- `--sub`（デフォルト: `8`）: 空間間引き率（解像度は読込後の `x_train.shape[1]` で決定）
 - `--batch-size`（デフォルト: `20`）: DataLoader バッチサイズ
 
 - リザーバPDE関連
@@ -408,6 +424,18 @@ python3 rfm_burgers_1d.py \
   --device auto --out-dir visualizations/rfm_burgers_full --save-model
 ```
 
+**RFM で split-step Burgers を使う例**
+```bash
+python rfm_burgers_1d.py \
+  --data-mode single_split --data-file data/burgers_nu0p1_N100_s1024.mat \
+  --ntrain 80 --ntest 20 --sub 1 --batch-size 10 \
+  --reservoir burgers --res-burgers-nu 0.05 \
+  --burgers-scheme split_step --burgers-fine-dt 1e-4 --burgers-dealias \
+  --Tr 1.0 --dt 0.01 --K 5 \
+  --m 128 --rfm-activation tanh \
+  --ridge-lambda 1e-4
+```
+
 **ハイパーパラメータの詳細（`rfm_burgers_1d.py`）**
 - データ系 (`--data-mode`, `--data-file`, `--train-file`, `--test-file`, `--train-split`, `--seed`, `--shuffle`, `--ntrain`, `--ntest`, `--sub`, `--batch-size`):
   意味は `reservoir_burgers_1d.py` と同じ。
@@ -434,6 +462,25 @@ python3 rfm_burgers_1d.py \
 3. `obs/J`（または `m`）で表現次元を調整する
 4. `ridge-lambda` を対数探索する
 5. 最後に `ELM` 系（または `rfm-*`）のスケールを微調整する
+
+### data_generation/burgers/generate_burgers_1d.py（Python dataset generator）
+共有ソルバ `pol/burgers_spectral_1d.py` を使って、Burgers データセット (`a -> u(T)`) を Python で生成します。
+
+```bash
+python data_generation/burgers/generate_burgers_1d.py \
+  --out-file data/burgers_nu0p1_N100_s1024.mat \
+  --num-samples 100 \
+  --grid-size 1024 \
+  --nu 0.1 \
+  --T 1.0 \
+  --dt 0.01 \
+  --fine-dt 1e-4
+```
+
+- 必須入力: `--out-file`, `--num-samples`, `--grid-size`, `--nu`
+- 追加設定: `--seed`, `--batch-size`, `--device`, `--dtype`, `--save-dtype`, `--dealias`
+- GRF 初期条件: `--grf-gamma`, `--grf-tau`, `--grf-sigma`, `--grf-mean`
+- 保存キー: `a`, `u`, `x_grid`, `nu`, `T`, `dt`, `fine_dt`, `grid_size`, `generator`
 
 ## Datasets
 We provide the Burgers equation, Darcy flow, and Navier-Stokes equation datasets we used in the paper. 

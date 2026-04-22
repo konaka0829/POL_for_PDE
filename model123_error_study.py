@@ -1,11 +1,21 @@
-from __future__ import annotations
+from __future__ import print_function
+
+import sys
+
+if sys.version_info < (3, 10):
+    sys.stderr.write(
+        "model123_error_study.py requires Python 3.10+.\n"
+        "You are running Python %s.\n"
+        "Use `python3 model123_error_study.py ...` instead.\n" % sys.version.split()[0]
+    )
+    raise SystemExit(1)
 
 import argparse
 
 from pol.model123_1d import ExperimentConfig, run_experiment
 
 
-def parse_args() -> ExperimentConfig:
+def parse_args():
     parser = argparse.ArgumentParser(description="Model 1-3 runner for 1D Burgers target")
     parser.add_argument("--total-samples", type=int, default=1200)
     parser.add_argument("--ntrain", type=int, default=1000)
@@ -78,11 +88,11 @@ def parse_args() -> ExperimentConfig:
     )
 
 
-def main() -> None:
+def main():
     cfg = parse_args()
     metrics = run_experiment(cfg)
     for key, value in metrics.items():
-        print(f"{key}: {value}")
+        print("%s: %s" % (key, value))
 
 
 if __name__ == "__main__":

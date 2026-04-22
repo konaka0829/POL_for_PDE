@@ -33,6 +33,7 @@ def test_empirical_rhs_is_recorded_for_both_ttilde_values():
         dt=0.01,
         fine_dt=0.002,
         reservoir="ks",
+        beta_mode="empirical_pairwise",
         dtype="float64",
         device="cpu",
     )
@@ -40,5 +41,5 @@ def test_empirical_rhs_is_recorded_for_both_ttilde_values():
     summary = result["summary_rows"]
     assert len(summary) == 2
     for row in summary:
-        assert "beta_empirical" in row
+        assert "beta_value" in row
         assert "rhs_beta" in row

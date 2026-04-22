@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 import torch
 
 from .datasets import DatasetConfig, build_dataset, save_dataset_bundle
-from .metrics import rms_l2
+from .metrics import dataset_abs_l2h_error, dataset_rel_l2h_mean
 from .predictors import Model1Predictor1D, Model2Regressor1D, Model3Regressor1D, Model123Config
 
 
@@ -173,12 +173,25 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, float | str]:
     metrics = {
         "reservoir": cfg.reservoir,
         "obs": cfg.obs,
-        "E1_train": rms_l2(model1_train, targets_train),
-        "E1_test": rms_l2(model1_test, targets_test),
-        "E2_train": rms_l2(model2_train, targets_train),
-        "E2_test": rms_l2(model2_test, targets_test),
-        "E3_train": rms_l2(model3_train, targets_train),
-        "E3_test": rms_l2(model3_test, targets_test),
+        "main_metric": "abs_l2h",
+        "E1_train": dataset_abs_l2h_error(model1_train, targets_train),
+        "E1_test": dataset_abs_l2h_error(model1_test, targets_test),
+        "E2_train": dataset_abs_l2h_error(model2_train, targets_train),
+        "E2_test": dataset_abs_l2h_error(model2_test, targets_test),
+        "E3_train": dataset_abs_l2h_error(model3_train, targets_train),
+        "E3_test": dataset_abs_l2h_error(model3_test, targets_test),
+        "E1_train_abs_l2h": dataset_abs_l2h_error(model1_train, targets_train),
+        "E1_test_abs_l2h": dataset_abs_l2h_error(model1_test, targets_test),
+        "E2_train_abs_l2h": dataset_abs_l2h_error(model2_train, targets_train),
+        "E2_test_abs_l2h": dataset_abs_l2h_error(model2_test, targets_test),
+        "E3_train_abs_l2h": dataset_abs_l2h_error(model3_train, targets_train),
+        "E3_test_abs_l2h": dataset_abs_l2h_error(model3_test, targets_test),
+        "E1_train_rel_l2h_mean": dataset_rel_l2h_mean(model1_train, targets_train),
+        "E1_test_rel_l2h_mean": dataset_rel_l2h_mean(model1_test, targets_test),
+        "E2_train_rel_l2h_mean": dataset_rel_l2h_mean(model2_train, targets_train),
+        "E2_test_rel_l2h_mean": dataset_rel_l2h_mean(model2_test, targets_test),
+        "E3_train_rel_l2h_mean": dataset_rel_l2h_mean(model3_train, targets_train),
+        "E3_test_rel_l2h_mean": dataset_rel_l2h_mean(model3_test, targets_test),
     }
 
     with open(os.path.join(cfg.out_dir, "metrics.json"), "w", encoding="utf-8") as f:

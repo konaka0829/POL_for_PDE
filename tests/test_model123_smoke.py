@@ -55,6 +55,9 @@ def test_exact_burgers_inclusion_chain_smoke(tmp_path):
     assert metrics["E1_train"] < 1e-8
     assert metrics["E2_train"] <= metrics["E1_train"] + 1e-8
     assert metrics["E3_train"] <= metrics["E2_train"] + 1e-8
+    assert metrics["main_metric"] == "abs_l2h"
+    assert "E1_train_abs_l2h" in metrics
+    assert "E1_train_rel_l2h_mean" in metrics
 
 
 def test_cli_smoke(tmp_path):

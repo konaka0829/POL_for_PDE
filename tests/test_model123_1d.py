@@ -1,5 +1,6 @@
 import subprocess
 import sys
+import json
 from pathlib import Path
 
 import scipy.io
@@ -158,5 +159,10 @@ def test_model123_cli_smoke(tmp_path):
     proc = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
     assert proc.returncode == 0, proc.stdout + "\n" + proc.stderr
     assert (out_dir / "run_config.json").exists()
+    payload = json.loads((out_dir / "run_config.json").read_text(encoding="utf-8"))
+    assert "train_absL2h" in payload
+    assert "test_absL2h" in payload
+    assert "train_relL2" in payload
+    assert "test_relL2" in payload
     assert "[model2 train]" in proc.stdout
     assert "[model2 eval-test]" in proc.stdout

@@ -1,4 +1,14 @@
-from __future__ import annotations
+from __future__ import print_function
+
+import sys
+
+if sys.version_info < (3, 10):
+    sys.stderr.write(
+        "model123_burgers_1d.py requires Python 3.10+.\n"
+        "You are running Python %s.\n"
+        "Use `python3 model123_burgers_1d.py ...` instead.\n" % sys.version.split()[0]
+    )
+    raise SystemExit(1)
 
 import argparse
 import json
@@ -12,10 +22,16 @@ import torch
 
 from cli_utils import add_data_mode_args, add_split_args, validate_data_mode_args
 from pol.model123_1d import Model1Predictor1D, Model2Regressor1D, Model3Regressor1D, Model123Config
+from pol.model123_1d.metrics import (
+    dataset_abs_l2h_error,
+    dataset_rel_l2h_mean,
+    per_sample_abs_l2h_error,
+    per_sample_rel_l2h_error,
+)
 from viz_utils import plot_1d_prediction, plot_error_histogram
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args():
     parser = argparse.ArgumentParser(description="Model 1 / 2 / 3 runner for 1D Burgers target")
     parser.add_argument("--model", choices=("model1", "model2", "model3"), required=True)
     parser.add_argument(
@@ -99,11 +115,11 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def ridge_dtype_from_name(name: str) -> torch.dtype:
+def ridge_dtype_from_name(name):
     return torch.float32 if name == "float32" else torch.float64
 
 
-def _extract_scalar_meta(reader, field: str) -> float | None:
+def _extract_scalar_meta(reader, field):
     if field not in reader.data:
         return None
     value = reader.read_field(field)
@@ -118,30 +134,22 @@ def _extract_scalar_meta(reader, field: str) -> float | None:
 
 
 def _validate_shapes(
-    x_train: torch.Tensor,
-    y_train: torch.Tensor,
-    x_test: torch.Tensor,
-    y_test: torch.Tensor,
-) -> None:
+    x_train,
+    y_train,
+    x_test,
+    y_test,
+):
     if x_train.shape[1] != y_train.shape[1]:
-        raise ValueError(
-            f"Train a/u resolution mismatch: {x_train.shape[1]} vs {y_train.shape[1]}"
-        )
+        raise ValueError("Train a/u resolution mismatch: %s vs %s" % (x_train.shape[1], y_train.shape[1]))
     if x_test.shape[1] != y_test.shape[1]:
-        raise ValueError(
-            f"Test a/u resolution mismatch: {x_test.shape[1]} vs {y_test.shape[1]}"
-        )
+        raise ValueError("Test a/u resolution mismatch: %s vs %s" % (x_test.shape[1], y_test.shape[1]))
     if x_train.shape[1] != x_test.shape[1]:
-        raise ValueError(
-            f"Train/test input resolution mismatch: {x_train.shape[1]} vs {x_test.shape[1]}"
-        )
+        raise ValueError("Train/test input resolution mismatch: %s vs %s" % (x_train.shape[1], x_test.shape[1]))
     if y_train.shape[1] != y_test.shape[1]:
-        raise ValueError(
-            f"Train/test output resolution mismatch: {y_train.shape[1]} vs {y_test.shape[1]}"
-        )
+        raise ValueError("Train/test output resolution mismatch: %s vs %s" % (y_train.shape[1], y_test.shape[1]))
 
 
-def _validate_target_time(args: argparse.Namespace, train_reader, test_reader=None) -> None:
+def _validate_target_time(args, train_reader, test_reader=None):
     train_T = _extract_scalar_meta(train_reader, "T")
     test_T = _extract_scalar_meta(test_reader, "T") if test_reader is not None else train_T
     available = [val for val in (train_T, test_T) if val is not None]
@@ -152,16 +160,17 @@ def _validate_target_time(args: argparse.Namespace, train_reader, test_reader=No
         )
         return
     if train_T is not None and test_T is not None and not np.isclose(train_T, test_T):
-        raise ValueError(f"Train/test target-time metadata mismatch: {train_T} vs {test_T}")
+        raise ValueError("Train/test target-time metadata mismatch: %s vs %s" % (train_T, test_T))
     data_T = available[0]
     if not np.isclose(data_T, args.T):
         raise ValueError(
-            f"Requested --T={args.T} but dataset target time is T={data_T}. "
+            "Requested --T=%s but dataset target time is T=%s. "
             "The CLI target time must match the dataset target."
+            % (args.T, data_T)
         )
 
 
-def load_data(args: argparse.Namespace) -> tuple[torch.Tensor, ...]:
+def load_data(args):
     from utilities3 import MatReader
 
     if args.data_mode == "single_split":
@@ -178,9 +187,7 @@ def load_data(args: argparse.Namespace) -> tuple[torch.Tensor, ...]:
         train_idx = indices[:split_idx]
         test_idx = indices[split_idx:]
         if args.ntrain > len(train_idx) or args.ntest > len(test_idx):
-            raise ValueError(
-                f"Not enough samples for ntrain={args.ntrain}, ntest={args.ntest}, total={total}"
-            )
+            raise ValueError("Not enough samples for ntrain=%s, ntest=%s, total=%s" % (args.ntrain, args.ntest, total))
         train_idx = train_idx[: args.ntrain]
         test_idx = test_idx[: args.ntest]
         x_train = x_data[train_idx]
@@ -205,7 +212,7 @@ def load_data(args: argparse.Namespace) -> tuple[torch.Tensor, ...]:
     )
 
 
-def build_model_config(args: argparse.Namespace) -> Model123Config:
+def build_model_config(args):
     return Model123Config(
         reservoir=args.reservoir,
         Ttilde=args.Ttilde,
@@ -245,8 +252,7 @@ def build_model_config(args: argparse.Namespace) -> Model123Config:
 
 
 @torch.no_grad()
-def evaluate_model(model, loader, *, progress_label: str | None = None):
-    rels = []
+def evaluate_model(model, loader, progress_label=None):
     preds = []
     ys = []
     xs = []
@@ -254,27 +260,29 @@ def evaluate_model(model, loader, *, progress_label: str | None = None):
     start_time = time.perf_counter()
     for batch_idx, (xb, yb) in enumerate(loader, start=1):
         pred = model.predict(xb).cpu()
-        num = torch.linalg.norm((pred - yb).reshape(pred.shape[0], -1), dim=1)
-        den = torch.linalg.norm(yb.reshape(yb.shape[0], -1), dim=1)
-        rels.append((num / (den + 1e-12)).cpu())
         preds.append(pred)
         ys.append(yb)
         xs.append(xb)
         if progress_label is not None:
             if total_batches is None:
-                print(f"[{progress_label}] batch {batch_idx}", flush=True)
+                print("[%s] batch %d" % (progress_label, batch_idx), flush=True)
             else:
-                print(f"[{progress_label}] batch {batch_idx}/{total_batches}", flush=True)
+                print("[%s] batch %d/%d" % (progress_label, batch_idx, total_batches), flush=True)
     if progress_label is not None:
         elapsed = time.perf_counter() - start_time
-        print(f"[{progress_label}] done in {elapsed:.2f}s", flush=True)
-    return float(torch.cat(rels).mean().item()), torch.cat(preds), torch.cat(ys), torch.cat(xs)
+        print("[%s] done in %.2fs" % (progress_label, elapsed), flush=True)
+    preds_all = torch.cat(preds)
+    ys_all = torch.cat(ys)
+    xs_all = torch.cat(xs)
+    abs_l2h = dataset_abs_l2h_error(preds_all, ys_all)
+    rel_l2h = dataset_rel_l2h_mean(preds_all, ys_all)
+    return abs_l2h, rel_l2h, preds_all, ys_all, xs_all
 
 
-def make_progress_fn(label: str):
+def make_progress_fn(label):
     last_emit = {"batch": 0, "time": time.perf_counter()}
 
-    def progress_fn(batch_idx: int, total_batches: int | None) -> None:
+    def progress_fn(batch_idx, total_batches):
         now = time.perf_counter()
         should_emit = (
             batch_idx == 1
@@ -286,16 +294,16 @@ def make_progress_fn(label: str):
         if not should_emit:
             return
         if total_batches is None:
-            print(f"[{label}] batch {batch_idx}", flush=True)
+            print("[%s] batch %d" % (label, batch_idx), flush=True)
         else:
-            print(f"[{label}] batch {batch_idx}/{total_batches}", flush=True)
+            print("[%s] batch %d/%d" % (label, batch_idx, total_batches), flush=True)
         last_emit["batch"] = batch_idx
         last_emit["time"] = now
 
     return progress_fn
 
 
-def main() -> None:
+def main():
     args = parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
     torch.manual_seed(args.seed)
@@ -303,7 +311,7 @@ def main() -> None:
 
     stage_start = time.perf_counter()
     x_train, y_train, x_test, y_test = load_data(args)
-    print(f"[{args.model}] data loaded in {time.perf_counter() - stage_start:.2f}s", flush=True)
+    print("[%s] data loaded in %.2fs" % (args.model, time.perf_counter() - stage_start), flush=True)
     s = int(x_train.shape[1])
     train_loader = torch.utils.data.DataLoader(
         torch.utils.data.TensorDataset(x_train, y_train),
@@ -329,21 +337,21 @@ def main() -> None:
         model = Model2Regressor1D(s=s, config=model_cfg)
         ridge_state = model.fit(
             train_loader,
-            progress_fn=make_progress_fn(f"{args.model} train"),
-            progress_label=f"{args.model} train",
+            progress_fn=make_progress_fn("%s train" % args.model),
+            progress_label="%s train" % args.model,
         )
     else:
         model = Model3Regressor1D(s=s, config=model_cfg)
         ridge_state = model.fit(
             train_loader,
-            progress_fn=make_progress_fn(f"{args.model} train"),
-            progress_label=f"{args.model} train",
+            progress_fn=make_progress_fn("%s train" % args.model),
+            progress_label="%s train" % args.model,
         )
 
-    train_eval_label = f"{args.model} eval-train" if args.model in {"model2", "model3"} else None
-    test_eval_label = f"{args.model} eval-test" if args.model in {"model2", "model3"} else None
-    train_rel, _, _, _ = evaluate_model(model, eval_train_loader, progress_label=train_eval_label)
-    test_rel, pred_test, y_test_all, x_test_all = evaluate_model(
+    train_eval_label = "%s eval-train" % args.model if args.model in {"model2", "model3"} else None
+    test_eval_label = "%s eval-test" % args.model if args.model in {"model2", "model3"} else None
+    train_abs, train_rel, _, _, _ = evaluate_model(model, eval_train_loader, progress_label=train_eval_label)
+    test_abs, test_rel, pred_test, y_test_all, x_test_all = evaluate_model(
         model,
         test_loader,
         progress_label=test_eval_label,
@@ -352,17 +360,30 @@ def main() -> None:
     resolved_cfg = getattr(model, "config", model_cfg)
     actual_obs = resolved_cfg.obs
     actual_J = resolved_cfg.J
-    print(f"model={args.model} reservoir={args.reservoir} obs={actual_obs} J={actual_J}")
-    print(f"T={args.T} Ttilde={args.Ttilde} dt={args.dt}")
-    print(f"train relL2: {train_rel:.6f}")
-    print(f"test  relL2: {test_rel:.6f}")
+    print("model=%s reservoir=%s obs=%s J=%s" % (args.model, args.reservoir, actual_obs, actual_J))
+    print("T=%s Ttilde=%s dt=%s" % (args.T, args.Ttilde, args.dt))
+    print("train absL2h: %.6f" % train_abs)
+    print("test  absL2h: %.6f" % test_abs)
+    print("train relL2: %.6f" % train_rel)
+    print("test  relL2: %.6f" % test_rel)
 
-    per_sample = []
-    for idx in range(pred_test.shape[0]):
-        num = torch.linalg.norm((pred_test[idx] - y_test_all[idx]).reshape(-1))
-        den = torch.linalg.norm(y_test_all[idx].reshape(-1))
-        per_sample.append(float((num / (den + 1e-12)).item()))
-    plot_error_histogram(per_sample, os.path.join(args.out_dir, "test_relL2_hist"))
+    per_sample_abs = per_sample_abs_l2h_error(pred_test, y_test_all)
+    per_sample_rel = per_sample_rel_l2h_error(pred_test, y_test_all)
+    plot_error_histogram([float(v) for v in per_sample_abs.tolist()], os.path.join(args.out_dir, "test_absL2h_hist"))
+    plot_error_histogram([float(v) for v in per_sample_rel.tolist()], os.path.join(args.out_dir, "test_relL2_hist"))
+    with open(os.path.join(args.out_dir, "test_error_metrics.json"), "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "main_metric": "abs_l2h",
+                "test_absL2h": test_abs,
+                "test_relL2": test_rel,
+                "per_sample_absL2h": [float(v) for v in per_sample_abs.tolist()],
+                "per_sample_relL2": [float(v) for v in per_sample_rel.tolist()],
+            },
+            f,
+            indent=2,
+            ensure_ascii=False,
+        )
 
     x_grid = np.linspace(0.0, 1.0, s, endpoint=False)
     for idx in [0, min(1, args.ntest - 1), min(2, args.ntest - 1)]:
@@ -371,8 +392,8 @@ def main() -> None:
             gt=y_test_all[idx],
             pred=pred_test[idx],
             input_u0=x_test_all[idx],
-            out_path_no_ext=os.path.join(args.out_dir, f"sample_{idx:03d}"),
-            title_prefix=f"{args.model} sample {idx}: ",
+            out_path_no_ext=os.path.join(args.out_dir, "sample_%03d" % idx),
+            title_prefix="%s sample %d: " % (args.model, idx),
         )
 
     if args.save_model:
@@ -394,7 +415,7 @@ def main() -> None:
             state["elm_bias"] = model.elm.bias.detach().cpu()
             state["elm_activation"] = model.elm.activation
         torch.save(state, save_path)
-        print(f"saved model: {save_path}")
+        print("saved model: %s" % save_path)
 
     with open(os.path.join(args.out_dir, "run_config.json"), "w", encoding="utf-8") as f:
         json.dump(
@@ -402,6 +423,9 @@ def main() -> None:
                 "args": vars(args),
                 "resolved_obs": actual_obs,
                 "resolved_J": actual_J,
+                "main_metric": "abs_l2h",
+                "train_absL2h": train_abs,
+                "test_absL2h": test_abs,
                 "train_relL2": train_rel,
                 "test_relL2": test_rel,
             },

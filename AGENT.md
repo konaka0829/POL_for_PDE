@@ -1,1154 +1,516 @@
-# AGENT.md — PDE Reservoir Operator Learning (Target: 1D Burgers) + ELM + Ridge (Backprop-free)
+# AGENT.md
 
-## 0. このリポジトリの前提（現状）
-- この repo は Fourier Neural Operator (FNO) 実装で、`fourier_1d.py` が Burgers データセット（`.mat`）を読み、
-  入力 `a`（初期条件）→ 出力 `u`（時刻1の解）を学習する構成。
-- データ読み込み・分割の CLI は `cli_utils.py` を使用。
-- 可視化ユーティリティは `viz_utils.py`（PNG/PDF/SVG の3形式保存）。
-
-**この追加機能は、既存のFNO/lowrankスクリプトを壊さずに「新規スクリプト＋共通モジュール追加」で実装する。**
+## この AGENT.md の位置づけ
+このファイルは、**Model123 の誤差指標と Model 1 誤差分解を改良する今回のタスク専用**です。リポジトリに既にある AGENT.md はこのタスクとは整合していないため、Codex CLI を使うときは **このファイルで repo root の AGENT.md を置き換えてから実行**してください。
 
 ---
 
-## 1. 実装したい新手法の要約（本タスクの目的）
-### 1.1 ターゲット（学習対象）
-- ターゲット PDE は **Burgers データセット**（`fourier_1d.py` が使っているもの）と同じ。
-- 学習したい作用素：  
-  **F : a(x) ↦ u(T=1, x)**  
-  （データ `.mat` では `a` が入力、`u` が出力）
+## 1. タスクの目的
 
-### 1.2 モデル（学習器）
-以下の backprop-free パイプラインを実装する：
+このタスクの目的は二つあります。
 
-1) **入力** `a` を **リザーバPDEの初期条件**として入れる（エンコーダは基本 `E(a)=scale*a + shift`）
-2) **固定の既知PDE（リザーバPDE）** を時間発展させる：  
-   `z_t = R(z)` （境界は周期を仮定）
-3) 観測 `Obs(z(t_k))` を K 個の時刻で取り、特徴ベクトルを作る：  
-   `Φ(a) = concat_k Obs(z(t_k))`
-4) **拡張(3)**：固定ランダム写像（ELM）を入れる：  
-   `h(a) = σ( Φ(a) @ A^T + c )`  
-   - A, c は固定（乱数）
-   - σ は tanh / ReLU など
-5) 最後の線形 readout を **リッジ回帰**（閉形式 or XtX/XtY 蓄積）で解く：  
-   `ŷ = [h, 1] W_out`
+### 1.1 誤差指標を整理する
+`pol/model123_1d/metrics.py` を、Model 1/2/3 に共通の誤差指標を定義する一元モジュールに整理してください。
 
-### 1.3 重要要件
-- **学習するのは W_out（とバイアス）だけ**。リザーバPDE・Obs・ELMは固定。
-- 3種類のリザーバPDEを **CLIで切替可能**にする：
-  1. `reaction_diffusion`（1D反応拡散：例 Allen–Cahn）
-  2. `ks`（1D Kuramoto–Sivashinsky）
-  3. `burgers`（別パラメータの Burgers：粘性などを変える）
-- 既存のデータ読み込み方式（`--data-mode single_split / separate_files`）に対応。
+主指標は **absolute discrete \(L_h^2\)** にしてください。理由は次の通りです。
+
+- Model 1 の raw error 分解は absolute \(L^2(\mu;Y)\) 誤差の不等式として書かれている。
+- Model 1/2/3 の包含関係 \(D_3\le D_2\le D_1\) も absolute 側で自然に読める。
+- current setting は unit torus \([0,1)\) の一様格子なので、現在の `rms_l2` は実質的に absolute discrete \(L_h^2\) と一致する。
+
+relative error は補助指標として残してよいですが、主指標にしないでください。
+
+### 1.2 Model 1 の誤差分解を theorem-consistent に直す
+`pol/model123_1d/error_decomposition.py` と `model1_error_decomposition_1d.py` を、TeX の Model 1 raw error decomposition の **fully discrete full-state special case** に沿って整理し直してください。
+
+今回のスコープは **full-state special case の整理** です。一般の有限次元 Model 1、`Q_J`、`Delta_obs^(J)` の実装までは行いません。
 
 ---
 
-## 2. 新規追加するファイル構成（提案）
-repo ルート（README と同階層）に以下を追加する：
+## 2. 理論上の基準
 
-- `reservoir_burgers_1d.py`  
-  - 本手法のメイン実行スクリプト（Burgers ターゲット専用）
-  - CLI で reservoir/ELM/ridge/feature の設定ができる
+### 2.1 Model 1 raw error decomposition
+今回合わせたい式は
+\[
+D_1(\theta,\tilde T)
+\le
+ e^{\beta T}\Delta_{\mathrm{init}}(\theta)
+ + c_{\beta,T}\Delta_{\mathrm{dyn}}(\theta;T)
+ + \Delta_{\mathrm{time}}(\theta;T,\tilde T)
+\]
+です。
 
-- `pol/` ディレクトリ（新規、パッケージ扱い）
-  - `pol/__init__.py`
-  - `pol/reservoir_1d.py`  
-    - 3種のリザーバPDEソルバ実装（PyTorch）
-  - `pol/features_1d.py`  
-    - multi-time feature 作成（Φ）、観測（Obs）、正規化など
-  - `pol/elm.py`  
-    - 固定ランダム層（A,c, activation）
-  - `pol/ridge.py`  
-    - リッジ回帰（XtX/XtY 蓄積→Cholesky solve）
+full-state かつ `E=I`, `Q=I`, `\tilde T=T` なら
+\[
+\Delta_{\mathrm{init}}=0,
+\qquad
+\Delta_{\mathrm{time}}=0,
+\qquad
+D_1(\theta,T)\le c_{\beta,T}\Delta_{\mathrm{dyn}}(\theta;T)
+\]
+に簡約されます。
 
-- `tests/test_reservoir_smoke.py`（任意だが推奨）
-  - 外部データ無しで shape/NaN を確認する簡易テスト
+### 2.2 fully discrete な評価量
+fully discrete な natural quantity は次です。
 
-- README 更新（推奨）
-  - 新手法の使い方（実行例・主要引数）
+- 格子幅 \(h = 1/n_x\)
+- 離散内積
+  \[
+  \langle v_h, w_h\rangle_h = h\sum_j v_{h,j} w_{h,j}
+  \]
+- 離散ノルム
+  \[
+  \|v_h\|_{L_h^2} = \left(h\sum_j v_{h,j}^2\right)^{1/2}
+  \]
 
-※この repo は「スクリプト中心」なので、モジュール分割は最小限でOK。ただし保守性のため `pol/` 分離を推奨。
+また empirical quantity は
+\[
+D_{1,h,N}(\theta,T)^2
+=
+\frac1N\sum_{i=1}^N \|u_{h,i}^{N_T} - r_{h,i}^{N_T}\|_{L_h^2}^2
+\]
+とし、trajectory-averaged defect は
+\[
+\Delta_{\mathrm{dyn},h,N}(\theta;T)^2
+\approx
+\frac1N\sum_{i=1}^N \sum_{n=0}^{N_T} w_n \|R_{\theta,h}(r_{h,i}^n)\|_{L_h^2}^2
+\]
+の形にしてください。時間積分の既定値は trapezoidal rule にしてください。
 
----
+### 2.3 beta の意味
+\(\beta\) は **target generator の one-sided Lipschitz 定数** です。target は Burgers なので、beta の calibration では target の離散 generator
+\[
+F_h(z) = \nu_* z_{xx} - z z_x
+\]
+を使ってください。
 
-## 3. 数学仕様（Codex が迷わないための明文化）
+Burgers target の safe choice は
+\[
+\widehat M_{\mathcal K}
+=
+\max\{\|(u_i^n)_x\|_{L^\infty},\ \|(r_i^n)_x\|_{L^\infty}\}
+\]
+から
+\[
+\widehat\beta_{\mathrm{safe}} = \frac12 \widehat M_{\mathcal K}
+\]
+です。
 
-### 3.1 共通：領域・離散化・境界
-- 空間領域：`x ∈ [0,1]`（`fourier_1d.py` の grid と整合）
-- 離散点数：`s = 2**13 // sub`（現行と同様）
-- 境界条件：**周期境界**（spectral/FFT を使う前提）
-- 1サンプルの状態：`z ∈ R^s`
-
-### 3.2 1Dスペクトル微分（rFFT）
-- `dx = L / s`（L=1）
-- `k = 2π * rfftfreq(s, d=dx)`（shape: `s//2 + 1`）
-- `FFT(u) = û`
-- `u_x = irfft( (i k) û )`
-- `u_xx = irfft( -(k^2) û )`
-- `u_xxxx = irfft( (k^4) û )`
-
-### 3.3 リザーバPDE（3種類）と時間発展
-全て **バッチ**で計算できる形（`(B, s)`）で実装する。
-
-#### (A) reaction_diffusion（例：Allen–Cahn 型）
-- 方程式（推奨）：
-  - `z_t = ν z_xx + α z - β z^3`
-- 時間積分（推奨：semi-implicit Euler）
-  - 拡散項を implicit、反応項を explicit：
-    - `N(z) = α z - β z^3`
-    - `z_hat_next = (z_hat + dt * FFT(N(z))) / (1 + dt * ν k^2)`
-
-CLI パラメータ例：
-- `--rd-nu`（例 1e-3）
-- `--rd-alpha`（例 1.0）
-- `--rd-beta`（例 1.0）
-
-#### (B) ks（Kuramoto–Sivashinsky）
-- 標準形（周期）：
-  - `z_t + z z_x + z_xx + z_xxxx = 0`
-  - `=> z_t = - z z_x - z_xx - z_xxxx`
-- ここで
-  - `N(z) = - z z_x`
-  - 線形項のフーリエ表現：  
-    `L_hat = (k^2 - k^4)` （※上式に従う）
-- semi-implicit Euler：
-  - `z_hat_next = (z_hat + dt * FFT(N(z))) / (1 - dt * L_hat)`
-
-CLI パラメータ例：
-- `--ks-dt`（小さめ推奨、例 1e-3〜5e-4）
-- `--Tr`（例 0.5〜1.0）
-- （必要なら）`--ks-dealias`（2/3 ルールで高周波カット）
-
-#### (C) burgers（別パラメータBurgers）
-- 方程式：
-  - `z_t + z z_x = ν z_xx`
-  - `=> z_t = - z z_x + ν z_xx`
-- `N(z) = - z z_x`
-- semi-implicit Euler：
-  - `z_hat_next = (z_hat + dt * FFT(N(z))) / (1 + dt * ν k^2)`
-
-CLI パラメータ例：
-- `--res-burgers-nu`（例：ターゲットと違う値にする。例 0.05 など）
-- `--dt`（CFL的に小さめ推奨：s=1024なら 1e-3 程度）
-
-### 3.4 特徴抽出：multi-time + 観測
-- 観測時刻 `t_k` を K 個用意：
-  - CLI で
-    - `--K` と `--Tr` から等間隔に作る（推奨）
-    - または `--feature-times "0.1,0.2,0.5"` のように直接指定
-- 観測 `Obs` は最低限 2 種類：
-  1) `full`：状態全点（`Obs(z)=z`）
-  2) `points`：J点の点観測（固定インデックス）
-     - `--J` と `--sensor-mode equispaced|random`
-     - random の場合 `--sensor-seed` で固定
-
-- 特徴 `Φ(a)` の shape：
-  - `full` の場合：`M = K * s`
-  - `points` の場合：`M = K * J`
-
-### 3.5 拡張(3) ELM 固定ランダム非線形
-- `Φ ∈ R^{M}` に対し
-  - `A ∈ R^{H×M}`, `c ∈ R^{H}` を固定乱数で生成
-  - `h = σ( Φ A^T + c ) ∈ R^{H}`
-- activation `σ` は `tanh` / `relu` を選択可能に。
-
-CLI パラメータ例：
-- `--elm-h`（H、例 2048）
-- `--elm-activation tanh|relu`
-- `--elm-seed`
-- `--elm-weight-scale`（Aの標準偏差の係数。例 1/sqrt(M) を基準に調整）
-- `--elm-bias-scale`
-
-※ELMを無効化して `h=Φ` とするモードもあると便利：
-- `--use-elm 0/1`
-
-### 3.6 リッジ回帰（backprop-free 学習）
-- 学習データ：
-  - `X = h(a_i)` を並べて `X ∈ R^{N×H}`
-  - バイアス込み：`X̃ = [X, 1] ∈ R^{N×(H+1)}`
-  - `Y ∈ R^{N×s}`（Burgers は出力が全格子）
-- リッジ解：
-  - `W = (X̃^T X̃ + λ I)^(-1) X̃^T Y`
-- 実装は **逆行列を作らず**、Cholesky or solve を使う。
-
-大規模に備えて、`X̃` を全部保存せずに
-- `G = X̃^T X̃`（(H+1)×(H+1)）
-- `S = X̃^T Y`（(H+1)×s）
-をミニバッチで蓄積して最後に解く方式を実装する（推奨）。
-
-CLI：
-- `--ridge-lambda`（例 1e-6〜1e-2）
-- optional: `--ridge-dtype float64`（安定化）
+pairwise empirical mode では
+\[
+q_h(\eta^a, \eta^b)
+=
+\frac{\langle F_h(\eta^a)-F_h(\eta^b),\ \eta^a-\eta^b\rangle_h}{\|\eta^a-\eta^b\|_{L_h^2}^2}
+\]
+を多数の状態対で計算し、その最大値を使ってください。有限個の状態対しか見ないので、必要なら margin を足せるようにしてください。
 
 ---
 
-## 4. 実装要件（具体）
-### 4.1 `reservoir_burgers_1d.py` の要件
-- `fourier_1d.py` と同様のデータ読み込み CLI に対応する：
-  - `--data-mode`, `--data-file`, `--train-file`, `--test-file`, `--train-split`, `--seed`, `--shuffle`
-  - `--ntrain`, `--ntest`, `--sub`, `--batch-size`
-- 追加 CLI（必須）：
-  - `--reservoir reaction_diffusion|ks|burgers`
-  - `--Tr`, `--dt`
-  - `--K` または `--feature-times`
-  - `--obs full|points`
-  - `--J`, `--sensor-mode`, `--sensor-seed`（points 用）
-  - `--input-scale`, `--input-shift`（E(a) 用）
-  - ELM: `--use-elm`, `--elm-h`, `--elm-activation`, `--elm-seed`, `--elm-weight-scale`, `--elm-bias-scale`
-  - Ridge: `--ridge-lambda`, `--ridge-dtype float32|float64`
-  - `--device auto|cpu|cuda`
-  - `--out-dir`（結果・可視化出力先）
-  - `--save-model`（torch.save で辞書保存：W_out, A, c, sensor_idx, config など）
+## 3. 現状の問題点
 
-- 出力（標準出力）：
-  - train relL2 / test relL2（少なくとも test）
-  - 実行時間（任意）
-- 可視化（`viz_utils.py` を使用）：
-  - テストの per-sample relL2 ヒストグラム
-  - 代表サンプルの 1D プロット（GT vs pred + input）
-  - すべて PNG/PDF/SVG で保存
+### 3.1 metrics が分散している
+- `pol/model123_1d/metrics.py` は `rms_l2` しか持たない。
+- `pol/model123_1d/experiments.py` はこの `rms_l2` を使う。
+- `model123_burgers_1d.py` は自前で samplewise relative error を計算している。
+- `pol/model123_1d/error_decomposition.py` は別の `discrete_l2_h` を持っている。
 
-※本手法は epoch 学習がないので learning curve は不要（代わりに λ や reservoir 切替の結果をログ保存するのが良い）
+このため、主指標と補助指標が整理されていません。
 
-### 4.2 モジュール側の要件
-- `pol/reservoir_1d.py`
-  - 3種類の reservoir の共通インターフェース：
-    - `simulate(z0: Tensor[B,s], dt: float, Tr: float, obs_steps: list[int]) -> list[Tensor[B,s]]`
-  - `torch.no_grad()` 前提で高速に
-  - wave number `k` は (s, device, dtype) ごとに再計算しないようキャッシュする（推奨）
-- `pol/features_1d.py`
-  - 1) `obs_steps` の生成（K/Tr/dt or feature-times）
-  - 2) `Obs` 実装（full/points）
-  - 3) `Φ` の組み立て（concat）
-  - 4) （任意）`Φ` の標準化（train mean/std で固定）
-- `pol/elm.py`
-  - fixed random matrix A, bias c
-  - activation
-  - forward: `phi -> h`
-- `pol/ridge.py`
-  - `fit_ridge_streaming(dataloader, feature_fn, lambda, dtype) -> W`
-  - `predict(feature_fn, W)`
+### 3.2 error decomposition の summary が theorem-consistent ではない
+現状の `summary_rows["rhs_beta"]` は、実質的に
+\[
+\sqrt{\frac1N\sum_i (c_{\beta,T}\Delta_{\mathrm{dyn},i} + \Delta_{\mathrm{time},i})^2}
+\]
+に近い量です。しかし theorem-consistent に比較したいのは
+\[
+ e^{\beta T}\Delta_{\mathrm{init},N}
+ + c_{\beta,T}\Delta_{\mathrm{dyn},N}
+ + \Delta_{\mathrm{time},N}
+\]
+です。ここを直してください。
+
+### 3.3 beta_mode が誤解を招く
+現状の `beta_mode` は「beta の求め方」ではなく、保存する散布図の種類に近い意味になっています。これを直してください。
+
+### 3.4 current code は full-state special case なのに、それがコード上で明示されていない
+今回の error decomposition は `Q=I` の full-state special case です。一般の finite-dimensional Model 1 ではありません。このことをコードと出力 schema で明確にしてください。
 
 ---
 
-## 5. 受け入れ条件（Acceptance Criteria）
-Codex が実装した後、最低限これが満たされること：
+## 4. 実装スコープ
 
-1) **既存スクリプトが壊れていない**（`fourier_1d.py` などの動作はそのまま）
-2) `python -m py_compile reservoir_burgers_1d.py pol/*.py` が通る
-3) `python reservoir_burgers_1d.py --dry-run`（外部データ無しのランダム入力で shape/NaN チェック）が通る  
-   - dry-run は `--ntrain 8 --ntest 4 --sub 256` 相当の内部乱数データでも良い
-4) 実データがある環境では、例のコマンドで最後まで完走し、test relL2 を表示・図を保存できる：
+### 4.1 今回やること
+- `metrics.py` を誤差指標の一元モジュールにする。
+- `experiments.py` を absolute/relative の両方を shared metrics で出すようにする。
+- `model123_burgers_1d.py` を absolute/relative の両方を shared metrics で出すようにする。
+- `error_decomposition.py` を theorem-consistent に整理する。
+- `model1_error_decomposition_1d.py` の CLI を整理する。
+- テストを追加・更新する。
 
-例：
-```bash
-python reservoir_burgers_1d.py \
-  --data-mode single_split --data-file data/burgers_data_R10.mat \
-  --ntrain 1000 --ntest 100 --sub 8 --batch-size 20 \
-  --reservoir reaction_diffusion --Tr 1.0 --dt 0.01 --K 5 --obs full \
-  --use-elm 1 --elm-h 2048 --elm-activation tanh --elm-seed 0 \
-  --ridge-lambda 1e-4 --ridge-dtype float64 \
-  --out-dir visualizations/reservoir_burgers_rd
-```
+### 4.2 今回やらないこと
+- 一般の `Q_J` を持つ finite-dimensional Model 1 実装
+- `Delta_obs^(J)` の本実装
+- `reservoir_burgers_1d.py`, `rfm_burgers_1d.py`, `fourier_*.py`, `lowrank_operators/*` の大改修
 
-# AGENT.md — 既存PDEリザーバ実装に (1)特徴標準化 (2)Fourier/Projection観測 (3)関数値RFM(m×m) を追加する
-
-## 0. このリポジトリの現状（Codexが迷わないための前提）
-- 既に backprop-free の **PDEリザーバ + 観測(Obs) + (任意)ELM + リッジ回帰** が実装されている。
-- メインスクリプト: `reservoir_burgers_1d.py`
-- 共通モジュール: `pol/` 配下
-  - `pol/reservoir_1d.py` : 1D periodic reservoir PDE solver（reaction_diffusion / ks / burgers）
-  - `pol/features_1d.py` : 観測時刻グリッド、センサ、観測収集、flatten
-  - `pol/elm.py` : 固定ランダム ELM
-  - `pol/ridge.py` : streaming ridge（Gram/Cross蓄積→Cholesky solve）
-- `reservoir_burgers_1d.py` は `--dry-run` で外部データなしでも動く。
-
-本タスクは、**既存のFNO系スクリプトやデータ読み込み方式を壊さず**、`reservoir_burgers_1d.py` と `pol/` を中心に「3つの改善」を追加する。
+必要なら import 整理だけに留めてください。
 
 ---
 
-## 1. 目的（今回追加したい 3 点）
-### 1) --input-scale/shift と「特徴標準化（mean/std）」を実装に組み込む
-- `--input-scale/shift` は既に存在し、`phi_fn` 内で初期条件 `z0 = scale*x + shift` を作っている。
-- 追加したいのは **最終特徴（ELM後の h）** を学習データ統計（mean/std）で標準化してからリッジを解くこと。
+## 5. file-by-file 実装指示
 
-重要: 特徴標準化を “2パスで特徴抽出し直す” と PDEシミュレーションが倍になって重い。
-→ **1パスで蓄積した Gram/Cross から mean/std を復元し、解析的に標準化座標へ変換して解く** 実装にする。
+### 5.1 `pol/model123_1d/metrics.py`
+このファイルを誤差指標の shared module にしてください。
 
-### 2) 観測 Obs を Fourier / projection に拡張（点サンプル以外の線形汎関数）
-- 既存の `obs` は `full|points` のみ。
-- 追加する `obs`:
-  - `fourier`: 低周波 rFFT モードを取る（Re/Im を連結して実数特徴にする）
-  - `proj`: ランダムテスト関数（行列）への射影（線形汎関数）
-- いずれも backprop-free を壊さない（固定線形観測）。
+最低限、次の API を用意してください。
 
-### 3) ルート3：PDFのRFMそのもの（関数値ランダム特徴の線形結合）として組み直すスクリプトを追加
-- 出力が関数（格子関数）で、特徴も関数（格子関数）:
-  - `φ_j(a) ∈ R^s` を m 個用意
-  - 予測: `ŷ(a) = Σ_j α_j φ_j(a)`
-  - 学習は `m×m` の線形方程式を解く（出力次元 s に依存しない）
-- これを `rfm_burgers_1d.py` として新規追加する（既存 `reservoir_burgers_1d.py` は保持）。
-
----
-
-## 2. 数学仕様（実装を迷わないための完全定義）
-
-### 2.1 元の実装：PDEリザーバ + 観測 + (任意)ELM + リッジ
-入力 `a ∈ R^s`（Burgersデータの `a`）、出力 `y ∈ R^s`（`u`）。
-
-(1) エンコード（現状のまま）
-- `z0(a) = α a + β`
-  - α = `--input-scale`
-  - β = `--input-shift`（スカラー、全点にブロードキャスト）
-
-(2) リザーバPDE（既存実装）
-`pol/reservoir_1d.py` の `Reservoir1DSolver.simulate(z0, dt, Tr, obs_steps)` が返す
-`states = [z(t_k)]_{k=1..K}`（shape 各 `(B,s)`）を使う。
-
-(3) 観測（既存 + 拡張）
-各時刻状態 `z(t_k)` に線形観測 `Obs` を適用:
-- full: `Obs(z)=z ∈ R^s`
-- points: `Obs(z) = (z[p1],...,z[pJ]) ∈ R^J`
-- fourier: `Obs(z) = [Re(ẑ_0..ẑ_{J-1}), Im(ẑ_0..ẑ_{J-1})] ∈ R^{2J}`
-- proj: `Obs(z) = Ψ z ∈ R^J`（Ψ ∈ R^{J×s} 固定）
-
-(4) multi-time concat
-`Φ(a) = concat_k Obs(z(t_k)) ∈ R^M`
-
-(5) 任意の固定ランダム ELM
-`h(a) = σ(A Φ(a) + c) ∈ R^H`（ELM無効なら h=Φ）
-
-(6) リッジ回帰
-バイアス付き `x̃=[h,1]` として
-`min_W Σ_i || x̃_i^T W - y_i ||^2 + λ ||W||^2`（バイアス行は正則化しない）
-を streaming で解く（既存 `fit_ridge_streaming`）。
-
-### 2.2 追加：特徴標準化（mean/std）込みリッジ
-最終特徴 `h_i ∈ R^H` の平均と標準偏差（要素ごと）
-- `mean = (1/N) Σ h_i`
-- `std = sqrt( (1/N) Σ h_i^2 - mean^2 )`
-- `h_std = (h - mean)/(std+eps)`
-
-目的は `h_std` を使ってリッジを解くことだが、
-PDE計算を二度回さないため、**1パスで蓄積した Gram/Cross から標準化座標の Gram/Cross を構成して解く**。
-
-要求: 実装は `pol/ridge.py` に `fit_ridge_streaming_standardized(...)` を追加し、
-- 返す `W` は **raw特徴 h に直接作用**する重みで `predict_linear(h, W)` がそのまま使えること。
-- 追加で `W_std` / `mean` / `std` も返してよい（保存用）。
-
-### 2.3 ルート3：関数値RFM（m×m解法）
-関数値特徴を m 個:
-- `φ_j(a) ∈ R^s`（格子関数）
-予測:
-- `ŷ(a) = Σ_{j=1..m} α_j φ_j(a)`
-
-学習:
-- `min_α Σ_i || Σ_j α_j φ_j(a_i) - y_i ||^2 + λ ||α||^2`
-正規方程式:
-- `(G + λ I) α = b`
-- `G_{jℓ} = Σ_i <φ_j(a_i), φ_ℓ(a_i)>_Y`
-- `b_j = Σ_i <φ_j(a_i), y_i>_Y`
-ここで内積 `<f,g>_Y = Σ_n f_n g_n`（Δxを掛けなくてもOK。スケールはλに吸収される）
-
-実装上はサンプルごとに
-- `Φ_i ∈ R^{m×s}`（Φ_i[j,:] = φ_j(a_i)）
-として
-- `G += Φ_i Φ_i^T`（m×m）
-- `b += Φ_i y_i`（m）
-
----
-
-## 3. 実装要件（ファイル別の具体的タスク）
-**重要**: 既存CLIの互換性を壊さないこと（新機能OFFなら従来と同じ挙動）。
-
-### 3.1 `pol/features_1d.py` を拡張（Obs: fourier/proj）
-#### 変更1: `build_sensor_indices` を一般化
-- 既存は `obs='full'` なら 0..s-1 の index、`obs='points'` なら点センサindexを返す。
-- 拡張後:
-  - `obs='full'` : `torch.arange(s, long)` を返す（互換のため）
-  - `obs='points'`: 従来通り `LongTensor(J,)`
-  - `obs='fourier'`: `LongTensor(J,)` を返す（モード index 0..J-1）
-    - `J` の上限は `max_modes = s//2 + 1`
-  - `obs='proj'`: `FloatTensor(J,s)` を返す（投影行列 Ψ）
-    - 乱数は `sensor_seed` を使い、`torch.Generator(device="cpu")` で固定
-    - スケールは `1/sqrt(s)`（各射影が O(1) スケールになりやすい）
-
-`proj` と `fourier` では `sensor_mode` は実質不要だが、関数シグネチャは維持し、
-- `fourier`: `sensor_mode/sensor_seed` を無視
-- `proj`: `sensor_seed` のみ使用、`sensor_mode` 無視
-とする。
-
-#### 変更2: `collect_observations(states, obs, sensor_idx)` を拡張
-- `states` は `List[Tensor(B,s)]`
-- 追加分:
-  - `fourier`:
-    - `z_hat = torch.fft.rfft(z, dim=-1)`（complex）
-    - `sel = z_hat.index_select(dim=-1, index=modes)`（(B,J) complex）
-    - 実数化して `torch.cat([sel.real, sel.imag], dim=-1)`（(B,2J)）
-  - `proj`:
-    - `proj = sensor_idx.to(z.device, dtype=z.dtype)`（(J,s)）
-    - `obs = z @ proj.t()`（(B,J)）
-
-`flatten_observations` は現状の concat でよい。
-
----
-
-### 3.2 `pol/ridge.py` に `fit_ridge_streaming_standardized` を追加
-追加関数シグネチャ（推奨）:
 ```python
-@torch.no_grad()
-def fit_ridge_streaming_standardized(
-    dataloader,
-    feature_fn: Callable[[torch.Tensor], torch.Tensor],
-    ridge_lambda: float,
+def discrete_l2h_norm(values: torch.Tensor, *, domain_length: float = 1.0) -> torch.Tensor:
+    ...
+
+def per_sample_abs_l2h_error(pred: torch.Tensor, target: torch.Tensor, *, domain_length: float = 1.0) -> torch.Tensor:
+    ...
+
+def dataset_abs_l2h_error(pred: torch.Tensor, target: torch.Tensor, *, domain_length: float = 1.0) -> float:
+    ...
+
+def per_sample_rel_l2h_error(
+    pred: torch.Tensor,
+    target: torch.Tensor,
     *,
-    dtype: torch.dtype = torch.float64,
-    regularize_bias: bool = False,
-    eps: float = 1e-6,
-) -> Dict[str, torch.Tensor]:
+    domain_length: float = 1.0,
+    eps: float = 1e-12,
+) -> torch.Tensor:
     ...
-必須要件
 
-feature_fn が PDEシミュレーションを含む想定なので、2パス禁止（特徴を再計算しない）。
-
-実装は以下の手順（解析変換）で 1 パスにする:
-
-raw 特徴 phi の x_aug=[phi,1] で Gram/Cross を蓄積:
-
-gram += x_aug.T @ x_aug
-
-cross += x_aug.T @ y
-
-n = gram[-1,-1]（サンプル数）
-
-sum_phi = gram[:d,-1]、mean = sum_phi/n
-
-sum_sq = diag(gram[:d,:d])、var = sum_sq/n - mean^2、std = sqrt(max(var,0))
-
-標準化座標の Gram/Cross を構成:
-
-gram_center = gram_ff - outer(sum_phi,sum_phi)/n
-
-gram_scaled = inv_std[:,None] * gram_center * inv_std[None,:]
-
-gram_std[:d,:d]=gram_scaled, gram_std[-1,-1]=n（他は0）
-
-cross_center = cross_f - mean[:,None]*cross_b[None,:]
-
-cross_scaled = inv_std[:,None]*cross_center
-
-cross_std[:d,:]=cross_scaled, cross_std[-1,:]=cross_b
-
-標準化座標でリッジを解いて w_std を得る
-
-raw特徴に作用する重み w に変換（predict_linear互換）
-
-w_features = inv_std * w_std_features
-
-w_bias = w_std_bias - (mean*inv_std)^T w_std_features
-
-返り値の辞書には最低限 W を含める。
-追加で W_std, mean, std, gram, cross, gram_std, cross_std を入れてよい（保存・デバッグ用）。
-
-3.3 pol/__init__.py を更新
-
-fit_ridge_streaming_standardized を export する。
-
-3.4 reservoir_burgers_1d.py を更新
-CLI変更（互換維持）
-
---obs の choices を ("full","points","fourier","proj") に拡張し、helpに説明を書く。
-
-次の新引数を追加:
-
---standardize-features : 0/1（default 0）
-
---feature-std-eps : float（default 1e-6）
-
-import を更新:
-
-from pol.ridge import fit_ridge_streaming, fit_ridge_streaming_standardized, predict_linear
-
-学習部分の分岐
-
-args.standardize_features==1 のとき
-
-fit_ridge_streaming_standardized(...) を使う（eps=args.feature_std_eps）
-
-それ以外は従来通り fit_ridge_streaming(...)
-
-モデル保存の拡張（任意だが推奨）
-
-ridge_state に mean/std/W_std が含まれる場合は保存辞書にも入れる:
-
-feature_mean, feature_std, W_out_std
-
-注: fit_ridge_streaming_standardized が返す W は raw特徴に作用するので、
-推論側（run_eval）や predict_linear の呼び出しを変えないこと。
-
-3.5 新規スクリプト rfm_burgers_1d.py を追加（関数値RFM）
-目的
-
-reservoir_burgers_1d.py の「ベクトル特徴→行列readout」ではなく、
-関数値特徴 F(x)=(B,m,s) を作り、m×m の線形方程式で α を学習する別ルートを実装。
-
-仕様（必須）
-
-データ読み込み CLI と --dry-run は reservoir_burgers_1d.py と同等の流儀で実装する。
-
-主要CLI:
-
-データ: --data-mode, --data-file, --train-file, --test-file, --train-split, --seed, --shuffle, --ntrain, --ntest, --sub, --batch-size, --dry-run
-
-リザーバ: --reservoir, --Tr, --dt, --ks-dt, --K, --feature-times, --rd-*, --res-burgers-nu, --ks-dealias
-
-エンコード: --input-scale, --input-shift
-
-RFM: --m, --rfm-activation (tanh|relu|identity), --rfm-seed, --rfm-weight-scale, --rfm-bias-scale
-
-rfm-weight-scale<=0 のとき 1/sqrt(K_obs) を使う
-
-ridge: --ridge-lambda, --ridge-dtype (float32|float64)
-
-実行: --device, --out-dir, --save-model
-
-特徴関数（関数値）:
-
-z0 = input_scale*x + input_shift
-
-states = reservoir.simulate(z0, dt, Tr, obs_steps)
-
-Z = stack(states, dim=1) -> (B,K_obs,s)
-
-固定乱数 A(m,K_obs), b(m) を用意
-
-mixed = einsum("bks,mk->bms", Z, A) + b.view(1,m,1)
-
-activation を点ごとに適用 -> F(x)=(B,m,s)
-
-学習（m×m）:
-
-gram += einsum("bms,bns->mn", F, F)（m×m）
-
-rhs += einsum("bms,bs->m", F, y)（m）
-
-alpha = solve((gram+λI), rhs)（Cholesky推奨）
-
-予測:
-
-yhat = einsum("m,bms->bs", alpha, F)
-
-保存:
-
-alpha, A_time_mix, b_time_mix, obs_times, obs_steps, config, reservoir_config
-
-可視化:
-
-既存 viz_utils.py の plot_error_histogram, plot_1d_prediction を reservoir_burgers_1d.py と同様に使って良い（失敗しても例外握りつぶし）。
-
-4. README更新（推奨）
-
-README.md の reservoir_burgers_1d.py セクションを更新:
-
---obs full|points|fourier|proj に更新
-
---standardize-features, --feature-std-eps を追加
-
-実行例を追加（dry-runでOK）:
-
---obs fourier --J 16 --standardize-features 1
-
---obs proj --J 16 --sensor-seed 1 --standardize-features 1
-
-rfm_burgers_1d.py の説明と実行例を追加
-
-5. テスト（必須）
-
-pytest が通ること。
-
-既存 tests/test_reservoir_smoke.py を以下に拡張する:
-
-obs=fourier の shape テスト
-
-s=128 のとき max_modes=65、例えば J=8 なら各時刻 (B,16)、flatten で (B, K*16)
-
-obs=proj の shape テスト
-
-build_sensor_indices が (J,s) float を返すこと
-
-fit_ridge_streaming_standardized の整合性テスト
-
-小さなダミー特徴 phi = x[:, :10] で
-
-pred_raw = predict_linear(phi, W_raw)
-
-pred_std = predict_linear((phi-mean)/(std+eps), W_std)
-
-pred_raw と pred_std が十分近いこと（allclose）
-
-テストは外部データ不要で動くこと（dry-run相当の乱数データのみ）。
-
-6. 受け入れ条件（Definition of Done）
-
-python -m pytest -q が成功する。
-
-python reservoir_burgers_1d.py --dry-run --ntrain 8 --ntest 4 --sub 256 --obs fourier --J 16 --standardize-features 1 がクラッシュせず実行できる。
-
-python reservoir_burgers_1d.py --dry-run --ntrain 8 --ntest 4 --sub 256 --obs proj --J 16 --sensor-seed 1 --standardize-features 1 がクラッシュせず実行できる。
-
-python rfm_burgers_1d.py --dry-run --ntrain 8 --ntest 4 --sub 256 --m 32 --K 3 --Tr 0.1 --dt 0.01 がクラッシュせず実行できる。
-
-新機能を OFF にした場合（標準化OFF、obsがfull/points）は従来の挙動が変わらない。
-
-新規追加/変更ファイルに __pycache__/ や .pytest_cache/ などの生成物をコミットしない。
-
-7. 実装メモ（Codex向け）
-
-dtype/precision:
-
-リッジ解法は --ridge-dtype float64 をデフォルトにし、Gram/Cross/Cholesky はその dtype で計算する。
-
-device:
-
-観測のための index / proj 行列は .to(device) でGPUに移して良い。
-
-乱数生成は torch.Generator(device="cpu") を使い、生成後に .to(device) する（再現性が高い）。
-
-fourier観測は complex なので、必ず Re/Im を実数結合して返すこと。
-
-# AGENT.md — 入力エンコーダ強化（正規化/混合/非線形）＋ forcing注入 を実装する
-
-## 0. リポジトリ現状（Codexが迷わないため）
-このリポジトリは backprop-free の PDE リザーバ手法を実装している。
-
-主要ファイル:
-- `reservoir_burgers_1d.py`
-  - PDEリザーバ → 観測 (obs) → flatten → (任意)ELM → ridge
-  - `obs` は `full|points|fourier|proj` に対応済み
-  - `--standardize-features` により `fit_ridge_streaming_standardized` を使用可能
-- `rfm_burgers_1d.py`
-  - 関数値RFM（m×m Gram）を実装済み（Z(t_k)の時間チャネルをランダム混合し関数値特徴を作る）
-- `pol/reservoir_1d.py`
-  - 1D periodic reservoir PDE solver（reaction_diffusion / burgers / ks）
-- `pol/features_1d.py`
-  - time grid / obs / flatten
-- `pol/ridge.py`
-  - streaming ridge + standardized ridge（1パス）
-- `tests/test_reservoir_smoke.py`
-  - obs fourier/proj と standardized ridge のテストあり
-
-今回のタスクは **入力エンコーダ（z0の作り方）を大幅に強化**し、さらに **入力をforcingとして注入**できるようにする。
-既存の機能（観測、ELM、ridge、RFM）は壊さないこと（新機能OFFなら従来挙動と一致）。
-
----
-
-## 1. ゴール（実装したい内容：2.1〜2.4 全部）
-以下をすべて実装し、CLIで切り替えられるようにする。
-
-### 1.1 まず効きやすい：正規化・脱平均・クリップ（ほぼノーリスク）
-(A) サンプル毎の平均除去（定数モードを落とす）
-- `center`: `x <- x - mean(x, dim=-1, keepdim=True)`
-
-(B) サンプル毎の標準化（エネルギー揃え）
-- `standardize`: `x <- (x - mu(x)) / (std(x) + eps)`（mu/std はサンプルごと）
-
-(C) クリップ / 飽和非線形
-- `tanh`: `x <- tanh(gamma * x)`
-- `clip`: `x <- clip(x, [-c, c])`
-
-### 1.2 “空間を混ぜる” 固定線形エンコーダ
-(A) 固定Fourierフィルタ（帯域制御）
-- `fourier_filter`: `x <- irfft( g(k) * rfft(x) )`
-- g(k) には `lowpass/bandpass/randphase/randamp/randcomplex` を用意
-
-(B) ランダム円周畳み込み（固定Conv）
-- `randconv`: `x <- w * x`（周期畳み込み）
-- 実装は FFT（`irfft(rfft(x) * rfft(w_padded))`）推奨
-
-### 1.3 固定“非線形”エンコーダ
-(A) PDFっぽいランダム特徴エンコーダ（式(3.5)系）
-- `fourier_rfm`: `x <- combine_{c=1..C} σ( irfft( χ(k) * rfft(x) * rfft(theta_c) ) )`
-- `theta_c` はランダム固定
-- `χ(k)` は帯域マスク（kmin〜kmax）
-- combine は `sum/mean` を実装
-- さらに「複数回リザーバを回して特徴をconcatする」 `ensemble` モードも実装する（計算は増えるが強い）
-
-(B) 多項式・微分入り
-- `poly_deriv`: `x <- a1*x + a2*x^2 + a3*x_x`
-- `x_x` はスペクトル微分 `irfft( (i*k) * rfft(x) )`
-
-### 1.4 入力を forcing として注入（RC定番の強化）
-- `forcing`: リザーバPDEの右辺に入力由来の外力を加える
-  - `z_t = F(z) + γ * f(a)`
-- `f(a)` のソースを選べるようにする:
-  - `raw`: 元入力
-  - `pre`: エンコーダ本体の出力（スケール/シフト前）
-  - `z0`: リザーバ初期条件（スケール/シフト・非線形後）
-- `forcing` は
-  - `constant`: 全時間で注入
-  - `window`: `[tstart, tend]` の窓だけ注入
-  をサポート
-
----
-
-## 2. 数式仕様（実装の定義を固定する）
-
-入力 `a ∈ R^s`（バッチで `x`）、初期条件 `z0(a)` を以下で作る。
-
-### 2.1 エンコーダの処理順（この順で固定）
-**処理順は固定**として実装する（順序が曖昧だと検証不能になるため）。
-
-(0) `x_raw = x`（(B,s)）
-
-(1) optional: center / standardize（サンプルごと）
-- center:
-  - `x <- x - mean(x)`
-- standardize:
-  - `x <- (x - mean(x)) / (std(x) + eps)`
-
-(2) main encoder（--encoder で選択、1つだけ適用）
-- linear:
-  - `x <- x`（何もしない）
-- fourier_filter:
-  - `x <- irfft( g(k) * rfft(x) )`
-- randconv:
-  - `x <- irfft( rfft(x) * rfft(w_padded) )`
-- fourier_rfm:
-  - `x <- combine_{c=1..C} σ( irfft( χ(k) * rfft(x) * rfft(theta_c) ) )`
-  - **ensembleモード**では「xを返す」のではなく `z0_list` をC本返す（後述）
-- poly_deriv:
-  - `x <- a1*x + a2*x^2 + a3*x_x`（x_xはスペクトル微分）
-
-(3) affine（既存互換）
-- `x_aff = input_scale * x + input_shift`（input_shiftはスカラーで全点加算）
-
-(4) optional: saturating nonlinearity（安定化）
-- none: 何もしない
-- tanh: `z0 = tanh(gamma * x_aff)`
-- clip: `z0 = clip(x_aff, [-c, c])`
-
-通常はこの `z0` を `reservoir.simulate(z0, ...)` に渡す。
-
-### 2.2 fourier_rfm の ensemble モード（特徴concat）
-`encoder=fourier_rfm` かつ `--encoder-fourier-rfm-mode ensemble` のとき
-- 初期条件は `z0_c` を C本作る（各theta_cで別）
-- `reservoir_burgers_1d.py`:
-  - 各 `z0_c` で `simulate` し観測→flatten
-  - flatten結果（ベクトル特徴）を `concat` して最終特徴にする
-- `rfm_burgers_1d.py`:
-  - 各 `z0_c` で `simulate` し `Z_c`（(B,K,s)）を得る
-  - `Z_total = concat(Z_1,...,Z_C, dim=1)`（(B,C*K,s)）
-  - time-mix 行列 `A` の入力次元も `C*K` にする（k_obs_total）
-
-### 2.3 forcing の定義
-forcing field `f` を選択し、`forcing = forcing_gamma * f` を注入する。
-
-- `forcing_mode=none` or `forcing_gamma==0` -> forcing無効
-- `forcing_mode=constant` -> 全 step に注入
-- `forcing_mode=window` -> stepが `[start_step, end_step]` に入るときだけ注入
-  - `start_step = max(1, round(tstart/dt))`
-  - `end_step = min(max_obs, round(tend/dt))`
-
-solver側は semi-implicit Euler の **明示項**に forcing を足す（最小改造）。
-例（reaction_diffusion の既存式）:
-- 既存: `rhs_hat = z_hat + dt * rfft(nonlinear)`
-- 変更: `rhs_hat = z_hat + dt * ( rfft(nonlinear) + forcing_hat )`（forcingを使うstepのみ）
-※ `forcing_hat = rfft(forcing)` は `simulate` の外側で1回だけ計算して使い回す（毎step rfftしない）
-
----
-
-## 3. 実装要件（具体的変更点）
-
-### 3.1 新規モジュール `pol/encoder_1d.py` を追加する（推奨・重複回避）
-目的: `reservoir_burgers_1d.py` と `rfm_burgers_1d.py` の両方で同一エンコーダを使えるようにする。
-
-#### API（これに合わせて実装）
-```python
-from dataclasses import dataclass
-from typing import List, Optional
-import torch
-
-@dataclass
-class EncoderOutputs:
-    x_raw: torch.Tensor              # (B,s) device上 float32
-    x_pre_list: List[torch.Tensor]   # (B,s) のリスト: step(2)終了時点（affine前）
-    z0_list: List[torch.Tensor]      # (B,s) のリスト: reservoirに入れる初期条件（step(4)後）
-
-class FixedEncoder1D:
-    def __init__(self, *, s: int, device: torch.device, dtype: torch.dtype, args: argparse.Namespace): ...
-    @torch.no_grad()
-    def encode(self, x_batch: torch.Tensor) -> EncoderOutputs: ...
+def dataset_rel_l2h_mean(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    domain_length: float = 1.0,
+    eps: float = 1e-12,
+) -> float:
+    ...
 ```
 
-要件:
+実装上の注意:
+- current repo は 1D periodic uniform grid なので、`domain_length=1.0` を既定でよいです。
+- 最後の空間軸だけを離散空間軸として扱えば十分です。
+- `rms_l2` は **後方互換の alias** として残してください。意味は `dataset_abs_l2h_error` と同じにしてください。
 
-乱数を使うエンコーダ（fourier_filter の rand系 / randconv / fourier_rfm）は 初期化時にパラメータを固定生成し保持する（バッチ毎に再生成しない）。
+### 5.2 `pol/model123_1d/experiments.py`
+ここでは `metrics.py` からだけ誤差を計算してください。
 
-乱数生成は torch.Generator(device="cpu") + seed で再現性を担保し、作ったテンソルを .to(device) する。
+要求:
+- absolute metric と relative metric を両方計算して `metrics` dict に入れる。
+- absolute metric を main として明示する。
+- 既存の `E1_train`, `E1_test`, `E2_train`, ... は壊さないでください。これらは absolute metric の legacy alias として残して構いません。
+- 追加 key はたとえば
+  - `E1_train_abs_l2h`
+  - `E1_test_abs_l2h`
+  - `E1_train_rel_l2h_mean`
+  - `E1_test_rel_l2h_mean`
+  のように明示的な名前にしてください。
 
-encode() は必ず torch.no_grad() で動くこと。
+### 5.3 `model123_burgers_1d.py`
+ここでも `metrics.py` を使うようにしてください。
 
-fourier_filter の g(k) の作り方（最低限これを実装）
+要求:
+- train/test について absolute metric と relative metric の両方を出す。
+- 標準出力では absolute metric を先に出し、その後 relative metric を出す。
+- `run_config.json` には
+  - `train_absL2h`
+  - `test_absL2h`
+  - `train_relL2`
+  - `test_relL2`
+  を最低限保存してください。
+- `train_relL2`, `test_relL2` は既存 sweep script 互換のため残してください。
+- ヒストグラムは relative でもよいですが、可能なら absolute 版も追加してください。最低でも JSON schema だけは整えてください。
 
-k は “周波数インデックス”で良い（0..s//2）。物理k(2π…)は不要。
+### 5.4 `pol/model123_1d/error_decomposition.py`
+このファイルが今回の中心です。
 
-lowpass:
+#### 5.4.1 scope
+- ここでは **full-state special case** を扱う。
+- したがって現時点では `Q = I`, `E = I` とみなしてよい。
+- ただし将来の拡張を見据え、`Delta_init` は field として残してよい。現在値は 0 でよい。
 
-mask = (idx <= kmax)
+#### 5.4.2 trajectory representation
+現在は step 1 から `N_t` までの状態しか保存していません。これを改め、**t=0 の初期状態も含めた trajectory** を扱ってください。
 
-g = mask.to(complex)
+推奨:
+- `target_states[n]` が時刻 `t_n = n*dt` の target state
+- `surrogate_states[n]` が時刻 `t_n = n*dt` の surrogate state
+- shape は `(N_t + 1, N, s)`
+- `n=0` は初期状態
 
-bandpass:
+こうしておくと trapezoidal rule を自然に実装できます。
 
-mask = (kmin <= idx <= kmax)
+#### 5.4.3 time quadrature
+`Delta_dyn` の時間積分は trapezoidal rule を既定にしてください。
 
-randphase:
+推奨 helper:
 
-phase ~ Uniform(0, 2π) をサンプルし g = mask * exp(i*phase)
-
-ただし idx==0 と idx==s//2（Nyquist, sが偶数のため存在）では位相=0にして gを実数にする
-
-randamp:
-
-amp = 1 + amp_std * randn（real）
-
-g = mask * amp（complexにcastして乗算）
-
-randcomplex:
-
-phase ~ Uniform(0,2π), amp = abs(randn) * amp_std など
-
-g = mask * amp * exp(i*phase)（0/Nyquistは実数）
-
-オプションで --encoder-fourier-output-scale を掛けてよい。
-
-randconv の w の作り方
-
-kernel長 L = --encoder-randconv-kernel-size
-
-w_small ~ Normal(0, std)（L）
-
-normalize:
-
-none: 何もしない
-
-l1: w_small /= (sum(abs(w_small)) + eps)
-
-l2: w_small /= (sqrt(sum(w_small^2)) + eps)
-
-w_padded は長さsにゼロパディングし、周期畳み込みのために “中心が0番” になるようにロール（FFT畳み込みでの位相ずれを避ける）
-
-例: shift = -L//2 で torch.roll(w_padded, shifts=shift)
-
-w_hat = rfft(w_padded) を保持し、x_hat*w_hat で畳み込み
-
-fourier_rfm の theta
-
-theta_c ~ Normal(0, theta_scale) を C本生成（長さs）
-
-theta_hat_c = rfft(theta_c) を保持
-
-chi_mask は bandpass と同様（kmin,kmax）
-
-conv_c = irfft( chi * x_hat * theta_hat_c )
-
-activation: tanh/relu/identity を実装
-
-combine（sum/mean）:
-
-sum: x = (1/sqrt(C)) * Σ conv_c_act（推奨: 1/sqrt(C) でスケール安定）
-
-mean: x = (1/C) * Σ conv_c_act
-
-ensemble:
-
-x_pre_list と z0_list をC本にする（後段がconcatできるように）
-
-poly_deriv
-
-k = 2π * rfftfreq(s, d=1/s) を使い、x_x = irfft((1j*k) * rfft(x))
-
-x = a1*x + a2*x^2 + a3*x_x
-
-3.2 pol/reservoir_1d.py を拡張（forcing注入）
-
-Reservoir1DSolver.simulate(...) に以下を追加（後方互換必須）:
-
-def simulate(self, z0, dt, Tr, obs_steps, *, forcing: Optional[torch.Tensor] = None,
-             forcing_steps: Optional[tuple[int,int]] = None) -> List[torch.Tensor]:
+```python
+def make_time_quadrature_weights(num_steps: int, dt: float, rule: str = "trapezoid") -> torch.Tensor:
     ...
-
-要件:
-
-forcingが与えられたら shapeが z0 と同じ (B,s) であることを確認
-
-forcing_hat = rfft(forcing) を 1回だけ計算して使い回す
-
-forcing_steps が None の場合は全stepで注入
-
-window の場合 start<=step<=end のときだけ注入
-
-KS で ks_dealias がONなら forcing_hat も同じmaskで dealias してよい（推奨）
-
-実装方法（最小改造）:
-
-_step_reaction_diffusion/_step_burgers/_step_ks に forcing_hat: Optional[Tensor]=None 引数を追加し、
-
-rhs_hat 構成時に + dt*forcing_hat（注入するstepのみ）を足す
-
-あるいは step関数はそのままで、simulate側で “注入するstepではzをz+dt*forcing” してもよいが、FFT再計算が増えるので非推奨
-
-3.3 reservoir_burgers_1d.py を更新（エンコーダ＆forcing＆ensemble concat）
-CLI追加（既存引数は維持）
-
-追加する引数（例。名前は揃えること）:
-
-基本:
-
---encoder choices: linear|fourier_filter|randconv|fourier_rfm|poly_deriv（default linear）
-
---encoder-center (0/1, default 0)
-
---encoder-standardize (0/1, default 0)
-
---encoder-standardize-eps (float, default 1e-6)
-
-post-nonlinearity:
-
---encoder-post choices: none|tanh|clip（default none）
-
---encoder-tanh-gamma (float, default 1.0)
-
---encoder-clip-c (float, default 3.0)
-
-fourier_filter params:
-
---encoder-fourier-mode choices: lowpass|bandpass|randphase|randamp|randcomplex（default lowpass）
-
---encoder-fourier-kmin int default 0
-
---encoder-fourier-kmax int default 16
-
---encoder-fourier-seed int default 0
-
---encoder-fourier-amp-std float default 0.5
-
---encoder-fourier-output-scale float default 1.0
-
-randconv params:
-
---encoder-randconv-kernel-size int default 33
-
---encoder-randconv-seed int default 0
-
---encoder-randconv-std float default 1.0
-
---encoder-randconv-normalize choices: none|l1|l2 default l2
-
-fourier_rfm params:
-
---encoder-fourier-rfm-C int default 1
-
---encoder-fourier-rfm-mode choices: sum|mean|ensemble default sum
-
-sum/mean は “1本のz0に合成”
-
-ensemble は “C本のz0を返す”
-
---encoder-fourier-rfm-activation choices: tanh|relu|identity default tanh
-
---encoder-fourier-rfm-kmin int default 0
-
---encoder-fourier-rfm-kmax int default 16
-
---encoder-fourier-rfm-seed int default 0
-
---encoder-fourier-rfm-theta-scale float default 1.0
-
---encoder-fourier-rfm-output-scale float default 1.0
-
-poly_deriv params:
-
---encoder-poly-a1 float default 1.0
-
---encoder-poly-a2 float default 0.0
-
---encoder-poly-a3 float default 0.0
-
-forcing params:
-
---forcing-mode choices: none|constant|window default none
-
---forcing-gamma float default 0.0
-
---forcing-source choices: raw|pre|z0 default pre
-
---forcing-tstart float default 0.0
-
---forcing-tend float default 0.0
-
-validation要件:
-
-kmax/kmin は 0 <= kmin <= kmax <= s//2 を満たすこと
-
-forcing window のとき tstart <= tend、かつ tstart,tend が [0, Tr] に収まること（端は許容）
-
-forcing_mode != none なのに forcing_gamma == 0 の場合は警告（or none扱い）
-
-実装方針
-
-FixedEncoder1D を main() 内で1回だけ生成
-
-phi_fn は以下の流れにする:
-
-enc = encoder.encode(x_batch)（enc.z0_list が1本 or C本）
-
-forcing を構成（必要なら）:
-
-source = raw/pre/z0 を選び、forcing = forcing_gamma * source
-
-ensemble時:
-
-raw: 全member共通
-
-pre/z0: memberごと
-
-windowの場合は forcing_steps=(start_step,end_step) を作る
-
-各 member について:
-
-states = reservoir.simulate(z0_member, dt, Tr, obs_steps, forcing=forcing_member, forcing_steps=...)
-
-obs_list = collect_observations(...)
-
-phi_member = flatten_observations(obs_list)
-
-member が複数なら phi = concat([phi_member], dim=-1)（特徴次元を増やす）
-
-ELM があれば elm(phi)、なければ phi
-
-※ 既存の NaN probe チェックは ensemble 全体で行う。
-
-3.4 rfm_burgers_1d.py を更新（同じエンコーダ＆forcing、ensembleはKチャネル拡張）
-
-reservoir_burgers_1d.py と同じ encoder/forcing CLI を追加
-
-FixedEncoder1D を使い、function_features 内で:
-
-enc = encoder.encode(x_batch)
-
-memberごとに simulate（forcingも同様）
-
-Z_member = stack(states, dim=1) -> (B,K,s)
-
-ensembleなら Z_total = cat(Z_members, dim=1) -> (B,C*K,s)
-
-以後の mixed = einsum("bks,mk->bms", Z_total, A)+b を適用
-
-A の生成は k_obs_total = len(obs_steps) * num_members を使う
-
-weight_scale default が 1/sqrt(k_obs_total) になるようにする（現在ロジックを拡張）
-
-3.5 pol/__init__.py（任意だが推奨）
-
-FixedEncoder1D と EncoderOutputs を export してよい（必須ではない）
-
-4. テスト追加（必須）
-
-外部データなしで pytest が通ること。
-
-4.1 新規テスト tests/test_encoder_1d.py を追加（推奨）
-
-以下を軽量にテストする（sは64や128でOK）:
-
-center/standardize の性質
-
-center後に abs(mean) < 1e-5 程度
-
-standardize後に std が ~1（ただし入力が定数の場合はstd=0なのでepsで扱う。テスト入力はランダムにする）
-
-tanh/clip の有界性
-
-tanh: |z0| <= 1
-
-clip: z0 in [-c,c]
-
-fourier_filter の決定性
-
-同じ seed で encoderを2回作り、同じ入力で同じ出力（allclose）
-
-randconv の決定性＆shape
-
-同上
-
-poly_deriv の導関数項チェック
-
-定数入力 x=const のとき、x_x がほぼ0（allclose）になることを確認
-
-例: a3=1, a1=a2=0 で出力がほぼ0
-
-fourier_rfm の sum/ensemble shape
-
-sum: z0_list が1本
-
-ensemble: z0_list がC本
-
-4.2 forcing のテスト（tests/test_reservoir_smoke.py に追加でもOK）
-
-同じ z0 で forcing無しと forcing有りで simulate したとき、観測状態が一致しない（norm差 > 0）ことを確認
-
-forcingは小さすぎると差が出ない可能性があるので gamma=0.5 等でOK
-
-5. README 更新（推奨）
-
-README.md に以下を追加:
-
-encoderの概要（center/standardize、fourier_filter、randconv、fourier_rfm、poly_deriv、tanh/clip）
-
-forcingの概要（constant/window, source）
-
-実行例（dry-runでOK）
-
-center+standardize+tanh:
-
-python reservoir_burgers_1d.py --dry-run --encoder linear --encoder-center 1 --encoder-standardize 1 --encoder-post tanh --encoder-tanh-gamma 1.0
-
-fourier_filter randphase:
-
-python reservoir_burgers_1d.py --dry-run --encoder fourier_filter --encoder-fourier-mode randphase --encoder-fourier-kmax 16 --encoder-fourier-seed 0
-
-fourier_rfm ensemble:
-
-python reservoir_burgers_1d.py --dry-run --encoder fourier_rfm --encoder-fourier-rfm-mode ensemble --encoder-fourier-rfm-C 4
-
-forcing constant:
-
-python reservoir_burgers_1d.py --dry-run --forcing-mode constant --forcing-gamma 0.5 --forcing-source pre
-
-6. 受け入れ条件（Definition of Done）
-
-python -m pytest -q が成功する
-
-既存の3コマンド（以前の改善点）も引き続き動く:
-
-python reservoir_burgers_1d.py --dry-run --ntrain 8 --ntest 4 --sub 256 --obs fourier --J 16 --standardize-features 1
-
-python reservoir_burgers_1d.py --dry-run --ntrain 8 --ntest 4 --sub 256 --obs proj --J 16 --sensor-seed 1 --standardize-features 1
-
-python rfm_burgers_1d.py --dry-run --ntrain 8 --ntest 4 --sub 256 --m 32 --K 3 --Tr 0.1 --dt 0.01
-
-追加機能のdry-runがクラッシュせず動く:
-
-python reservoir_burgers_1d.py --dry-run --encoder linear --encoder-center 1 --encoder-standardize 1 --encoder-post tanh --encoder-tanh-gamma 1.0
-
-python reservoir_burgers_1d.py --dry-run --encoder fourier_filter --encoder-fourier-mode randphase --encoder-fourier-kmax 16 --encoder-fourier-seed 0
-
-python reservoir_burgers_1d.py --dry-run --encoder fourier_rfm --encoder-fourier-rfm-mode ensemble --encoder-fourier-rfm-C 3
-
-python reservoir_burgers_1d.py --dry-run --forcing-mode window --forcing-gamma 0.5 --forcing-source pre --forcing-tstart 0.02 --forcing-tend 0.06
-
-python rfm_burgers_1d.py --dry-run --encoder poly_deriv --encoder-poly-a1 1.0 --encoder-poly-a2 0.2 --encoder-poly-a3 0.1 --forcing-mode constant --forcing-gamma 0.2 --forcing-source pre
-
-新機能をOFFにした場合（encoder=linear, center=0, standardize=0, post=none, forcing=none）、
-z0 = input_scale*x + input_shift の従来挙動と一致する
-
-生成物（pycache 等）をコミットしない
+```
+
+既定値は `rule="trapezoid"` でよいです。必要なら `left` もサポートして構いませんが、既定値は trap にしてください。
+
+#### 5.4.4 beta redesign
+`beta_mode` を本当の意味で beta estimator にしてください。choices は次を推奨します。
+
+- `zero`
+- `analytic_safe`
+- `analytic_safe_poincare`
+- `empirical_pairwise`
+- `fixed`
+
+別 helper を作ってください。
+
+```python
+def compute_beta(
+    *,
+    calibration_target_states: torch.Tensor,
+    calibration_surrogate_states: torch.Tensor,
+    cfg: ErrorDecompositionConfig,
+) -> tuple[float, dict[str, Any]]:
+    ...
+```
+
+戻り値の `details` には、少なくとも mode, chosen beta, `M_K_hat` or pairwise max などの diagnostic を入れてください。
+
+#### 5.4.5 beta の具体計算
+
+##### zero
+\[
+\beta = 0
+\]
+
+##### analytic_safe
+1. calibration trajectory 上の全 state について spectral derivative で \(u_x\) を計算する。
+2. 各状態で格子点最大値
+   \[
+   \|u_x\|_{L_h^\infty} = \max_j |(u_x)_j|
+   \]
+   を取る。
+3. target trajectory と surrogate trajectory の両方を含めた全サンプル・全時刻で最大を取り、
+   \[
+   \widehat M_{\mathcal K} = \max \|u_x\|_{L_h^\infty}
+   \]
+   とする。
+4. 
+   \[
+   \widehat\beta = \frac12 \widehat M_{\mathcal K}
+   \]
+   とする。
+
+##### analytic_safe_poincare
+- `analytic_safe` と同じ `M_K_hat` を計算した上で
+  \[
+  \widehat\beta = -\nu_*(2\pi/L)^2 + \frac12 \widehat M_{\mathcal K}
+  \]
+  とする。current repo は `L=1` でよい。
+- この mode は、compared states の mean が揃っている場合しか安全ではありません。したがって、**samplewise mean が target/surrogate で一致しているかを tolerance 付きで検証**し、一致しないなら `ValueError` を出してください。
+
+##### empirical_pairwise
+- calibration state pool から多数の状態対を取り、
+  \[
+  q_h(\eta^a,\eta^b)
+  =
+  \frac{\langle F_h(\eta^a)-F_h(\eta^b),\eta^a-\eta^b\rangle_h}{\|\eta^a-\eta^b\|_{L_h^2}^2}
+  \]
+  を計算する。
+- `F_h` は **target Burgers generator** `burgers_generator(..., nu=cfg.target_nu)` を使う。
+- 最大値に optional margin `cfg.beta_pairwise_margin` を足して selected beta とする。
+- denominator が小さすぎる pair は skip する。
+
+##### fixed
+- `cfg.beta_fixed` をそのまま使う。
+
+#### 5.4.6 calibration split
+可能なら以下の config を追加してください。
+
+- `calibration_num_samples: int = 0`
+- `calibration_seed: int | None = None`
+
+意味:
+- `calibration_num_samples <= 0` なら evaluation sample をそのまま calibration に使う。
+- `calibration_num_samples > 0` なら別 seed で別の initial condition を生成して beta calibration 専用に使う。
+
+これは optional ですが、できるだけ入れてください。
+
+#### 5.4.7 per-sample rows と summary rows
+per-sample rows と aggregate rows を明確に分けてください。
+
+##### per-sample row に必須の field
+- `sample_index`
+- `Ttilde`
+- `D1_abs_l2h`
+- `matched_time_error_abs_l2h`
+- `Delta_init_abs_l2h`
+- `Delta_dyn_abs_l2h`
+- `Delta_time_abs_l2h`
+- `matched_plus_time_abs_l2h`
+- `rhs_beta0_pathwise_abs_l2h`
+- `rhs_beta_pathwise_abs_l2h`
+- `matched_rhs_beta_pathwise_abs_l2h`
+- `beta_mode`
+- `beta_value`
+- `c_beta_T`
+
+##### summary row に必須の field
+`summary_rows` は theorem-consistent な aggregate quantity を返してください。
+
+- `Ttilde`
+- `num_samples`
+- `D1`
+- `matched_time_error`
+- `Delta_init`
+- `Delta_dyn`
+- `Delta_time`
+- `matched_rhs_beta`
+- `rhs_beta0`
+- `rhs_beta`
+- `triangle_matched_plus_time`
+- `beta_mode`
+- `beta_value`
+- `c_beta_T`
+
+ここで意味は次の通りです。
+
+- `D1` は
+  \[
+  \left(\frac1N\sum_i D_{1,i}^2\right)^{1/2}
+  \]
+- `Delta_dyn` は
+  \[
+  \left(\frac1N\sum_i \Delta_{\mathrm{dyn},i}^2\right)^{1/2}
+  \]
+- `Delta_time` も同様
+- `rhs_beta` は
+  \[
+  e^{\beta T}\Delta_{\mathrm{init}} + c_{\beta,T}\Delta_{\mathrm{dyn}} + \Delta_{\mathrm{time}}
+  \]
+- `rhs_beta0` は
+  \[
+  e^{0\cdot T}\Delta_{\mathrm{init}} + \sqrt{T}\Delta_{\mathrm{dyn}} + \Delta_{\mathrm{time}}
+  \]
+- `matched_rhs_beta` は
+  \[
+  e^{\beta T}\Delta_{\mathrm{init}} + c_{\beta,T}\Delta_{\mathrm{dyn}}
+  \]
+- `triangle_matched_plus_time` は
+  \[
+  \text{matched_time_error} + \Delta_{\mathrm{time}}
+  \]
+
+必要なら legacy diagnostic として `rhs_beta_rms_of_pathwise_sum` などを追加して構いませんが、**`rhs_beta` という名前は theorem-consistent aggregate quantity にしてください。**
+
+#### 5.4.8 aggregate_metric_rows
+この関数はテストから直接呼ばれているので残してください。ただし意味を theorem-consistent な summary に直してください。
+
+#### 5.4.9 plots
+plot 名も誤解がないようにしてください。推奨は次です。
+
+- `matched_time_scatter_beta0_baseline.*`
+- `combined_scatter_beta0_baseline.*`
+- `matched_time_scatter_selected_beta.*`
+- `combined_scatter_selected_beta.*`
+- `time_mismatch_scatter.*`
+- `time_mismatch_envelope.*`
+- `aggregate_bound_vs_ttilde.*`
+
+scatter では pathwise quantity を使ってください。line plot `aggregate_bound_vs_ttilde` では `D1` と `rhs_beta`, `rhs_beta0` を比較してください。
+
+### 5.5 `model1_error_decomposition_1d.py`
+CLI を `error_decomposition.py` に合わせて整理してください。
+
+推奨 CLI 引数:
+- `--beta-mode zero|analytic_safe|analytic_safe_poincare|empirical_pairwise|fixed`
+- `--beta-fixed`
+- `--beta-pairwise-margin`
+- `--beta-max-states`
+- `--calibration-num-samples`
+- `--calibration-seed`
+- `--time-quadrature trapezoid|left`
+
+既存の `--beta-mode correlation|empirical|both` は廃止して構いません。必要なら migration message を出してください。
+
+---
+
+## 6. backward compatibility の方針
+
+完全互換である必要はありませんが、次はできるだけ壊さないでください。
+
+- `rms_l2` import
+- `run_experiment(...)["E1_train"]` などの legacy key
+- `model123_burgers_1d.py` の `train_relL2`, `test_relL2`
+- `aggregate_metric_rows(rows)` という関数名
+
+ただし `summary_rows["rhs_beta"]` の意味は正してください。ここは **意味を直すことが優先** です。
+
+---
+
+## 7. テスト方針
+
+### 7.1 既存テストの更新
+少なくとも次のテスト群が通るようにしてください。
+
+```bash
+pytest \
+  tests/test_model123_smoke.py \
+  tests/test_model123_1d.py \
+  tests/test_model1_error_decomposition_bounds.py \
+  tests/test_model1_error_decomposition_formulas.py \
+  tests/test_model1_error_decomposition_smoke.py \
+  tests/test_model1_time_bug.py
+```
+
+### 7.2 新規または更新すべき内容
+最低限、次をテストしてください。
+
+1. `dataset_abs_l2h_error` が手計算と一致する。
+2. `dataset_rel_l2h_mean` が手計算と一致する。
+3. `rms_l2` が current setting では `dataset_abs_l2h_error` と一致する。
+4. `run_experiment` の result dict に absolute/relative の両方が入る。
+5. `model123_burgers_1d.py` の `run_config.json` に `train_absL2h`, `test_absL2h`, `train_relL2`, `test_relL2` が入る。
+6. same-PDE sanity check:
+   - `D1 == 0`
+   - `Delta_dyn == 0`
+   - `Delta_time == 0`
+7. same-PDE + `Ttilde != T`:
+   - `matched_time_error == 0`
+   - `Delta_dyn == 0`
+   - `D1 == Delta_time`
+   - `rhs_beta == Delta_time`
+8. summary row で
+   - `rhs_beta == exp(beta*T)*Delta_init + c_beta_T*Delta_dyn + Delta_time`
+   - `matched_rhs_beta == exp(beta*T)*Delta_init + c_beta_T*Delta_dyn`
+   - `triangle_matched_plus_time == matched_time_error + Delta_time`
+9. `fixed` beta mode が指定値を返す。
+10. `analytic_safe` beta mode が有限値を返し、diagnostic `M_K_hat` を含む。
+
+---
+
+## 8. 実装順序の推奨
+1. `metrics.py` を先に仕上げる。
+2. `experiments.py` と `model123_burgers_1d.py` を shared metrics に移す。
+3. `error_decomposition.py` の trajectory と quadrature を直す。
+4. beta estimation を mode 化する。
+5. summary row schema を theorem-consistent に直す。
+6. plot 名と CLI を整理する。
+7. テストを更新・追加する。
+8. pytest を走らせる。
+
+---
+
+## 9. 最後に Codex が報告すべきこと
+作業完了時には、次を簡潔に報告してください。
+
+- どのファイルを変更したか
+- new metric API
+- 追加した JSON/CSV key
+- `beta_mode` の新仕様
+- 通したテスト
+- もし互換性のために legacy alias を残したなら、その一覧

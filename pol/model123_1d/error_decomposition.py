@@ -20,6 +20,7 @@ from pol.model123_1d.initial_conditions import (
     sample_gaussian_random_field_initial_conditions,
     sample_initial_condition_coefficients,
 )
+from pol.model123_1d.metrics import discrete_l2h_norm
 from pol.reservoir_1d import Reservoir1DSolver, ReservoirConfig
 from viz_utils import save_figure_all_formats
 
@@ -52,8 +53,13 @@ class ErrorDecompositionConfig:
     grf_tau: float = 5.0
     grf_sigma: float = 25.0
     grf_mean: float = 0.0
-    beta_mode: str = "both"
+    beta_mode: str = "zero"
+    beta_fixed: float = 0.0
+    beta_pairwise_margin: float = 0.0
     beta_max_states: int = 24
+    calibration_num_samples: int = 0
+    calibration_seed: int | None = None
+    time_quadrature: str = "trapezoid"
     out_dir: str = "outputs/model1_error_decomposition_1d"
 
 
@@ -96,10 +102,14 @@ def _validate_config(cfg: ErrorDecompositionConfig) -> None:
         raise ValueError(f"Unsupported reservoir family: {cfg.reservoir}")
     if cfg.initial_condition_type not in {"fourier", "grf"}:
         raise ValueError("initial_condition_type must be 'fourier' or 'grf'")
-    if cfg.beta_mode not in {"correlation", "empirical", "both"}:
-        raise ValueError("beta_mode must be correlation, empirical, or both")
+    if cfg.beta_mode not in {"zero", "analytic_safe", "analytic_safe_poincare", "empirical_pairwise", "fixed"}:
+        raise ValueError("unsupported beta_mode")
     if cfg.beta_max_states <= 1:
         raise ValueError("beta_max_states must be >= 2")
+    if cfg.calibration_num_samples < 0:
+        raise ValueError("calibration_num_samples must be >= 0")
+    if cfg.time_quadrature not in {"trapezoid", "left"}:
+        raise ValueError("time_quadrature must be trapezoid or left")
     if not cfg.Ttilde_values:
         raise ValueError("Ttilde_values must be non-empty")
     for value in cfg.Ttilde_values:
@@ -107,20 +117,22 @@ def _validate_config(cfg: ErrorDecompositionConfig) -> None:
             raise ValueError("All Ttilde values must be positive")
 
 
-def make_initial_conditions(cfg: ErrorDecompositionConfig) -> torch.Tensor:
+def make_initial_conditions(cfg: ErrorDecompositionConfig, *, num_samples: int | None = None, seed: int | None = None) -> torch.Tensor:
     device = _resolve_device(cfg.device)
     dtype = _resolve_dtype(cfg.dtype)
+    sample_count = cfg.num_samples if num_samples is None else int(num_samples)
+    sample_seed = cfg.seed if seed is None else int(seed)
     if cfg.initial_condition_type == "fourier":
         coeffs = sample_initial_condition_coefficients(
-            cfg.num_samples,
-            seed=cfg.seed,
+            sample_count,
+            seed=sample_seed,
             dtype=dtype,
         )
         return evaluate_initial_conditions(coeffs, cfg.nx, device=device, dtype=dtype).cpu()
     return sample_gaussian_random_field_initial_conditions(
-        cfg.num_samples,
+        sample_count,
         cfg.nx,
-        seed=cfg.seed,
+        seed=sample_seed,
         gamma=cfg.grf_gamma,
         tau=cfg.grf_tau,
         sigma=cfg.grf_sigma,
@@ -152,7 +164,8 @@ def _simulate_target_trajectory(u0: torch.Tensor, cfg: ErrorDecompositionConfig)
         )
         for idx, state in enumerate(states):
             states_per_step[idx].append(state.detach().cpu())
-    return torch.stack([torch.cat(chunks, dim=0) for chunks in states_per_step], dim=0)
+    stacked = torch.stack([torch.cat(chunks, dim=0) for chunks in states_per_step], dim=0)
+    return torch.cat([u0.unsqueeze(0).cpu(), stacked], dim=0)
 
 
 def _make_surrogate_solver(cfg: ErrorDecompositionConfig) -> Reservoir1DSolver:
@@ -200,45 +213,17 @@ def _simulate_surrogate_trajectory(u0: torch.Tensor, cfg: ErrorDecompositionConf
         states = solver.simulate(batch, dt=cfg.dt, Tr=max_time, obs_steps=obs_steps)
         for idx, state in enumerate(states):
             states_per_step[idx].append(state.detach().cpu())
-    return torch.stack([torch.cat(chunks, dim=0) for chunks in states_per_step], dim=0)
+    stacked = torch.stack([torch.cat(chunks, dim=0) for chunks in states_per_step], dim=0)
+    return torch.cat([u0.unsqueeze(0).cpu(), stacked], dim=0)
 
 
 def discrete_l2_h(values: torch.Tensor) -> torch.Tensor:
-    dx = 1.0 / float(values.shape[-1])
-    return torch.sqrt(dx * torch.sum(values * values, dim=-1))
+    return discrete_l2h_norm(values)
 
 
 def discrete_inner_h(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    dx = 1.0 / float(a.shape[-1])
-    return dx * torch.sum(a * b, dim=-1)
-
-
-def aggregate_metric_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    grouped: dict[float, list[dict[str, Any]]] = {}
-    for row in rows:
-        grouped.setdefault(float(row["Ttilde"]), []).append(row)
-
-    summary_rows: list[dict[str, Any]] = []
-    metric_names = [
-        "D1_abs_l2h",
-        "Delta_init_abs_l2h",
-        "Delta_time_abs_l2h",
-        "Delta_dyn_abs_l2h",
-        "matched_time_error_abs_l2h",
-        "matched_plus_time_abs_l2h",
-        "rhs_beta0_abs_l2h",
-        "rhs_beta_abs_l2h",
-    ]
-    for ttilde in sorted(grouped):
-        t_rows = grouped[ttilde]
-        summary_row: dict[str, Any] = {"Ttilde": ttilde}
-        for name in metric_names:
-            values = np.asarray([float(row[name]) for row in t_rows], dtype=float)
-            summary_row[name.replace("_abs_l2h", "")] = float(np.sqrt(np.mean(values * values)))
-        summary_row["beta_empirical"] = float(t_rows[0]["beta_empirical"])
-        summary_row["c_beta_T"] = float(t_rows[0]["c_beta_T"])
-        summary_rows.append(summary_row)
-    return summary_rows
+    h = 1.0 / float(a.shape[-1])
+    return h * torch.sum(a * b, dim=-1)
 
 
 def spectral_derivatives_1d(z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -316,41 +301,108 @@ def generator_defect(z: torch.Tensor, cfg: ErrorDecompositionConfig) -> torch.Te
     )
 
 
+def make_time_quadrature_weights(num_steps: int, dt: float, rule: str = "trapezoid") -> torch.Tensor:
+    if num_steps < 0:
+        raise ValueError("num_steps must be >= 0")
+    if dt <= 0.0:
+        raise ValueError("dt must be positive")
+    if rule == "trapezoid":
+        weights = torch.full((num_steps + 1,), float(dt), dtype=torch.float64)
+        if num_steps >= 1:
+            weights[0] = 0.5 * float(dt)
+            weights[-1] = 0.5 * float(dt)
+        return weights
+    if rule == "left":
+        weights = torch.full((num_steps + 1,), 0.0, dtype=torch.float64)
+        if num_steps >= 1:
+            weights[:-1] = float(dt)
+        return weights
+    raise ValueError("rule must be trapezoid or left")
+
+
+def _flatten_state_pool(states: torch.Tensor, *, max_states: int) -> torch.Tensor:
+    flat = states.reshape(-1, states.shape[-1])
+    if flat.shape[0] <= max_states:
+        return flat
+    keep = torch.linspace(0, flat.shape[0] - 1, steps=max_states, dtype=torch.float64).round().long()
+    return flat.index_select(0, keep)
+
+
+def compute_beta(
+    *,
+    calibration_target_states: torch.Tensor,
+    calibration_surrogate_states: torch.Tensor,
+    cfg: ErrorDecompositionConfig,
+) -> tuple[float, dict[str, Any]]:
+    shared_steps = min(calibration_target_states.shape[0], calibration_surrogate_states.shape[0])
+    target_shared = calibration_target_states[:shared_steps]
+    surrogate_shared = calibration_surrogate_states[:shared_steps]
+    details: dict[str, Any] = {"mode": cfg.beta_mode}
+
+    if cfg.beta_mode == "zero":
+        details["chosen_beta"] = 0.0
+        return 0.0, details
+
+    if cfg.beta_mode in {"analytic_safe", "analytic_safe_poincare"}:
+        combined = torch.cat([target_shared, surrogate_shared], dim=1)
+        ux, _, _ = spectral_derivatives_1d(combined.reshape(-1, combined.shape[-1]))
+        M_K_hat = float(ux.abs().amax().item())
+        beta = 0.5 * M_K_hat
+        details["M_K_hat"] = M_K_hat
+        if cfg.beta_mode == "analytic_safe_poincare":
+            target_means = torch.mean(target_shared, dim=-1)
+            surrogate_means = torch.mean(surrogate_shared, dim=-1)
+            if not torch.allclose(target_means, surrogate_means, atol=1e-8, rtol=1e-6):
+                raise ValueError("analytic_safe_poincare requires samplewise means to match")
+            beta = beta - cfg.target_nu * (2.0 * math.pi) ** 2
+            details["poincare_shift"] = -cfg.target_nu * (2.0 * math.pi) ** 2
+        details["chosen_beta"] = float(beta)
+        return float(beta), details
+
+    if cfg.beta_mode == "fixed":
+        details["chosen_beta"] = float(cfg.beta_fixed)
+        return float(cfg.beta_fixed), details
+
+    flat = _flatten_state_pool(torch.cat([target_shared, surrogate_shared], dim=1), max_states=cfg.beta_max_states)
+    F = burgers_generator(flat, nu=cfg.target_nu)
+    pairwise_max = -float("inf")
+    pairs_used = 0
+    for i in range(flat.shape[0]):
+        zi = flat[i : i + 1]
+        Fi = F[i : i + 1]
+        for j in range(i):
+            dz = zi - flat[j : j + 1]
+            denom = float(discrete_inner_h(dz, dz).item())
+            if denom <= 1e-14:
+                continue
+            dF = Fi - F[j : j + 1]
+            ratio = float(discrete_inner_h(dF, dz).item() / denom)
+            pairwise_max = max(pairwise_max, ratio)
+            pairs_used += 1
+    if pairwise_max == -float("inf"):
+        pairwise_max = 0.0
+    beta = pairwise_max + float(cfg.beta_pairwise_margin)
+    details["pairwise_max"] = float(pairwise_max)
+    details["pairwise_margin"] = float(cfg.beta_pairwise_margin)
+    details["pairs_used"] = int(pairs_used)
+    details["chosen_beta"] = float(beta)
+    return float(beta), details
+
+
 def estimate_empirical_beta(
     target_states: torch.Tensor,
     surrogate_states: torch.Tensor,
     cfg: ErrorDecompositionConfig,
 ) -> float:
-    states = torch.cat([target_states, surrogate_states[: target_states.shape[0]]], dim=1)
-    flat_states = states.reshape(-1, states.shape[-1])
-    if flat_states.shape[0] > cfg.beta_max_states:
-        keep = torch.linspace(
-            0,
-            flat_states.shape[0] - 1,
-            steps=cfg.beta_max_states,
-            dtype=torch.float64,
-        ).round().long()
-        flat_states = flat_states.index_select(0, keep)
-
-    if flat_states.shape[0] <= 1:
-        return 0.0
-
-    F = burgers_generator(flat_states, nu=cfg.target_nu)
-    beta = -float("inf")
-    for i in range(flat_states.shape[0]):
-        zi = flat_states[i : i + 1]
-        Fi = F[i : i + 1]
-        for j in range(i):
-            dz = zi - flat_states[j : j + 1]
-            denom = discrete_inner_h(dz, dz).item()
-            if denom <= 1e-14:
-                continue
-            dF = Fi - F[j : j + 1]
-            ratio = discrete_inner_h(dF, dz).item() / denom
-            beta = max(beta, ratio)
-    if beta == -float("inf"):
-        return 0.0
-    return float(beta)
+    beta_mode = cfg.beta_mode
+    if beta_mode != "empirical_pairwise":
+        cfg = ErrorDecompositionConfig(**{**asdict(cfg), "beta_mode": "empirical_pairwise"})
+    beta, _ = compute_beta(
+        calibration_target_states=target_states,
+        calibration_surrogate_states=surrogate_states,
+        cfg=cfg,
+    )
+    return beta
 
 
 def c_beta_T(beta: float, T: float) -> float:
@@ -360,55 +412,119 @@ def c_beta_T(beta: float, T: float) -> float:
     return math.sqrt(max(value, 0.0))
 
 
+def _rms(values: list[float]) -> float:
+    arr = np.asarray(values, dtype=float)
+    return float(np.sqrt(np.mean(arr * arr)))
+
+
+def aggregate_metric_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[float, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(float(row["Ttilde"]), []).append(row)
+
+    summary_rows: list[dict[str, Any]] = []
+    for ttilde in sorted(grouped):
+        t_rows = grouped[ttilde]
+        delta_init = _rms([float(row["Delta_init_abs_l2h"]) for row in t_rows])
+        delta_dyn = _rms([float(row["Delta_dyn_abs_l2h"]) for row in t_rows])
+        delta_time = _rms([float(row["Delta_time_abs_l2h"]) for row in t_rows])
+        matched = _rms([float(row["matched_time_error_abs_l2h"]) for row in t_rows])
+        d1 = _rms([float(row["D1_abs_l2h"]) for row in t_rows])
+        beta_value = float(t_rows[0]["beta_value"])
+        cbeta = float(t_rows[0]["c_beta_T"])
+        exp_beta_t = math.exp(beta_value * float(t_rows[0].get("T", 0.0)))
+        matched_rhs_beta = exp_beta_t * delta_init + cbeta * delta_dyn
+        rhs_beta0 = delta_init + math.sqrt(float(t_rows[0].get("T", 0.0))) * delta_dyn + delta_time
+        rhs_beta = matched_rhs_beta + delta_time
+        summary_rows.append(
+            {
+                "Ttilde": float(ttilde),
+                "num_samples": len(t_rows),
+                "D1": d1,
+                "matched_time_error": matched,
+                "Delta_init": delta_init,
+                "Delta_dyn": delta_dyn,
+                "Delta_time": delta_time,
+                "matched_rhs_beta": matched_rhs_beta,
+                "rhs_beta0": rhs_beta0,
+                "rhs_beta": rhs_beta,
+                "triangle_matched_plus_time": matched + delta_time,
+                "beta_mode": t_rows[0]["beta_mode"],
+                "beta_value": beta_value,
+                "beta_empirical": beta_value,
+                "c_beta_T": cbeta,
+            }
+        )
+    return summary_rows
+
+
 def _compute_rows_for_ttilde(
     target_states: torch.Tensor,
     surrogate_states: torch.Tensor,
     *,
     cfg: ErrorDecompositionConfig,
     Ttilde: float,
-    beta_empirical: float,
+    beta_value: float,
 ) -> list[dict[str, Any]]:
     step_T = int(round(cfg.T / cfg.dt))
     step_ttilde = int(round(Ttilde / cfg.dt))
 
-    target_T = target_states[step_T - 1]
-    surrogate_T = surrogate_states[step_T - 1]
-    surrogate_ttilde = surrogate_states[step_ttilde - 1]
-    defects = generator_defect(surrogate_states[:step_T], cfg)
+    target_T = target_states[step_T]
+    surrogate_T = surrogate_states[step_T]
+    surrogate_ttilde = surrogate_states[step_ttilde]
+    defects = generator_defect(surrogate_states[: step_T + 1], cfg)
+    defect_norms = discrete_l2_h(defects.reshape(-1, defects.shape[-1])).reshape(step_T + 1, -1)
+    weights = make_time_quadrature_weights(step_T, cfg.dt, cfg.time_quadrature).to(defect_norms.device)
+    delta_dyn_sq = torch.sum(weights.unsqueeze(1) * defect_norms.pow(2), dim=0)
+    Delta_dyn = torch.sqrt(delta_dyn_sq)
 
     D1 = discrete_l2_h(target_T - surrogate_ttilde)
     matched = discrete_l2_h(target_T - surrogate_T)
     Delta_time = discrete_l2_h(surrogate_T - surrogate_ttilde)
-    defect_norms = discrete_l2_h(defects.reshape(-1, defects.shape[-1])).reshape(step_T, -1)
-    Delta_dyn = torch.sqrt(cfg.dt * torch.sum(defect_norms.pow(2), dim=0))
-
     Delta_init = torch.zeros_like(D1)
-    cbeta = c_beta_T(beta_empirical, cfg.T)
-    rhs_beta0 = math.sqrt(cfg.T) * Delta_dyn + Delta_time
-    rhs_beta = cbeta * Delta_dyn + Delta_time
-    matched_rhs_beta = cbeta * Delta_dyn
+    cbeta = c_beta_T(beta_value, cfg.T)
+    exp_beta_t = math.exp(beta_value * cfg.T)
+    rhs_beta0_pathwise = Delta_init + math.sqrt(cfg.T) * Delta_dyn + Delta_time
+    matched_rhs_beta_pathwise = exp_beta_t * Delta_init + cbeta * Delta_dyn
+    rhs_beta_pathwise = matched_rhs_beta_pathwise + Delta_time
     matched_plus_time = matched + Delta_time
 
     rows: list[dict[str, Any]] = []
     for idx in range(target_T.shape[0]):
-        rows.append(
-            {
-                "sample_index": idx,
-                "Ttilde": float(Ttilde),
-                "D1_abs_l2h": float(D1[idx].item()),
-                "Delta_init_abs_l2h": float(Delta_init[idx].item()),
-                "Delta_time_abs_l2h": float(Delta_time[idx].item()),
-                "Delta_dyn_abs_l2h": float(Delta_dyn[idx].item()),
-                "matched_time_error_abs_l2h": float(matched[idx].item()),
-                "matched_plus_time_abs_l2h": float(matched_plus_time[idx].item()),
-                "rhs_beta0_abs_l2h": float(rhs_beta0[idx].item()),
-                "rhs_beta_abs_l2h": float(rhs_beta[idx].item()),
-                "matched_rhs_beta_abs_l2h": float(matched_rhs_beta[idx].item()),
-                "beta_empirical": float(beta_empirical),
-                "c_beta_T": float(cbeta),
-            }
-        )
+        rhs_beta0_value = float(rhs_beta0_pathwise[idx].item())
+        rhs_beta_value = float(rhs_beta_pathwise[idx].item())
+        matched_rhs_beta_value = float(matched_rhs_beta_pathwise[idx].item())
+        row = {
+            "sample_index": idx,
+            "T": float(cfg.T),
+            "Ttilde": float(Ttilde),
+            "D1_abs_l2h": float(D1[idx].item()),
+            "matched_time_error_abs_l2h": float(matched[idx].item()),
+            "Delta_init_abs_l2h": float(Delta_init[idx].item()),
+            "Delta_dyn_abs_l2h": float(Delta_dyn[idx].item()),
+            "Delta_time_abs_l2h": float(Delta_time[idx].item()),
+            "matched_plus_time_abs_l2h": float(matched_plus_time[idx].item()),
+            "rhs_beta0_pathwise_abs_l2h": rhs_beta0_value,
+            "rhs_beta_pathwise_abs_l2h": rhs_beta_value,
+            "matched_rhs_beta_pathwise_abs_l2h": matched_rhs_beta_value,
+            "rhs_beta0_abs_l2h": rhs_beta0_value,
+            "rhs_beta_abs_l2h": rhs_beta_value,
+            "matched_rhs_beta_abs_l2h": matched_rhs_beta_value,
+            "beta_mode": cfg.beta_mode,
+            "beta_value": float(beta_value),
+            "beta_empirical": float(beta_value),
+            "c_beta_T": float(cbeta),
+        }
+        rows.append(row)
     return rows
+
+
+def _make_calibration_trajectories(cfg: ErrorDecompositionConfig) -> tuple[torch.Tensor, torch.Tensor]:
+    if cfg.calibration_num_samples <= 0:
+        raise ValueError("calibration trajectories requested without calibration samples")
+    calibration_seed = cfg.seed if cfg.calibration_seed is None else cfg.calibration_seed
+    u0 = make_initial_conditions(cfg, num_samples=cfg.calibration_num_samples, seed=calibration_seed)
+    return _simulate_target_trajectory(u0, cfg), _simulate_surrogate_trajectory(u0, cfg)
 
 
 def run_error_decomposition(
@@ -420,7 +536,17 @@ def run_error_decomposition(
     u0 = make_initial_conditions(cfg)
     target_states = _simulate_target_trajectory(u0, cfg)
     surrogate_states = _simulate_surrogate_trajectory(u0, cfg)
-    beta_emp = estimate_empirical_beta(target_states, surrogate_states, cfg)
+
+    if cfg.calibration_num_samples > 0:
+        calibration_target_states, calibration_surrogate_states = _make_calibration_trajectories(cfg)
+    else:
+        calibration_target_states, calibration_surrogate_states = target_states, surrogate_states
+
+    beta_value, beta_details = compute_beta(
+        calibration_target_states=calibration_target_states,
+        calibration_surrogate_states=calibration_surrogate_states,
+        cfg=cfg,
+    )
 
     rows: list[dict[str, Any]] = []
     for ttilde in cfg.Ttilde_values:
@@ -430,18 +556,22 @@ def run_error_decomposition(
                 surrogate_states,
                 cfg=cfg,
                 Ttilde=float(ttilde),
-                beta_empirical=beta_emp,
+                beta_value=beta_value,
             )
         )
     summary_rows = aggregate_metric_rows(rows)
     result = {
         "config": _config_to_jsonable(cfg),
-        "beta_empirical": beta_emp,
+        "full_state_special_case": True,
+        "beta_mode": cfg.beta_mode,
+        "beta_value": beta_value,
+        "beta_empirical": beta_value,
+        "beta_details": beta_details,
         "rows": rows,
         "summary_rows": summary_rows,
     }
     if save_outputs:
-        save_error_decomposition_outputs(result, cfg.out_dir, cfg.beta_mode)
+        save_error_decomposition_outputs(result, cfg.out_dir)
     return result
 
 
@@ -502,13 +632,13 @@ def _time_mismatch_envelope_plot(summary_rows: list[dict[str, Any]], out_path_no
 
     fig, ax = plt.subplots(figsize=(7.0, 4.6))
     ax.plot(ttilde, d1, marker="o", linewidth=1.8, label="D1")
-    ax.plot(ttilde, matched, marker="o", linewidth=1.4, label="matched-time error")
+    ax.plot(ttilde, matched, marker="o", linewidth=1.4, label="matched_time_error")
     ax.plot(ttilde, delta_time, marker="o", linewidth=1.4, label="Delta_time")
     ax.fill_between(ttilde, matched, envelope, alpha=0.2, label="matched + Delta_time")
-    ax.plot(ttilde, envelope, marker="o", linewidth=1.4, linestyle="--", label="envelope upper")
+    ax.plot(ttilde, envelope, marker="o", linewidth=1.4, linestyle="--", label="triangle bound")
     ax.set_xlabel("Ttilde")
-    ax.set_ylabel("absolute discrete L2")
-    ax.set_title("Time-mismatch envelope")
+    ax.set_ylabel("absolute discrete L2h")
+    ax.set_title("Time mismatch envelope")
     ax.grid(True, alpha=0.3)
     ax.legend()
     fig.tight_layout()
@@ -516,19 +646,34 @@ def _time_mismatch_envelope_plot(summary_rows: list[dict[str, Any]], out_path_no
     plt.close(fig)
 
 
-def save_error_decomposition_outputs(
-    result: dict[str, Any],
-    out_dir: str,
-    beta_mode: str,
-) -> None:
+def _aggregate_bound_plot(summary_rows: list[dict[str, Any]], out_path_no_ext: str) -> None:
+    ttilde = np.asarray([row["Ttilde"] for row in summary_rows], dtype=float)
+    d1 = np.asarray([row["D1"] for row in summary_rows], dtype=float)
+    rhs_beta = np.asarray([row["rhs_beta"] for row in summary_rows], dtype=float)
+    rhs_beta0 = np.asarray([row["rhs_beta0"] for row in summary_rows], dtype=float)
+
+    fig, ax = plt.subplots(figsize=(7.0, 4.6))
+    ax.plot(ttilde, d1, marker="o", linewidth=1.8, label="D1")
+    ax.plot(ttilde, rhs_beta, marker="o", linewidth=1.6, label="rhs_beta")
+    ax.plot(ttilde, rhs_beta0, marker="o", linewidth=1.6, label="rhs_beta0")
+    ax.set_xlabel("Ttilde")
+    ax.set_ylabel("absolute discrete L2h")
+    ax.set_title("Aggregate bound vs Ttilde")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    save_figure_all_formats(fig, out_path_no_ext)
+    plt.close(fig)
+
+
+def save_error_decomposition_outputs(result: dict[str, Any], out_dir: str) -> None:
     os.makedirs(out_dir, exist_ok=True)
     rows = result["rows"]
     summary_rows = result["summary_rows"]
     if not rows:
         raise ValueError("No rows to save")
 
-    per_sample_csv = os.path.join(out_dir, "per_sample_metrics.csv")
-    _write_csv(per_sample_csv, rows)
+    _write_csv(os.path.join(out_dir, "per_sample_metrics.csv"), rows)
     with open(os.path.join(out_dir, "per_sample_metrics.json"), "w", encoding="utf-8") as f:
         json.dump(rows, f, indent=2)
 
@@ -537,63 +682,63 @@ def save_error_decomposition_outputs(
         json.dump(
             {
                 "config": result["config"],
-                "beta_empirical": result["beta_empirical"],
+                "full_state_special_case": result["full_state_special_case"],
+                "beta_mode": result["beta_mode"],
+                "beta_value": result["beta_value"],
+                "beta_details": result["beta_details"],
                 "summary_rows": summary_rows,
             },
             f,
             indent=2,
         )
 
-    if beta_mode in {"correlation", "both"}:
-        _scatter_with_groups(
-            rows,
-            x_key="Delta_dyn_abs_l2h",
-            y_key="matched_time_error_abs_l2h",
-            xlabel="Delta_dyn",
-            ylabel="matched-time error",
-            title="Matched-time scatter (correlation mode)",
-            out_path_no_ext=os.path.join(out_dir, "matched_time_scatter_correlation"),
-        )
-        _scatter_with_groups(
-            rows,
-            x_key="rhs_beta0_abs_l2h",
-            y_key="D1_abs_l2h",
-            xlabel="sqrt(T) * Delta_dyn + Delta_time",
-            ylabel="D1",
-            title="Combined scatter (correlation mode)",
-            out_path_no_ext=os.path.join(out_dir, "combined_scatter_correlation"),
-        )
-
-    if beta_mode in {"empirical", "both"}:
-        _scatter_with_groups(
-            rows,
-            x_key="matched_rhs_beta_abs_l2h",
-            y_key="matched_time_error_abs_l2h",
-            xlabel="c_beta,T * Delta_dyn",
-            ylabel="matched-time error",
-            title="Matched-time scatter (empirical beta mode)",
-            out_path_no_ext=os.path.join(out_dir, "matched_time_scatter_empirical"),
-        )
-        _scatter_with_groups(
-            rows,
-            x_key="rhs_beta_abs_l2h",
-            y_key="D1_abs_l2h",
-            xlabel="c_beta,T * Delta_dyn + Delta_time",
-            ylabel="D1",
-            title="Combined scatter (empirical beta mode)",
-            out_path_no_ext=os.path.join(out_dir, "combined_scatter_empirical"),
-        )
-
+    _scatter_with_groups(
+        rows,
+        x_key="rhs_beta0_pathwise_abs_l2h",
+        y_key="matched_time_error_abs_l2h",
+        xlabel="sqrt(T) Delta_dyn",
+        ylabel="matched_time_error",
+        title="Matched-time scatter (beta0 baseline)",
+        out_path_no_ext=os.path.join(out_dir, "matched_time_scatter_beta0_baseline"),
+    )
+    _scatter_with_groups(
+        rows,
+        x_key="rhs_beta0_pathwise_abs_l2h",
+        y_key="D1_abs_l2h",
+        xlabel="rhs_beta0_pathwise",
+        ylabel="D1",
+        title="Combined scatter (beta0 baseline)",
+        out_path_no_ext=os.path.join(out_dir, "combined_scatter_beta0_baseline"),
+    )
+    _scatter_with_groups(
+        rows,
+        x_key="matched_rhs_beta_pathwise_abs_l2h",
+        y_key="matched_time_error_abs_l2h",
+        xlabel="matched_rhs_beta_pathwise",
+        ylabel="matched_time_error",
+        title="Matched-time scatter (selected beta)",
+        out_path_no_ext=os.path.join(out_dir, "matched_time_scatter_selected_beta"),
+    )
+    _scatter_with_groups(
+        rows,
+        x_key="rhs_beta_pathwise_abs_l2h",
+        y_key="D1_abs_l2h",
+        xlabel="rhs_beta_pathwise",
+        ylabel="D1",
+        title="Combined scatter (selected beta)",
+        out_path_no_ext=os.path.join(out_dir, "combined_scatter_selected_beta"),
+    )
     _scatter_with_groups(
         rows,
         x_key="Delta_time_abs_l2h",
         y_key="D1_abs_l2h",
         xlabel="Delta_time",
         ylabel="D1",
-        title="Time-mismatch scatter",
+        title="Time mismatch scatter",
         out_path_no_ext=os.path.join(out_dir, "time_mismatch_scatter"),
     )
     _time_mismatch_envelope_plot(summary_rows, os.path.join(out_dir, "time_mismatch_envelope"))
+    _aggregate_bound_plot(summary_rows, os.path.join(out_dir, "aggregate_bound_vs_ttilde"))
 
 
 __all__ = [
@@ -601,6 +746,7 @@ __all__ = [
     "aggregate_metric_rows",
     "burgers_generator",
     "c_beta_T",
+    "compute_beta",
     "defect_burgers_reservoir",
     "defect_ks_reservoir",
     "defect_reaction_diffusion_reservoir",
@@ -608,6 +754,7 @@ __all__ = [
     "estimate_empirical_beta",
     "generator_defect",
     "make_initial_conditions",
+    "make_time_quadrature_weights",
     "run_error_decomposition",
     "save_error_decomposition_outputs",
     "spectral_derivatives_1d",
