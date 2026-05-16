@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 
 
@@ -18,17 +20,17 @@ def add_data_mode_args(
     parser.add_argument(
         "--data-file",
         default=default_data_file,
-        help="Single data file (used when --data-mode=single_split).",
+        help="Single data file used when --data-mode=single_split.",
     )
     parser.add_argument(
         "--train-file",
         default=default_train_file,
-        help="Training data file (used when --data-mode=separate_files).",
+        help="Training data file used when --data-mode=separate_files.",
     )
     parser.add_argument(
         "--test-file",
         default=default_test_file,
-        help="Test data file (used when --data-mode=separate_files).",
+        help="Test data file used when --data-mode=separate_files.",
     )
     return parser
 
@@ -45,12 +47,7 @@ def add_split_args(
         default=default_train_split,
         help="Fraction of samples to use for training in single_split mode.",
     )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=default_seed,
-        help="Random seed for reproducible train/test splits.",
-    )
+    parser.add_argument("--seed", type=int, default=default_seed, help="Random seed.")
     parser.add_argument(
         "--shuffle",
         action="store_true",
@@ -68,3 +65,4 @@ def validate_data_mode_args(args: argparse.Namespace, parser: argparse.ArgumentP
     else:
         if not args.train_file or not args.test_file:
             parser.error("--train-file and --test-file are required when --data-mode=separate_files")
+

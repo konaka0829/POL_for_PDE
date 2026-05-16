@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pol-pde-surrogate"
+version = "0.1.0"
+description = "Time-scaled PDE surrogate operator learning on 1D periodic Burgers problems"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+    "numpy>=1.23",
+    "scipy>=1.9",
+    "h5py>=3.8",
+    "matplotlib>=3.7",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[tool.setuptools]
+packages = ["pol", "pol.model123_1d"]

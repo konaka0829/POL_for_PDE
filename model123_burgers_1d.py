@@ -20,7 +20,8 @@ import warnings
 import numpy as np
 import torch
 
-from cli_utils import add_data_mode_args, add_split_args, validate_data_mode_args
+from pol.cli import add_data_mode_args, add_split_args, validate_data_mode_args
+from pol.io_mat import MatReader
 from pol.model123_1d import Model1Predictor1D, Model2Regressor1D, Model3Regressor1D, Model123Config
 from pol.model123_1d.metrics import (
     dataset_abs_l2h_error,
@@ -28,7 +29,7 @@ from pol.model123_1d.metrics import (
     per_sample_abs_l2h_error,
     per_sample_rel_l2h_error,
 )
-from viz_utils import plot_1d_prediction, plot_error_histogram
+from pol.plotting import plot_1d_prediction, plot_error_histogram
 
 
 def parse_args():
@@ -171,8 +172,6 @@ def _validate_target_time(args, train_reader, test_reader=None):
 
 
 def load_data(args):
-    from utilities3 import MatReader
-
     if args.data_mode == "single_split":
         reader = MatReader(args.data_file)
         _validate_target_time(args, reader)

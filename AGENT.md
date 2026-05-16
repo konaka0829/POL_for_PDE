@@ -1,516 +1,702 @@
 # AGENT.md
 
-## この AGENT.md の位置づけ
-このファイルは、**Model123 の誤差指標と Model 1 誤差分解を改良する今回のタスク専用**です。リポジトリに既にある AGENT.md はこのタスクとは整合していないため、Codex CLI を使うときは **このファイルで repo root の AGENT.md を置き換えてから実行**してください。
+## Purpose of this repository
+
+This repository should be a slim implementation of the current research code for **time-scaled PDE surrogate operator learning** on 1D periodic Burgers-type problems.
+
+The active code should center on:
+
+- 1D periodic Burgers target dynamics.
+- Surrogate PDE families: Burgers, reaction--diffusion, and Kuramoto--Sivashinsky style reservoirs.
+- Model 1 / Model 2 / Model 3 experiments.
+- The time-scaled Model 1 error decomposition based on `Delta_scale`.
+
+The repository previously contained legacy Fourier Neural Operator, LowRank, Darcy, Navier--Stokes, image, and old reservoir/RFM code. Those are not part of the current research implementation and should not remain in the active tree after the slimming refactor.
 
 ---
 
-## 1. タスクの目的
+## Non-negotiable theoretical convention
 
-このタスクの目的は二つあります。
+### Do not use the old raw `Delta_time` formulation as the main theory
 
-### 1.1 誤差指標を整理する
-`pol/model123_1d/metrics.py` を、Model 1/2/3 に共通の誤差指標を定義する一元モジュールに整理してください。
+The current theory treats the surrogate readout time `Ttilde` as a **time scaling**, not as a separate time-mismatch error.
 
-主指標は **absolute discrete \(L_h^2\)** にしてください。理由は次の通りです。
+For target final time `T` and surrogate readout time `Ttilde`, define
 
-- Model 1 の raw error 分解は absolute \(L^2(\mu;Y)\) 誤差の不等式として書かれている。
-- Model 1/2/3 の包含関係 \(D_3\le D_2\le D_1\) も absolute 側で自然に読める。
-- current setting は unit torus \([0,1)\) の一様格子なので、現在の `rms_l2` は実質的に absolute discrete \(L_h^2\) と一致する。
-
-relative error は補助指標として残してよいですが、主指標にしないでください。
-
-### 1.2 Model 1 の誤差分解を theorem-consistent に直す
-`pol/model123_1d/error_decomposition.py` と `model1_error_decomposition_1d.py` を、TeX の Model 1 raw error decomposition の **fully discrete full-state special case** に沿って整理し直してください。
-
-今回のスコープは **full-state special case の整理** です。一般の有限次元 Model 1、`Q_J`、`Delta_obs^(J)` の実装までは行いません。
-
----
-
-## 2. 理論上の基準
-
-### 2.1 Model 1 raw error decomposition
-今回合わせたい式は
-\[
-D_1(\theta,\tilde T)
-\le
- e^{\beta T}\Delta_{\mathrm{init}}(\theta)
- + c_{\beta,T}\Delta_{\mathrm{dyn}}(\theta;T)
- + \Delta_{\mathrm{time}}(\theta;T,\tilde T)
-\]
-です。
-
-full-state かつ `E=I`, `Q=I`, `\tilde T=T` なら
-\[
-\Delta_{\mathrm{init}}=0,
-\qquad
-\Delta_{\mathrm{time}}=0,
-\qquad
-D_1(\theta,T)\le c_{\beta,T}\Delta_{\mathrm{dyn}}(\theta;T)
-\]
-に簡約されます。
-
-### 2.2 fully discrete な評価量
-fully discrete な natural quantity は次です。
-
-- 格子幅 \(h = 1/n_x\)
-- 離散内積
-  \[
-  \langle v_h, w_h\rangle_h = h\sum_j v_{h,j} w_{h,j}
-  \]
-- 離散ノルム
-  \[
-  \|v_h\|_{L_h^2} = \left(h\sum_j v_{h,j}^2\right)^{1/2}
-  \]
-
-また empirical quantity は
-\[
-D_{1,h,N}(\theta,T)^2
-=
-\frac1N\sum_{i=1}^N \|u_{h,i}^{N_T} - r_{h,i}^{N_T}\|_{L_h^2}^2
-\]
-とし、trajectory-averaged defect は
-\[
-\Delta_{\mathrm{dyn},h,N}(\theta;T)^2
-\approx
-\frac1N\sum_{i=1}^N \sum_{n=0}^{N_T} w_n \|R_{\theta,h}(r_{h,i}^n)\|_{L_h^2}^2
-\]
-の形にしてください。時間積分の既定値は trapezoidal rule にしてください。
-
-### 2.3 beta の意味
-\(\beta\) は **target generator の one-sided Lipschitz 定数** です。target は Burgers なので、beta の calibration では target の離散 generator
-\[
-F_h(z) = \nu_* z_{xx} - z z_x
-\]
-を使ってください。
-
-Burgers target の safe choice は
-\[
-\widehat M_{\mathcal K}
-=
-\max\{\|(u_i^n)_x\|_{L^\infty},\ \|(r_i^n)_x\|_{L^\infty}\}
-\]
-から
-\[
-\widehat\beta_{\mathrm{safe}} = \frac12 \widehat M_{\mathcal K}
-\]
-です。
-
-pairwise empirical mode では
-\[
-q_h(\eta^a, \eta^b)
-=
-\frac{\langle F_h(\eta^a)-F_h(\eta^b),\ \eta^a-\eta^b\rangle_h}{\|\eta^a-\eta^b\|_{L_h^2}^2}
-\]
-を多数の状態対で計算し、その最大値を使ってください。有限個の状態対しか見ないので、必要なら margin を足せるようにしてください。
-
----
-
-## 3. 現状の問題点
-
-### 3.1 metrics が分散している
-- `pol/model123_1d/metrics.py` は `rms_l2` しか持たない。
-- `pol/model123_1d/experiments.py` はこの `rms_l2` を使う。
-- `model123_burgers_1d.py` は自前で samplewise relative error を計算している。
-- `pol/model123_1d/error_decomposition.py` は別の `discrete_l2_h` を持っている。
-
-このため、主指標と補助指標が整理されていません。
-
-### 3.2 error decomposition の summary が theorem-consistent ではない
-現状の `summary_rows["rhs_beta"]` は、実質的に
-\[
-\sqrt{\frac1N\sum_i (c_{\beta,T}\Delta_{\mathrm{dyn},i} + \Delta_{\mathrm{time},i})^2}
-\]
-に近い量です。しかし theorem-consistent に比較したいのは
-\[
- e^{\beta T}\Delta_{\mathrm{init},N}
- + c_{\beta,T}\Delta_{\mathrm{dyn},N}
- + \Delta_{\mathrm{time},N}
-\]
-です。ここを直してください。
-
-### 3.3 beta_mode が誤解を招く
-現状の `beta_mode` は「beta の求め方」ではなく、保存する散布図の種類に近い意味になっています。これを直してください。
-
-### 3.4 current code は full-state special case なのに、それがコード上で明示されていない
-今回の error decomposition は `Q=I` の full-state special case です。一般の finite-dimensional Model 1 ではありません。このことをコードと出力 schema で明確にしてください。
-
----
-
-## 4. 実装スコープ
-
-### 4.1 今回やること
-- `metrics.py` を誤差指標の一元モジュールにする。
-- `experiments.py` を absolute/relative の両方を shared metrics で出すようにする。
-- `model123_burgers_1d.py` を absolute/relative の両方を shared metrics で出すようにする。
-- `error_decomposition.py` を theorem-consistent に整理する。
-- `model1_error_decomposition_1d.py` の CLI を整理する。
-- テストを追加・更新する。
-
-### 4.2 今回やらないこと
-- 一般の `Q_J` を持つ finite-dimensional Model 1 実装
-- `Delta_obs^(J)` の本実装
-- `reservoir_burgers_1d.py`, `rfm_burgers_1d.py`, `fourier_*.py`, `lowrank_operators/*` の大改修
-
-必要なら import 整理だけに留めてください。
-
----
-
-## 5. file-by-file 実装指示
-
-### 5.1 `pol/model123_1d/metrics.py`
-このファイルを誤差指標の shared module にしてください。
-
-最低限、次の API を用意してください。
-
-```python
-def discrete_l2h_norm(values: torch.Tensor, *, domain_length: float = 1.0) -> torch.Tensor:
-    ...
-
-def per_sample_abs_l2h_error(pred: torch.Tensor, target: torch.Tensor, *, domain_length: float = 1.0) -> torch.Tensor:
-    ...
-
-def dataset_abs_l2h_error(pred: torch.Tensor, target: torch.Tensor, *, domain_length: float = 1.0) -> float:
-    ...
-
-def per_sample_rel_l2h_error(
-    pred: torch.Tensor,
-    target: torch.Tensor,
-    *,
-    domain_length: float = 1.0,
-    eps: float = 1e-12,
-) -> torch.Tensor:
-    ...
-
-def dataset_rel_l2h_mean(
-    pred: torch.Tensor,
-    target: torch.Tensor,
-    *,
-    domain_length: float = 1.0,
-    eps: float = 1e-12,
-) -> float:
-    ...
+```text
+alpha = Ttilde / T
 ```
 
-実装上の注意:
-- current repo は 1D periodic uniform grid なので、`domain_length=1.0` を既定でよいです。
-- 最後の空間軸だけを離散空間軸として扱えば十分です。
-- `rms_l2` は **後方互換の alias** として残してください。意味は `dataset_abs_l2h_error` と同じにしてください。
+The rescaled surrogate trajectory is
 
-### 5.2 `pol/model123_1d/experiments.py`
-ここでは `metrics.py` からだけ誤差を計算してください。
-
-要求:
-- absolute metric と relative metric を両方計算して `metrics` dict に入れる。
-- absolute metric を main として明示する。
-- 既存の `E1_train`, `E1_test`, `E2_train`, ... は壊さないでください。これらは absolute metric の legacy alias として残して構いません。
-- 追加 key はたとえば
-  - `E1_train_abs_l2h`
-  - `E1_test_abs_l2h`
-  - `E1_train_rel_l2h_mean`
-  - `E1_test_rel_l2h_mean`
-  のように明示的な名前にしてください。
-
-### 5.3 `model123_burgers_1d.py`
-ここでも `metrics.py` を使うようにしてください。
-
-要求:
-- train/test について absolute metric と relative metric の両方を出す。
-- 標準出力では absolute metric を先に出し、その後 relative metric を出す。
-- `run_config.json` には
-  - `train_absL2h`
-  - `test_absL2h`
-  - `train_relL2`
-  - `test_relL2`
-  を最低限保存してください。
-- `train_relL2`, `test_relL2` は既存 sweep script 互換のため残してください。
-- ヒストグラムは relative でもよいですが、可能なら absolute 版も追加してください。最低でも JSON schema だけは整えてください。
-
-### 5.4 `pol/model123_1d/error_decomposition.py`
-このファイルが今回の中心です。
-
-#### 5.4.1 scope
-- ここでは **full-state special case** を扱う。
-- したがって現時点では `Q = I`, `E = I` とみなしてよい。
-- ただし将来の拡張を見据え、`Delta_init` は field として残してよい。現在値は 0 でよい。
-
-#### 5.4.2 trajectory representation
-現在は step 1 から `N_t` までの状態しか保存していません。これを改め、**t=0 の初期状態も含めた trajectory** を扱ってください。
-
-推奨:
-- `target_states[n]` が時刻 `t_n = n*dt` の target state
-- `surrogate_states[n]` が時刻 `t_n = n*dt` の surrogate state
-- shape は `(N_t + 1, N, s)`
-- `n=0` は初期状態
-
-こうしておくと trapezoidal rule を自然に実装できます。
-
-#### 5.4.3 time quadrature
-`Delta_dyn` の時間積分は trapezoidal rule を既定にしてください。
-
-推奨 helper:
-
-```python
-def make_time_quadrature_weights(num_steps: int, dt: float, rule: str = "trapezoid") -> torch.Tensor:
-    ...
+```text
+r_{theta,alpha}(s; u0) = Gtilde_{theta, alpha*s}(E u0),    s in [0,T].
 ```
 
-既定値は `rule="trapezoid"` でよいです。必要なら `left` もサポートして構いませんが、既定値は trap にしてください。
+The time-scaled generator residual is
 
-#### 5.4.4 beta redesign
-`beta_mode` を本当の意味で beta estimator にしてください。choices は次を推奨します。
-
-- `zero`
-- `analytic_safe`
-- `analytic_safe_poincare`
-- `empirical_pairwise`
-- `fixed`
-
-別 helper を作ってください。
-
-```python
-def compute_beta(
-    *,
-    calibration_target_states: torch.Tensor,
-    calibration_surrogate_states: torch.Tensor,
-    cfg: ErrorDecompositionConfig,
-) -> tuple[float, dict[str, Any]]:
-    ...
+```text
+R_scale_{theta,alpha}(r) = F(Q r) - alpha * Q Ftilde_theta(r).
 ```
 
-戻り値の `details` には、少なくとも mode, chosen beta, `M_K_hat` or pairwise max などの diagnostic を入れてください。
+The main Model 1 bound is
 
-#### 5.4.5 beta の具体計算
+```text
+D1(theta, alpha*T)
+  <= exp(beta*T) * Delta_init(theta)
+     + c_beta_T * Delta_scale(theta, alpha; T),
+```
 
-##### zero
-\[
-\beta = 0
-\]
+where
 
-##### analytic_safe
-1. calibration trajectory 上の全 state について spectral derivative で \(u_x\) を計算する。
-2. 各状態で格子点最大値
-   \[
-   \|u_x\|_{L_h^\infty} = \max_j |(u_x)_j|
-   \]
-   を取る。
-3. target trajectory と surrogate trajectory の両方を含めた全サンプル・全時刻で最大を取り、
-   \[
-   \widehat M_{\mathcal K} = \max \|u_x\|_{L_h^\infty}
-   \]
-   とする。
-4. 
-   \[
-   \widehat\beta = \frac12 \widehat M_{\mathcal K}
-   \]
-   とする。
+```text
+c_beta_T = sqrt((exp(2*beta*T)-1)/(2*beta))    if beta != 0,
+         = sqrt(T)                             if beta == 0.
+```
 
-##### analytic_safe_poincare
-- `analytic_safe` と同じ `M_K_hat` を計算した上で
-  \[
-  \widehat\beta = -\nu_*(2\pi/L)^2 + \frac12 \widehat M_{\mathcal K}
-  \]
-  とする。current repo は `L=1` でよい。
-- この mode は、compared states の mean が揃っている場合しか安全ではありません。したがって、**samplewise mean が target/surrogate で一致しているかを tolerance 付きで検証**し、一致しないなら `ValueError` を出してください。
+In the current fully observed 1D implementation, `E = I` and `Q = I`, so `Delta_init = 0` unless a non-identity encoder/decoder is explicitly introduced.
 
-##### empirical_pairwise
-- calibration state pool から多数の状態対を取り、
-  \[
-  q_h(\eta^a,\eta^b)
-  =
-  \frac{\langle F_h(\eta^a)-F_h(\eta^b),\eta^a-\eta^b\rangle_h}{\|\eta^a-\eta^b\|_{L_h^2}^2}
-  \]
-  を計算する。
-- `F_h` は **target Burgers generator** `burgers_generator(..., nu=cfg.target_nu)` を使う。
-- 最大値に optional margin `cfg.beta_pairwise_margin` を足して selected beta とする。
-- denominator が小さすぎる pair は skip する。
+### Consequence for code
 
-##### fixed
-- `cfg.beta_fixed` をそのまま使う。
+For `Ttilde != T`, never compute the primary defect as an unscaled residual on native surrogate times `0..T`.
 
-#### 5.4.6 calibration split
-可能なら以下の config を追加してください。
+Incorrect pattern:
 
-- `calibration_num_samples: int = 0`
-- `calibration_seed: int | None = None`
+```python
+defects = generator_defect(surrogate_states[: step_T + 1], cfg)
+```
 
-意味:
-- `calibration_num_samples <= 0` なら evaluation sample をそのまま calibration に使う。
-- `calibration_num_samples > 0` なら別 seed で別の initial condition を生成して beta calibration 専用に使う。
+Correct pattern:
 
-これは optional ですが、できるだけ入れてください。
+```python
+alpha = Ttilde / cfg.T
+s_grid = torch.arange(step_T + 1) * cfg.dt
+r_alpha = surrogate_state_at_native_times(alpha * s_grid)
+defects = scaled_generator_defect(r_alpha, cfg, alpha=alpha)
+```
 
-#### 5.4.7 per-sample rows と summary rows
-per-sample rows と aggregate rows を明確に分けてください。
-
-##### per-sample row に必須の field
-- `sample_index`
-- `Ttilde`
-- `D1_abs_l2h`
-- `matched_time_error_abs_l2h`
-- `Delta_init_abs_l2h`
-- `Delta_dyn_abs_l2h`
-- `Delta_time_abs_l2h`
-- `matched_plus_time_abs_l2h`
-- `rhs_beta0_pathwise_abs_l2h`
-- `rhs_beta_pathwise_abs_l2h`
-- `matched_rhs_beta_pathwise_abs_l2h`
-- `beta_mode`
-- `beta_value`
-- `c_beta_T`
-
-##### summary row に必須の field
-`summary_rows` は theorem-consistent な aggregate quantity を返してください。
-
-- `Ttilde`
-- `num_samples`
-- `D1`
-- `matched_time_error`
-- `Delta_init`
-- `Delta_dyn`
-- `Delta_time`
-- `matched_rhs_beta`
-- `rhs_beta0`
-- `rhs_beta`
-- `triangle_matched_plus_time`
-- `beta_mode`
-- `beta_value`
-- `c_beta_T`
-
-ここで意味は次の通りです。
-
-- `D1` は
-  \[
-  \left(\frac1N\sum_i D_{1,i}^2\right)^{1/2}
-  \]
-- `Delta_dyn` は
-  \[
-  \left(\frac1N\sum_i \Delta_{\mathrm{dyn},i}^2\right)^{1/2}
-  \]
-- `Delta_time` も同様
-- `rhs_beta` は
-  \[
-  e^{\beta T}\Delta_{\mathrm{init}} + c_{\beta,T}\Delta_{\mathrm{dyn}} + \Delta_{\mathrm{time}}
-  \]
-- `rhs_beta0` は
-  \[
-  e^{0\cdot T}\Delta_{\mathrm{init}} + \sqrt{T}\Delta_{\mathrm{dyn}} + \Delta_{\mathrm{time}}
-  \]
-- `matched_rhs_beta` は
-  \[
-  e^{\beta T}\Delta_{\mathrm{init}} + c_{\beta,T}\Delta_{\mathrm{dyn}}
-  \]
-- `triangle_matched_plus_time` は
-  \[
-  \text{matched_time_error} + \Delta_{\mathrm{time}}
-  \]
-
-必要なら legacy diagnostic として `rhs_beta_rms_of_pathwise_sum` などを追加して構いませんが、**`rhs_beta` という名前は theorem-consistent aggregate quantity にしてください。**
-
-#### 5.4.8 aggregate_metric_rows
-この関数はテストから直接呼ばれているので残してください。ただし意味を theorem-consistent な summary に直してください。
-
-#### 5.4.9 plots
-plot 名も誤解がないようにしてください。推奨は次です。
-
-- `matched_time_scatter_beta0_baseline.*`
-- `combined_scatter_beta0_baseline.*`
-- `matched_time_scatter_selected_beta.*`
-- `combined_scatter_selected_beta.*`
-- `time_mismatch_scatter.*`
-- `time_mismatch_envelope.*`
-- `aggregate_bound_vs_ttilde.*`
-
-scatter では pathwise quantity を使ってください。line plot `aggregate_bound_vs_ttilde` では `D1` と `rhs_beta`, `rhs_beta0` を比較してください。
-
-### 5.5 `model1_error_decomposition_1d.py`
-CLI を `error_decomposition.py` に合わせて整理してください。
-
-推奨 CLI 引数:
-- `--beta-mode zero|analytic_safe|analytic_safe_poincare|empirical_pairwise|fixed`
-- `--beta-fixed`
-- `--beta-pairwise-margin`
-- `--beta-max-states`
-- `--calibration-num-samples`
-- `--calibration-seed`
-- `--time-quadrature trapezoid|left`
-
-既存の `--beta-mode correlation|empirical|both` は廃止して構いません。必要なら migration message を出してください。
+Prefer linear interpolation when `alpha*s_grid` is not exactly aligned with the native surrogate `dt` grid.
 
 ---
 
-## 6. backward compatibility の方針
+## Active core files to preserve
 
-完全互換である必要はありませんが、次はできるだけ壊さないでください。
+The following files or their slim equivalents are core and should remain:
 
-- `rms_l2` import
-- `run_experiment(...)["E1_train"]` などの legacy key
-- `model123_burgers_1d.py` の `train_relL2`, `test_relL2`
-- `aggregate_metric_rows(rows)` という関数名
+```text
+pol/burgers_spectral_1d.py
+pol/reservoir_1d.py
+pol/ridge.py
+pol/elm.py
+pol/features_1d.py
+pol/io_mat.py                 # create from the useful part of utilities3.py
+pol/cli.py                    # create from the useful part of cli_utils.py
+pol/plotting.py               # create from the useful 1D part of viz_utils.py
+pol/model123_1d/__init__.py
+pol/model123_1d/initial_conditions.py
+pol/model123_1d/datasets.py
+pol/model123_1d/metrics.py
+pol/model123_1d/predictors.py
+pol/model123_1d/error_decomposition.py
+model123_burgers_1d.py
+model1_error_decomposition_1d.py
+scripts/run_model123_param_sweep.py
+scripts/generate_burgers_1d.py
+README.md
+requirements.txt
+pyproject.toml
+LICENSE
+.gitignore
+```
 
-ただし `summary_rows["rhs_beta"]` の意味は正してください。ここは **意味を直すことが優先** です。
+It is acceptable to keep the two root entry points `model123_burgers_1d.py` and `model1_error_decomposition_1d.py` for backward compatibility, even if future cleanup moves them under `scripts/`.
 
 ---
 
-## 7. テスト方針
+## Files and directories to remove from the active tree
 
-### 7.1 既存テストの更新
-少なくとも次のテスト群が通るようにしてください。
+Remove legacy code rather than leaving a large in-repo archive. If a historical note is needed, add a short `docs/legacy_removed.md` listing removed groups.
+
+### FNO / LowRank legacy
+
+```text
+fourier_1d.py
+fourier_2d.py
+fourier_2d_time.py
+fourier_3d.py
+lowrank_operators/
+scripts/eval.py
+scripts/fourier_2d_tuned.py
+scripts/fourier_3d_time.py
+scripts/fourier_on_images.py
+scripts/super_resolution.py
+```
+
+### Darcy / Navier--Stokes / MATLAB legacy data generation
+
+```text
+data_generation/darcy/
+data_generation/navier_stokes/
+data_generation/burgers/GRF1.m
+data_generation/burgers/burgers1.m
+data_generation/burgers/gen_burgers1.m
+```
+
+### Deprecated Model123 modules
+
+```text
+pol/model123_1d/models.py
+pol/model123_1d/observations.py
+pol/model123_1d/solvers.py
+```
+
+### Old reservoir/RFM experiments
+
+```text
+reservoir_burgers_1d.py
+rfm_burgers_1d.py
+pol/encoder_1d.py
+scripts/hparam_search_reservoir_burgers.py
+scripts/sweep_burgers_nu_feature_times.py
+```
+
+### Redundant sweep/plot scripts after consolidation
+
+```text
+scripts/run_model123_nu_sweep.py
+scripts/run_model123_ttilde_sweep.py
+scripts/plot_model123_beta5_profiles.py
+scripts/plot_model123_ks_profiles.py
+```
+
+### Helper modules to consolidate, then delete
+
+```text
+utilities3.py   -> move needed MatReader functionality to pol/io_mat.py
+cli_utils.py    -> move needed CLI helpers to pol/cli.py
+viz_utils.py    -> move useful 1D plotting and save_figure_all_formats to pol/plotting.py
+```
+
+After migration, update all imports and delete the old helper modules.
+
+---
+
+## Time-scaled residual formulas
+
+Use the generator conventions from `pol/reservoir_1d.py`.
+
+### Target Burgers generator
+
+```text
+F(z) = target_nu * z_xx - z * z_x
+```
+
+### Burgers surrogate
+
+```text
+Ftilde(z) = res_burgers_nu * z_xx - res_burgers_b * z * z_x
+```
+
+Therefore
+
+```text
+R_scale(z)
+  = (target_nu - alpha*res_burgers_nu) * z_xx
+    + (alpha*res_burgers_b - 1.0) * z * z_x.
+```
+
+### Reaction--diffusion surrogate
+
+The implemented RD surrogate is
+
+```text
+Ftilde(z) = rd_nu * z_xx + rd_alpha * z - rd_beta * z^3.
+```
+
+Therefore
+
+```text
+R_scale(z)
+  = (target_nu - alpha*rd_nu) * z_xx
+    - z * z_x
+    - alpha*rd_alpha * z
+    + alpha*rd_beta * z^3.
+```
+
+### Kuramoto--Sivashinsky surrogate
+
+The implemented KS surrogate is
+
+```text
+Ftilde(z) = -ks_b * z * z_x - ks_eta * z_xx - ks_kappa * z_xxxx.
+```
+
+Therefore
+
+```text
+R_scale(z)
+  = (target_nu + alpha*ks_eta) * z_xx
+    + (alpha*ks_b - 1.0) * z * z_x
+    + alpha*ks_kappa * z_xxxx.
+```
+
+### Required implementation names
+
+Prefer explicit names:
+
+```python
+scaled_defect_burgers_reservoir(..., alpha: float, ...)
+scaled_defect_reaction_diffusion_reservoir(..., alpha: float, ...)
+scaled_defect_ks_reservoir(..., alpha: float, ...)
+scaled_generator_defect(z: torch.Tensor, cfg: ErrorDecompositionConfig, *, alpha: float) -> torch.Tensor
+```
+
+`generator_defect` may remain only as a deprecated compatibility alias for `alpha=1.0`.
+
+---
+
+## Error decomposition implementation requirements
+
+`pol/model123_1d/error_decomposition.py` should expose a clear, fully discrete full-state special case.
+
+### Required discrete quantities
+
+Use the 1D uniform-grid norm:
+
+```text
+h = 1 / nx
+||v||_{L_h^2} = sqrt(h * sum_j v_j^2)
+```
+
+Use shared metrics from `pol/model123_1d/metrics.py` whenever possible.
+
+### Time grid
+
+Use target-time grid `s_n` over `[0,T]`:
+
+```text
+s_n = n * dt, n = 0,...,N_T.
+```
+
+Use trapezoidal time quadrature by default.
+
+### Rescaled surrogate states
+
+For each `Ttilde`:
+
+```text
+alpha = Ttilde / T
+r_alpha[n] = surrogate state at native time alpha*s_n.
+```
+
+Use interpolation if `alpha*s_n` is not exactly an integer multiple of `dt`.
+
+### Per-sample quantities
+
+For each sample `i`:
+
+```text
+D1_i = ||u_i(T) - r_{alpha,i}(T)||_{L_h^2}
+Delta_init_i = 0      # full-state identity encode/decode case
+Delta_scale_i^2 = sum_n w_n ||R_scale(r_{alpha,i}(s_n))||_{L_h^2}^2
+rhs_beta0_i = Delta_init_i + sqrt(T) * Delta_scale_i
+rhs_beta_i = exp(beta*T)*Delta_init_i + c_beta_T * Delta_scale_i
+```
+
+### Aggregate quantities
+
+Use empirical RMS over samples:
+
+```text
+D1 = sqrt(mean_i D1_i^2)
+Delta_init = sqrt(mean_i Delta_init_i^2)
+Delta_scale = sqrt(mean_i Delta_scale_i^2)
+rhs_beta0 = Delta_init + sqrt(T) * Delta_scale
+rhs_beta = exp(beta*T) * Delta_init + c_beta_T * Delta_scale
+```
+
+Do not define `rhs_beta` as `sqrt(mean_i rhs_beta_i^2)` unless that value is clearly named as a diagnostic, for example `rhs_beta_pathwise_rms`.
+
+---
+
+## Beta calibration requirements
+
+`beta` is a one-sided Lipschitz constant for the **target Burgers generator**.
+
+For a fixed `alpha`, calibrate beta using the target states `u(s)` and the rescaled surrogate states `r_alpha(s)`, not the native surrogate states `r(s)` unless `alpha=1`.
+
+Supported modes:
+
+```text
+zero
+fixed
+analytic_safe
+analytic_safe_poincare
+empirical_pairwise
+```
+
+### analytic_safe
+
+Use
+
+```text
+M_K_hat = max ||d_x z||_infty
+beta = 0.5 * M_K_hat
+```
+
+over the target and rescaled surrogate states used for calibration.
+
+### analytic_safe_poincare
+
+If samplewise means match, use
+
+```text
+beta = 0.5 * M_K_hat - target_nu * (2*pi)^2.
+```
+
+Raise a clear error if the means do not match within tolerance.
+
+### empirical_pairwise
+
+For state pairs `a,b`, compute
+
+```text
+q(a,b) = <F(a)-F(b), a-b>_h / ||a-b||_{L_h^2}^2
+```
+
+where `F` is the target Burgers generator with `target_nu`. Use the max plus optional margin.
+
+### Multiple Ttilde values
+
+Prefer per-alpha beta calibration and store results under something like:
+
+```python
+result["beta_details_by_ttilde"] = {
+    "0.8": {...},
+    "1.0": {...},
+    "1.2": {...},
+}
+```
+
+Rows and summary rows should carry their own `beta_value`.
+
+---
+
+## Output schema requirements
+
+### Per-sample rows
+
+Include at least:
+
+```text
+sample_index
+T
+Ttilde
+alpha
+D1_abs_l2h
+Delta_init_abs_l2h
+Delta_scale_abs_l2h
+rhs_beta0_pathwise_abs_l2h
+rhs_beta_pathwise_abs_l2h
+beta_mode
+beta_value
+c_beta_T
+```
+
+Optional compatibility aliases:
+
+```text
+Delta_dyn_abs_l2h = Delta_scale_abs_l2h
+rhs_beta_abs_l2h = rhs_beta_pathwise_abs_l2h
+```
+
+Do not expose `Delta_time_abs_l2h` as a primary field. If retained, it must be explicitly named as legacy, e.g. `legacy_Delta_time_abs_l2h`.
+
+### Summary rows
+
+Include at least:
+
+```text
+Ttilde
+alpha
+num_samples
+D1
+Delta_init
+Delta_scale
+rhs_beta0
+rhs_beta
+beta_mode
+beta_value
+c_beta_T
+```
+
+Optional compatibility aliases:
+
+```text
+Delta_dyn = Delta_scale
+```
+
+### Plots
+
+Use time-scaled names and labels:
+
+```text
+delta_scale_vs_ttilde
+scaled_bound_vs_ttilde
+scaled_bound_scatter
+```
+
+Avoid "time mismatch" plot names for primary outputs.
+
+---
+
+## Metrics convention
+
+Use `pol/model123_1d/metrics.py` as the single source of truth.
+
+It should provide:
+
+```python
+discrete_l2h_norm
+per_sample_abs_l2h_error
+dataset_abs_l2h_error
+per_sample_rel_l2h_error
+dataset_rel_l2h_mean
+rms_l2  # backwards-compatible alias for dataset_abs_l2h_error
+```
+
+The main metric is absolute discrete `L_h^2`. Relative error is secondary and should still be written for comparison.
+
+`model123_burgers_1d.py`, `pol/model123_1d/experiments.py`, and sweep scripts must not compute their own incompatible metric formulas.
+
+---
+
+## Model123 and sweep requirements
+
+### `model123_burgers_1d.py`
+
+- Use shared metrics.
+- Write both absolute and relative metrics to `run_config.json`:
+
+```text
+main_metric = "abs_l2h"
+train_absL2h
+test_absL2h
+train_relL2
+test_relL2
+```
+
+- Print absolute metrics first, relative metrics second.
+
+### `scripts/run_model123_param_sweep.py`
+
+This should be the single active sweep script.
+
+Required behavior:
+
+- Read `train_absL2h`, `test_absL2h`, `train_relL2`, and `test_relL2` from each run's `run_config.json`.
+- Use `test_absL2h` as the default ranking and plotting metric.
+- Keep relative metrics in CSV for compatibility.
+- Support sweeps over:
+
+```text
+Ttilde
+res_burgers_nu
+res_burgers_b
+rd_nu
+rd_alpha
+rd_beta
+ks_b
+ks_eta
+ks_kappa
+dt
+K
+J
+```
+
+- Validate pure argument errors, such as `max_workers <= 0`, before data-file existence checks.
+
+Remove separate `nu` and `Ttilde` sweep scripts after the parameter sweep fully covers them.
+
+---
+
+## Data generation requirements
+
+Keep one active Python Burgers data generator for Model123, preferably:
+
+```text
+scripts/generate_burgers_1d.py
+```
+
+It should produce `.mat` or `.pt` outputs compatible with `model123_burgers_1d.py` and include useful metadata when possible:
+
+```text
+T
+dt
+nu
+nx
+num_samples
+```
+
+Remove redundant old generators after consolidation.
+
+---
+
+## Packaging requirements
+
+Add or update `pyproject.toml` so imports and tests work without setting `PYTHONPATH=.` manually.
+
+The slim repository should not depend on `torchvision`; remove it from `requirements.txt` because image/FNO scripts are removed.
+
+Keep dependencies minimal, for example:
+
+```text
+torch
+numpy
+scipy
+h5py
+matplotlib
+pytest
+```
+
+Add a pytest `slow` marker and mark expensive smoke/integration tests accordingly.
+
+---
+
+## README requirements
+
+Rewrite `README.md`. It must not describe the old Fourier Neural Operator repository as the main project.
+
+Recommended structure:
+
+```text
+# Time-Scaled PDE Surrogate Operator Learning
+
+## Overview
+## Theory-to-code map
+## Model 1 / Model 2 / Model 3
+## Burgers target and surrogate PDEs
+## Time-scaled residual and Delta_scale
+## Installation
+## Data generation
+## Running Model123
+## Running time-scaled error decomposition
+## Running parameter sweeps
+## Output schema
+## Tests
+## Removed legacy code
+```
+
+Include short example commands for:
 
 ```bash
-pytest \
-  tests/test_model123_smoke.py \
-  tests/test_model123_1d.py \
-  tests/test_model1_error_decomposition_bounds.py \
-  tests/test_model1_error_decomposition_formulas.py \
-  tests/test_model1_error_decomposition_smoke.py \
-  tests/test_model1_time_bug.py
+python scripts/generate_burgers_1d.py ...
+python model123_burgers_1d.py --model model1 ...
+python model1_error_decomposition_1d.py --ttilde-values 0.8,1.0,1.2 ...
+python scripts/run_model123_param_sweep.py --sweep Ttilde=0.8,1.0,1.2 ...
+pytest -q
 ```
 
-### 7.2 新規または更新すべき内容
-最低限、次をテストしてください。
+---
 
-1. `dataset_abs_l2h_error` が手計算と一致する。
-2. `dataset_rel_l2h_mean` が手計算と一致する。
-3. `rms_l2` が current setting では `dataset_abs_l2h_error` と一致する。
-4. `run_experiment` の result dict に absolute/relative の両方が入る。
-5. `model123_burgers_1d.py` の `run_config.json` に `train_absL2h`, `test_absL2h`, `train_relL2`, `test_relL2` が入る。
-6. same-PDE sanity check:
-   - `D1 == 0`
-   - `Delta_dyn == 0`
-   - `Delta_time == 0`
-7. same-PDE + `Ttilde != T`:
-   - `matched_time_error == 0`
-   - `Delta_dyn == 0`
-   - `D1 == Delta_time`
-   - `rhs_beta == Delta_time`
-8. summary row で
-   - `rhs_beta == exp(beta*T)*Delta_init + c_beta_T*Delta_dyn + Delta_time`
-   - `matched_rhs_beta == exp(beta*T)*Delta_init + c_beta_T*Delta_dyn`
-   - `triangle_matched_plus_time == matched_time_error + Delta_time`
-9. `fixed` beta mode が指定値を返す。
-10. `analytic_safe` beta mode が有限値を返し、diagnostic `M_K_hat` を含む。
+## Tests to add or update
+
+### Time-scaled defect formula tests
+
+Create/update tests that verify:
+
+1. Burgers scaled defect at `alpha=1` equals the old unscaled formula.
+2. Burgers scaled defect is zero for arbitrary states when effective coefficients match, for example:
+
+```text
+target_nu = 0.05
+res_burgers_nu = 0.025
+res_burgers_b = 0.5
+alpha = 2.0
+```
+
+because `alpha*res_burgers_nu = target_nu` and `alpha*res_burgers_b = 1`.
+
+3. RD and KS scaled defects match explicit `F_target - alpha*F_surrogate` formulas.
+
+### Time-scaled error decomposition tests
+
+Verify:
+
+- Summary rows include `alpha`, `Delta_scale`, and theorem-consistent `rhs_beta`.
+- Primary summary rows do not include `Delta_time` unless it is clearly named `legacy_*`.
+- For `beta_mode=zero` and full-state identity setting:
+
+```text
+rhs_beta = sqrt(T) * Delta_scale
+```
+
+- For `Ttilde != T`, the defect is evaluated along `r(alpha*s)`, not native `r(s)`.
+
+### Import side-effect tests
+
+Core modules should import without launching training, loading data, or running experiments.
+
+Test imports for:
+
+```text
+pol.burgers_spectral_1d
+pol.reservoir_1d
+pol.ridge
+pol.elm
+pol.features_1d
+pol.model123_1d.metrics
+pol.model123_1d.predictors
+pol.model123_1d.error_decomposition
+model123_burgers_1d
+model1_error_decomposition_1d
+scripts.run_model123_param_sweep
+```
+
+### Sweep tests
+
+Update tests to target `scripts/run_model123_param_sweep.py`, not deleted `run_model123_nu_sweep.py` or `run_model123_ttilde_sweep.py`.
+
+### Removed module tests
+
+Delete tests that only cover removed legacy modules, such as tests for `pol.encoder_1d`, unless the module is intentionally retained.
 
 ---
 
-## 8. 実装順序の推奨
-1. `metrics.py` を先に仕上げる。
-2. `experiments.py` と `model123_burgers_1d.py` を shared metrics に移す。
-3. `error_decomposition.py` の trajectory と quadrature を直す。
-4. beta estimation を mode 化する。
-5. summary row schema を theorem-consistent に直す。
-6. plot 名と CLI を整理する。
-7. テストを更新・追加する。
-8. pytest を走らせる。
+## Development rules
+
+1. Do not add hidden training or data-loading side effects at import time.
+2. Prefer explicit names over ambiguous legacy names.
+3. Preserve backward-compatible aliases only when cheap and clearly documented.
+4. Use absolute discrete `L_h^2` as the main metric.
+5. Use relative error only as a secondary metric.
+6. Keep the code CPU-friendly for tests.
+7. Mark expensive tests as `slow`.
+8. Do not expand the project with unrelated dependencies.
+9. Do not implement general finite-dimensional `Q_J` or `Delta_obs^(J)` in this refactor.
+10. The final code should be understandable as a direct implementation of the time-scaled TeX theory.
 
 ---
 
-## 9. 最後に Codex が報告すべきこと
-作業完了時には、次を簡潔に報告してください。
+## Final verification checklist
 
-- どのファイルを変更したか
-- new metric API
-- 追加した JSON/CSV key
-- `beta_mode` の新仕様
-- 通したテスト
-- もし互換性のために legacy alias を残したなら、その一覧
+Before finishing, check:
+
+```bash
+pytest -q
+```
+
+If slow tests are marked and the full suite is expensive, also check:
+
+```bash
+pytest -q -m "not slow"
+```
+
+Also manually inspect that:
+
+- `error_decomposition.py` has `scaled_generator_defect` and uses `Delta_scale` as primary.
+- `model1_error_decomposition_1d.py` prints `alpha` and `Delta_scale`.
+- `README.md` no longer describes FNO as the main project.
+- `requirements.txt` no longer includes `torchvision`.
+- Legacy source files listed above are not present in the active tree.
+- `run_model123_param_sweep.py` records absolute and relative metrics.

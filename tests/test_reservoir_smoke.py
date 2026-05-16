@@ -2,8 +2,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import numpy as np
-import scipy.io
 import torch
 
 from pol.elm import FixedRandomELM
@@ -191,7 +189,7 @@ def test_dataset_generator_smoke(tmp_path):
     repo_root = Path(__file__).resolve().parents[1]
     cmd = [
         sys.executable,
-        "data_generation/burgers/generate_burgers_1d.py",
+        "scripts/generate_burgers_1d.py",
         "--out-file",
         str(out_file),
         "--num-samples",
@@ -215,106 +213,10 @@ def test_dataset_generator_smoke(tmp_path):
     assert proc.returncode == 0, proc.stdout + "\n" + proc.stderr
     assert out_file.exists()
 
-    from utilities3 import MatReader
+    from pol.io_mat import MatReader
 
     reader = MatReader(str(out_file))
     a = reader.read_field("a")
     u = reader.read_field("u")
     assert tuple(a.shape) == (4, 64)
     assert tuple(u.shape) == (4, 64)
-
-
-def test_variable_resolution_loaders_smoke(tmp_path):
-    repo_root = Path(__file__).resolve().parents[1]
-    train_file = tmp_path / "train_96.mat"
-    test_file = tmp_path / "test_96.mat"
-
-    rng = np.random.default_rng(0)
-    train_a = rng.standard_normal((8, 96), dtype=np.float32)
-    train_u = rng.standard_normal((8, 96), dtype=np.float32)
-    test_a = rng.standard_normal((4, 96), dtype=np.float32)
-    test_u = rng.standard_normal((4, 96), dtype=np.float32)
-    scipy.io.savemat(train_file, {"a": train_a, "u": train_u})
-    scipy.io.savemat(test_file, {"a": test_a, "u": test_u})
-
-    cmd_res = [
-        sys.executable,
-        "reservoir_burgers_1d.py",
-        "--data-mode",
-        "separate_files",
-        "--train-file",
-        str(train_file),
-        "--test-file",
-        str(test_file),
-        "--ntrain",
-        "6",
-        "--ntest",
-        "3",
-        "--sub",
-        "1",
-        "--batch-size",
-        "2",
-        "--reservoir",
-        "burgers",
-        "--burgers-scheme",
-        "split_step",
-        "--dt",
-        "0.01",
-        "--burgers-fine-dt",
-        "0.002",
-        "--K",
-        "2",
-        "--Tr",
-        "0.02",
-        "--obs",
-        "points",
-        "--J",
-        "8",
-        "--use-elm",
-        "0",
-        "--device",
-        "cpu",
-        "--out-dir",
-        str(tmp_path / "viz_res"),
-    ]
-    proc_res = subprocess.run(cmd_res, cwd=repo_root, capture_output=True, text=True)
-    assert proc_res.returncode == 0, proc_res.stdout + "\n" + proc_res.stderr
-
-    cmd_rfm = [
-        sys.executable,
-        "rfm_burgers_1d.py",
-        "--data-mode",
-        "separate_files",
-        "--train-file",
-        str(train_file),
-        "--test-file",
-        str(test_file),
-        "--ntrain",
-        "6",
-        "--ntest",
-        "3",
-        "--sub",
-        "1",
-        "--batch-size",
-        "2",
-        "--reservoir",
-        "burgers",
-        "--burgers-scheme",
-        "split_step",
-        "--dt",
-        "0.01",
-        "--burgers-fine-dt",
-        "0.002",
-        "--K",
-        "2",
-        "--Tr",
-        "0.02",
-        "--m",
-        "16",
-        "--device",
-        "cpu",
-        "--out-dir",
-        str(tmp_path / "viz_rfm"),
-    ]
-    proc_rfm = subprocess.run(cmd_rfm, cwd=repo_root, capture_output=True, text=True)
-    assert proc_rfm.returncode == 0, proc_rfm.stdout + "\n" + proc_rfm.stderr

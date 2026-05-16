@@ -8,7 +8,6 @@ from .burgers_spectral_1d import (
     make_wavenumbers,
     simulate_burgers_split_step,
 )
-from .encoder_1d import EncoderOutputs, FixedEncoder1D
 from .features_1d import (
     build_sensor_indices,
     build_time_grid,
@@ -26,8 +25,6 @@ __all__ = [
     "burgers_nonlinear_hat",
     "burgers_split_step_outer",
     "simulate_burgers_split_step",
-    "FixedEncoder1D",
-    "EncoderOutputs",
     "Reservoir1DSolver",
     "build_time_grid",
     "build_sensor_indices",

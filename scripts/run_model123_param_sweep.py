@@ -323,6 +323,8 @@ def run_one(cmd: list[str], log_path: Path, env: dict[str, str], dry_run: bool) 
 def load_run_metrics(run_dir: Path) -> dict[str, Any]:
     payload = json.loads((run_dir / "run_config.json").read_text(encoding="utf-8"))
     return {
+        "train_absL2h": float(payload["train_absL2h"]),
+        "test_absL2h": float(payload["test_absL2h"]),
         "train_relL2": float(payload["train_relL2"]),
         "test_relL2": float(payload["test_relL2"]),
         "resolved_obs": payload["resolved_obs"],
@@ -438,8 +440,6 @@ def validate_sweeps(args: argparse.Namespace) -> list[SweepSpec]:
 
 
 def validate_args(args: argparse.Namespace) -> tuple[list[str], list[SweepSpec]]:
-    if not os.path.exists(args.data_file):
-        raise FileNotFoundError("Data file not found: %s" % args.data_file)
     if not (0.0 < args.train_split < 1.0):
         raise ValueError("--train-split must be in (0, 1)")
     if args.ntrain <= 0 or args.ntest <= 0 or args.batch_size <= 0 or args.sub <= 0:
@@ -450,6 +450,8 @@ def validate_args(args: argparse.Namespace) -> tuple[list[str], list[SweepSpec]]
         raise ValueError("--max-workers must be positive")
     if args.best_k <= 0:
         raise ValueError("--best-k must be positive")
+    if not os.path.exists(args.data_file):
+        raise FileNotFoundError("Data file not found: %s" % args.data_file)
     models = parse_models(args.models)
     return models, validate_sweeps(args)
 
@@ -588,6 +590,9 @@ def make_base_row(
         "model": model,
         "status": "pending",
         "return_code": None,
+        "train_absL2h": None,
+        "test_absL2h": None,
+        "test_absL2h_plot": None,
         "train_relL2": None,
         "test_relL2": None,
         "test_relL2_plot": None,
@@ -625,11 +630,12 @@ def run_model_jobs(
             row.update(metrics)
             row["status"] = "ok"
             row["return_code"] = 0
+            row["test_absL2h_plot"] = clip_for_log(float(row["test_absL2h"]), eps)
             row["test_relL2_plot"] = clip_for_log(float(row["test_relL2"]), eps)
             rows.append(row)
             print(
-                "[%s] reuse %s -> test=%.6e"
-                % (model, row["sweep_id"], row["test_relL2"]),
+                "[%s] reuse %s -> test_absL2h=%.6e"
+                % (model, row["sweep_id"], row["test_absL2h"]),
                 flush=True,
             )
             continue
@@ -692,10 +698,11 @@ def run_model_jobs(
                 metrics = load_run_metrics(Path(row["run_dir"]))
                 row.update(metrics)
                 row["status"] = "ok"
+                row["test_absL2h_plot"] = clip_for_log(float(row["test_absL2h"]), eps)
                 row["test_relL2_plot"] = clip_for_log(float(row["test_relL2"]), eps)
                 print(
-                    "[done %d/%d] [%s] %s -> test=%.6e"
-                    % (completed, total_jobs, model, row["sweep_id"], row["test_relL2"]),
+                    "[done %d/%d] [%s] %s -> test_absL2h=%.6e"
+                    % (completed, total_jobs, model, row["sweep_id"], row["test_absL2h"]),
                     flush=True,
                 )
             else:
@@ -737,7 +744,7 @@ def save_1d_profile_plot(
     groups: dict[Any, list[float]] = {}
     for row in rows:
         key = row[parameter.name]
-        groups.setdefault(key, []).append(float(row["test_relL2"]))
+        groups.setdefault(key, []).append(float(row["test_absL2h"]))
     x_values = sorted(groups.keys(), key=float)
     best_values = [min(groups[key]) for key in x_values]
     mean_values = [float(np.mean(groups[key])) for key in x_values]
@@ -750,7 +757,7 @@ def save_1d_profile_plot(
     set_axis_scale(ax, "x", parameter, x_values)
     ax.set_yscale("log")
     ax.set_xlabel(parameter.label)
-    ax.set_ylabel("test relL2")
+    ax.set_ylabel("test absL2h")
     ax.set_title(f"{model}: {parameter.label} profile")
     ax.grid(True, which="both", linestyle="--", alpha=0.35)
     ax.legend()
@@ -773,7 +780,7 @@ def build_pair_projection(
     for row in rows:
         xi = x_to_idx[row[x_name]]
         yi = y_to_idx[row[y_name]]
-        score = float(row["test_relL2"])
+        score = float(row["test_absL2h"])
         current = matrix[yi, xi]
         if np.isnan(current) or score < current:
             matrix[yi, xi] = score
@@ -811,7 +818,7 @@ def save_pair_heatmap(
     ax.set_ylabel(y_spec.label)
     ax.set_title(f"{model}: min projected error")
     cbar = fig.colorbar(image, ax=ax)
-    cbar.set_label("test relL2")
+    cbar.set_label("test absL2h")
 
     for yi in range(matrix.shape[0]):
         for xi in range(matrix.shape[1]):
@@ -837,14 +844,14 @@ def save_combined_single_param_plot(
     for model, rows in model_rows.items():
         groups: dict[Any, list[float]] = {}
         for row in rows:
-            groups.setdefault(row[parameter.name], []).append(float(row["test_relL2"]))
+            groups.setdefault(row[parameter.name], []).append(float(row["test_absL2h"]))
         x_values = sorted(groups.keys(), key=float)
         y_values = [clip_for_log(min(groups[key]), eps) for key in x_values]
         ax.plot(x_values, y_values, marker="o", linewidth=1.6, label=model)
     set_axis_scale(ax, "x", parameter, [row[parameter.name] for rows in model_rows.values() for row in rows])
     ax.set_yscale("log")
     ax.set_xlabel(parameter.label)
-    ax.set_ylabel("test relL2")
+    ax.set_ylabel("test absL2h")
     ax.set_title(f"Model 1/2/3: {parameter.label} profile")
     ax.grid(True, which="both", linestyle="--", alpha=0.35)
     ax.legend()
@@ -862,9 +869,18 @@ def save_best_runs(
     best_k: int,
 ) -> None:
     ok_rows = [row for row in rows if row["status"] == "ok"]
-    ok_rows.sort(key=lambda row: float(row["test_relL2"]))
+    ok_rows.sort(key=lambda row: float(row["test_absL2h"]))
     trimmed = ok_rows[:best_k]
-    fieldnames = ["model", "test_relL2", "train_relL2", *sweep_names, "run_dir", "sweep_id"]
+    fieldnames = [
+        "model",
+        "test_absL2h",
+        "train_absL2h",
+        "test_relL2",
+        "train_relL2",
+        *sweep_names,
+        "run_dir",
+        "sweep_id",
+    ]
     write_csv(out_path.with_suffix(".csv"), trimmed, fieldnames)
     out_path.with_suffix(".json").write_text(json.dumps(trimmed, indent=2), encoding="utf-8")
 
@@ -946,6 +962,9 @@ def main(argv: list[str] | None = None) -> int:
             "sweep_id",
             "status",
             "return_code",
+            "train_absL2h",
+            "test_absL2h",
+            "test_absL2h_plot",
             "train_relL2",
             "test_relL2",
             "test_relL2_plot",

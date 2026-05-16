@@ -21,8 +21,8 @@ from pol.model123_1d.initial_conditions import (
     sample_initial_condition_coefficients,
 )
 from pol.model123_1d.metrics import discrete_l2h_norm
+from pol.plotting import save_figure_all_formats
 from pol.reservoir_1d import Reservoir1DSolver, ReservoirConfig
-from viz_utils import save_figure_all_formats
 
 
 @dataclass(frozen=True)
@@ -117,17 +117,18 @@ def _validate_config(cfg: ErrorDecompositionConfig) -> None:
             raise ValueError("All Ttilde values must be positive")
 
 
-def make_initial_conditions(cfg: ErrorDecompositionConfig, *, num_samples: int | None = None, seed: int | None = None) -> torch.Tensor:
+def make_initial_conditions(
+    cfg: ErrorDecompositionConfig,
+    *,
+    num_samples: int | None = None,
+    seed: int | None = None,
+) -> torch.Tensor:
     device = _resolve_device(cfg.device)
     dtype = _resolve_dtype(cfg.dtype)
     sample_count = cfg.num_samples if num_samples is None else int(num_samples)
     sample_seed = cfg.seed if seed is None else int(seed)
     if cfg.initial_condition_type == "fourier":
-        coeffs = sample_initial_condition_coefficients(
-            sample_count,
-            seed=sample_seed,
-            dtype=dtype,
-        )
+        coeffs = sample_initial_condition_coefficients(sample_count, seed=sample_seed, dtype=dtype)
         return evaluate_initial_conditions(coeffs, cfg.nx, device=device, dtype=dtype).cpu()
     return sample_gaussian_random_field_initial_conditions(
         sample_count,
@@ -142,8 +143,14 @@ def make_initial_conditions(cfg: ErrorDecompositionConfig, *, num_samples: int |
     ).cpu()
 
 
+def _num_steps_for_time(time_value: float, dt: float) -> int:
+    return int(math.ceil(float(time_value) / float(dt) - 1e-12))
+
+
 def _simulate_target_trajectory(u0: torch.Tensor, cfg: ErrorDecompositionConfig) -> torch.Tensor:
     total_steps = int(round(cfg.T / cfg.dt))
+    if not math.isclose(total_steps * cfg.dt, cfg.T, rel_tol=1e-9, abs_tol=1e-12):
+        raise ValueError("cfg.T must align with cfg.dt for the target grid")
     obs_steps = list(range(1, total_steps + 1))
     states_per_step: list[list[torch.Tensor]] = [[] for _ in obs_steps]
     work_device = _resolve_device(cfg.device)
@@ -201,16 +208,17 @@ def _make_surrogate_solver(cfg: ErrorDecompositionConfig) -> Reservoir1DSolver:
 
 
 def _simulate_surrogate_trajectory(u0: torch.Tensor, cfg: ErrorDecompositionConfig) -> torch.Tensor:
-    max_time = max(max(cfg.Ttilde_values), cfg.T)
-    total_steps = int(round(max_time / cfg.dt))
+    max_time = max(float(value) for value in cfg.Ttilde_values)
+    total_steps = _num_steps_for_time(max_time, cfg.dt)
     obs_steps = list(range(1, total_steps + 1))
     states_per_step: list[list[torch.Tensor]] = [[] for _ in obs_steps]
     work_device = _resolve_device(cfg.device)
     dtype = _resolve_dtype(cfg.dtype)
     solver = _make_surrogate_solver(cfg)
+    integration_time = total_steps * cfg.dt
     for start in range(0, u0.shape[0], cfg.batch_size):
         batch = u0[start : start + cfg.batch_size].to(device=work_device, dtype=dtype)
-        states = solver.simulate(batch, dt=cfg.dt, Tr=max_time, obs_steps=obs_steps)
+        states = solver.simulate(batch, dt=cfg.dt, Tr=integration_time, obs_steps=obs_steps)
         for idx, state in enumerate(states):
             states_per_step[idx].append(state.detach().cpu())
     stacked = torch.stack([torch.cat(chunks, dim=0) for chunks in states_per_step], dim=0)
@@ -241,6 +249,72 @@ def burgers_generator(z: torch.Tensor, *, nu: float) -> torch.Tensor:
     return nu * uxx - z * ux
 
 
+def scaled_defect_burgers_reservoir(
+    z: torch.Tensor,
+    *,
+    alpha: float,
+    target_nu: float,
+    res_burgers_nu: float,
+    res_burgers_b: float,
+) -> torch.Tensor:
+    ux, uxx, _ = spectral_derivatives_1d(z)
+    return (target_nu - alpha * res_burgers_nu) * uxx + (alpha * res_burgers_b - 1.0) * z * ux
+
+
+def scaled_defect_reaction_diffusion_reservoir(
+    z: torch.Tensor,
+    *,
+    alpha: float,
+    target_nu: float,
+    rd_nu: float,
+    rd_alpha: float,
+    rd_beta: float,
+) -> torch.Tensor:
+    ux, uxx, _ = spectral_derivatives_1d(z)
+    return (target_nu - alpha * rd_nu) * uxx - z * ux - alpha * rd_alpha * z + alpha * rd_beta * z.pow(3)
+
+
+def scaled_defect_ks_reservoir(
+    z: torch.Tensor,
+    *,
+    alpha: float,
+    target_nu: float,
+    ks_b: float,
+    ks_eta: float,
+    ks_kappa: float,
+) -> torch.Tensor:
+    ux, uxx, uxxxx = spectral_derivatives_1d(z)
+    return (target_nu + alpha * ks_eta) * uxx + (alpha * ks_b - 1.0) * z * ux + alpha * ks_kappa * uxxxx
+
+
+def scaled_generator_defect(z: torch.Tensor, cfg: ErrorDecompositionConfig, *, alpha: float) -> torch.Tensor:
+    if cfg.reservoir == "burgers":
+        return scaled_defect_burgers_reservoir(
+            z,
+            alpha=alpha,
+            target_nu=cfg.target_nu,
+            res_burgers_nu=cfg.res_burgers_nu,
+            res_burgers_b=cfg.res_burgers_b,
+        )
+    if cfg.reservoir == "reaction_diffusion":
+        return scaled_defect_reaction_diffusion_reservoir(
+            z,
+            alpha=alpha,
+            target_nu=cfg.target_nu,
+            rd_nu=cfg.rd_nu,
+            rd_alpha=cfg.rd_alpha,
+            rd_beta=cfg.rd_beta,
+        )
+    return scaled_defect_ks_reservoir(
+        z,
+        alpha=alpha,
+        target_nu=cfg.target_nu,
+        ks_b=cfg.ks_b,
+        ks_eta=cfg.ks_eta,
+        ks_kappa=cfg.ks_kappa,
+    )
+
+
 def defect_burgers_reservoir(
     z: torch.Tensor,
     *,
@@ -248,8 +322,13 @@ def defect_burgers_reservoir(
     res_burgers_nu: float,
     res_burgers_b: float,
 ) -> torch.Tensor:
-    ux, uxx, _ = spectral_derivatives_1d(z)
-    return (target_nu - res_burgers_nu) * uxx + (res_burgers_b - 1.0) * z * ux
+    return scaled_defect_burgers_reservoir(
+        z,
+        alpha=1.0,
+        target_nu=target_nu,
+        res_burgers_nu=res_burgers_nu,
+        res_burgers_b=res_burgers_b,
+    )
 
 
 def defect_reaction_diffusion_reservoir(
@@ -260,8 +339,14 @@ def defect_reaction_diffusion_reservoir(
     rd_alpha: float,
     rd_beta: float,
 ) -> torch.Tensor:
-    ux, uxx, _ = spectral_derivatives_1d(z)
-    return (target_nu - rd_nu) * uxx - z * ux - rd_alpha * z + rd_beta * z.pow(3)
+    return scaled_defect_reaction_diffusion_reservoir(
+        z,
+        alpha=1.0,
+        target_nu=target_nu,
+        rd_nu=rd_nu,
+        rd_alpha=rd_alpha,
+        rd_beta=rd_beta,
+    )
 
 
 def defect_ks_reservoir(
@@ -272,33 +357,19 @@ def defect_ks_reservoir(
     ks_eta: float,
     ks_kappa: float,
 ) -> torch.Tensor:
-    ux, uxx, uxxxx = spectral_derivatives_1d(z)
-    return (target_nu + ks_eta) * uxx + (ks_b - 1.0) * z * ux + ks_kappa * uxxxx
+    return scaled_defect_ks_reservoir(
+        z,
+        alpha=1.0,
+        target_nu=target_nu,
+        ks_b=ks_b,
+        ks_eta=ks_eta,
+        ks_kappa=ks_kappa,
+    )
 
 
 def generator_defect(z: torch.Tensor, cfg: ErrorDecompositionConfig) -> torch.Tensor:
-    if cfg.reservoir == "burgers":
-        return defect_burgers_reservoir(
-            z,
-            target_nu=cfg.target_nu,
-            res_burgers_nu=cfg.res_burgers_nu,
-            res_burgers_b=cfg.res_burgers_b,
-        )
-    if cfg.reservoir == "reaction_diffusion":
-        return defect_reaction_diffusion_reservoir(
-            z,
-            target_nu=cfg.target_nu,
-            rd_nu=cfg.rd_nu,
-            rd_alpha=cfg.rd_alpha,
-            rd_beta=cfg.rd_beta,
-        )
-    return defect_ks_reservoir(
-        z,
-        target_nu=cfg.target_nu,
-        ks_b=cfg.ks_b,
-        ks_eta=cfg.ks_eta,
-        ks_kappa=cfg.ks_kappa,
-    )
+    """Deprecated compatibility alias for the unscaled alpha=1 residual."""
+    return scaled_generator_defect(z, cfg, alpha=1.0)
 
 
 def make_time_quadrature_weights(num_steps: int, dt: float, rule: str = "trapezoid") -> torch.Tensor:
@@ -313,11 +384,52 @@ def make_time_quadrature_weights(num_steps: int, dt: float, rule: str = "trapezo
             weights[-1] = 0.5 * float(dt)
         return weights
     if rule == "left":
-        weights = torch.full((num_steps + 1,), 0.0, dtype=torch.float64)
+        weights = torch.zeros((num_steps + 1,), dtype=torch.float64)
         if num_steps >= 1:
             weights[:-1] = float(dt)
         return weights
     raise ValueError("rule must be trapezoid or left")
+
+
+def interpolate_trajectory_at_times(
+    states: torch.Tensor,
+    query_times: torch.Tensor,
+    *,
+    dt: float,
+) -> torch.Tensor:
+    """Linearly interpolate a trajectory with states[n] at native time n*dt."""
+    if states.ndim < 2:
+        raise ValueError("states must have a leading time dimension")
+    if dt <= 0.0:
+        raise ValueError("dt must be positive")
+    query = query_times.to(dtype=torch.float64, device=states.device)
+    native = query / float(dt)
+    lower = torch.floor(native + 1e-12).to(dtype=torch.long)
+    upper = torch.clamp(lower + 1, max=states.shape[0] - 1)
+    lower = torch.clamp(lower, min=0, max=states.shape[0] - 1)
+    if torch.any(native < -1e-10) or torch.any(native > states.shape[0] - 1 + 1e-10):
+        raise ValueError("query times exceed simulated surrogate trajectory")
+    frac = (native - lower.to(dtype=torch.float64)).clamp(0.0, 1.0).to(dtype=states.dtype)
+    view_shape = (frac.shape[0],) + (1,) * (states.ndim - 1)
+    frac_view = frac.reshape(view_shape)
+    return (1.0 - frac_view) * states.index_select(0, lower) + frac_view * states.index_select(0, upper)
+
+
+def target_time_grid(cfg: ErrorDecompositionConfig) -> torch.Tensor:
+    step_T = int(round(cfg.T / cfg.dt))
+    if not math.isclose(step_T * cfg.dt, cfg.T, rel_tol=1e-9, abs_tol=1e-12):
+        raise ValueError("cfg.T must align with cfg.dt for the target grid")
+    return torch.arange(step_T + 1, dtype=torch.float64) * float(cfg.dt)
+
+
+def rescaled_surrogate_states(
+    surrogate_states: torch.Tensor,
+    cfg: ErrorDecompositionConfig,
+    *,
+    alpha: float,
+) -> torch.Tensor:
+    s_grid = target_time_grid(cfg)
+    return interpolate_trajectory_at_times(surrogate_states, alpha * s_grid, dt=cfg.dt)
 
 
 def _flatten_state_pool(states: torch.Tensor, *, max_states: int) -> torch.Tensor:
@@ -334,14 +446,19 @@ def compute_beta(
     calibration_surrogate_states: torch.Tensor,
     cfg: ErrorDecompositionConfig,
 ) -> tuple[float, dict[str, Any]]:
-    shared_steps = min(calibration_target_states.shape[0], calibration_surrogate_states.shape[0])
-    target_shared = calibration_target_states[:shared_steps]
-    surrogate_shared = calibration_surrogate_states[:shared_steps]
+    if calibration_target_states.shape != calibration_surrogate_states.shape:
+        raise ValueError("beta calibration target and surrogate states must have the same shape")
+    target_shared = calibration_target_states
+    surrogate_shared = calibration_surrogate_states
     details: dict[str, Any] = {"mode": cfg.beta_mode}
 
     if cfg.beta_mode == "zero":
         details["chosen_beta"] = 0.0
         return 0.0, details
+
+    if cfg.beta_mode == "fixed":
+        details["chosen_beta"] = float(cfg.beta_fixed)
+        return float(cfg.beta_fixed), details
 
     if cfg.beta_mode in {"analytic_safe", "analytic_safe_poincare"}:
         combined = torch.cat([target_shared, surrogate_shared], dim=1)
@@ -358,10 +475,6 @@ def compute_beta(
             details["poincare_shift"] = -cfg.target_nu * (2.0 * math.pi) ** 2
         details["chosen_beta"] = float(beta)
         return float(beta), details
-
-    if cfg.beta_mode == "fixed":
-        details["chosen_beta"] = float(cfg.beta_fixed)
-        return float(cfg.beta_fixed), details
 
     flat = _flatten_state_pool(torch.cat([target_shared, surrogate_shared], dim=1), max_states=cfg.beta_max_states)
     F = burgers_generator(flat, nu=cfg.target_nu)
@@ -426,29 +539,27 @@ def aggregate_metric_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for ttilde in sorted(grouped):
         t_rows = grouped[ttilde]
         delta_init = _rms([float(row["Delta_init_abs_l2h"]) for row in t_rows])
-        delta_dyn = _rms([float(row["Delta_dyn_abs_l2h"]) for row in t_rows])
-        delta_time = _rms([float(row["Delta_time_abs_l2h"]) for row in t_rows])
-        matched = _rms([float(row["matched_time_error_abs_l2h"]) for row in t_rows])
+        delta_scale = _rms([float(row["Delta_scale_abs_l2h"]) for row in t_rows])
         d1 = _rms([float(row["D1_abs_l2h"]) for row in t_rows])
         beta_value = float(t_rows[0]["beta_value"])
         cbeta = float(t_rows[0]["c_beta_T"])
-        exp_beta_t = math.exp(beta_value * float(t_rows[0].get("T", 0.0)))
-        matched_rhs_beta = exp_beta_t * delta_init + cbeta * delta_dyn
-        rhs_beta0 = delta_init + math.sqrt(float(t_rows[0].get("T", 0.0))) * delta_dyn + delta_time
-        rhs_beta = matched_rhs_beta + delta_time
+        T = float(t_rows[0]["T"])
+        exp_beta_t = math.exp(beta_value * T)
+        rhs_beta0 = delta_init + math.sqrt(T) * delta_scale
+        rhs_beta = exp_beta_t * delta_init + cbeta * delta_scale
+        pathwise_rms = _rms([float(row["rhs_beta_pathwise_abs_l2h"]) for row in t_rows])
         summary_rows.append(
             {
                 "Ttilde": float(ttilde),
+                "alpha": float(t_rows[0]["alpha"]),
                 "num_samples": len(t_rows),
                 "D1": d1,
-                "matched_time_error": matched,
                 "Delta_init": delta_init,
-                "Delta_dyn": delta_dyn,
-                "Delta_time": delta_time,
-                "matched_rhs_beta": matched_rhs_beta,
+                "Delta_scale": delta_scale,
+                "Delta_dyn": delta_scale,
                 "rhs_beta0": rhs_beta0,
                 "rhs_beta": rhs_beta,
-                "triangle_matched_plus_time": matched + delta_time,
+                "rhs_beta_pathwise_rms": pathwise_rms,
                 "beta_mode": t_rows[0]["beta_mode"],
                 "beta_value": beta_value,
                 "beta_empirical": beta_value,
@@ -466,54 +577,51 @@ def _compute_rows_for_ttilde(
     Ttilde: float,
     beta_value: float,
 ) -> list[dict[str, Any]]:
+    alpha = float(Ttilde) / float(cfg.T)
     step_T = int(round(cfg.T / cfg.dt))
-    step_ttilde = int(round(Ttilde / cfg.dt))
-
     target_T = target_states[step_T]
-    surrogate_T = surrogate_states[step_T]
-    surrogate_ttilde = surrogate_states[step_ttilde]
-    defects = generator_defect(surrogate_states[: step_T + 1], cfg)
+    r_alpha = rescaled_surrogate_states(surrogate_states, cfg, alpha=alpha)
+    surrogate_ttilde = r_alpha[-1]
+
+    defects = scaled_generator_defect(r_alpha, cfg, alpha=alpha)
     defect_norms = discrete_l2_h(defects.reshape(-1, defects.shape[-1])).reshape(step_T + 1, -1)
-    weights = make_time_quadrature_weights(step_T, cfg.dt, cfg.time_quadrature).to(defect_norms.device)
-    delta_dyn_sq = torch.sum(weights.unsqueeze(1) * defect_norms.pow(2), dim=0)
-    Delta_dyn = torch.sqrt(delta_dyn_sq)
+    weights = make_time_quadrature_weights(step_T, cfg.dt, cfg.time_quadrature).to(
+        device=defect_norms.device,
+        dtype=defect_norms.dtype,
+    )
+    delta_scale_sq = torch.sum(weights.unsqueeze(1) * defect_norms.pow(2), dim=0)
+    Delta_scale = torch.sqrt(delta_scale_sq)
 
     D1 = discrete_l2_h(target_T - surrogate_ttilde)
-    matched = discrete_l2_h(target_T - surrogate_T)
-    Delta_time = discrete_l2_h(surrogate_T - surrogate_ttilde)
     Delta_init = torch.zeros_like(D1)
     cbeta = c_beta_T(beta_value, cfg.T)
     exp_beta_t = math.exp(beta_value * cfg.T)
-    rhs_beta0_pathwise = Delta_init + math.sqrt(cfg.T) * Delta_dyn + Delta_time
-    matched_rhs_beta_pathwise = exp_beta_t * Delta_init + cbeta * Delta_dyn
-    rhs_beta_pathwise = matched_rhs_beta_pathwise + Delta_time
-    matched_plus_time = matched + Delta_time
+    rhs_beta0_pathwise = Delta_init + math.sqrt(cfg.T) * Delta_scale
+    rhs_beta_pathwise = exp_beta_t * Delta_init + cbeta * Delta_scale
 
     rows: list[dict[str, Any]] = []
     for idx in range(target_T.shape[0]):
         rhs_beta0_value = float(rhs_beta0_pathwise[idx].item())
         rhs_beta_value = float(rhs_beta_pathwise[idx].item())
-        matched_rhs_beta_value = float(matched_rhs_beta_pathwise[idx].item())
+        delta_scale_value = float(Delta_scale[idx].item())
         row = {
             "sample_index": idx,
             "T": float(cfg.T),
             "Ttilde": float(Ttilde),
+            "alpha": float(alpha),
             "D1_abs_l2h": float(D1[idx].item()),
-            "matched_time_error_abs_l2h": float(matched[idx].item()),
             "Delta_init_abs_l2h": float(Delta_init[idx].item()),
-            "Delta_dyn_abs_l2h": float(Delta_dyn[idx].item()),
-            "Delta_time_abs_l2h": float(Delta_time[idx].item()),
-            "matched_plus_time_abs_l2h": float(matched_plus_time[idx].item()),
+            "Delta_scale_abs_l2h": delta_scale_value,
             "rhs_beta0_pathwise_abs_l2h": rhs_beta0_value,
             "rhs_beta_pathwise_abs_l2h": rhs_beta_value,
-            "matched_rhs_beta_pathwise_abs_l2h": matched_rhs_beta_value,
-            "rhs_beta0_abs_l2h": rhs_beta0_value,
-            "rhs_beta_abs_l2h": rhs_beta_value,
-            "matched_rhs_beta_abs_l2h": matched_rhs_beta_value,
             "beta_mode": cfg.beta_mode,
             "beta_value": float(beta_value),
             "beta_empirical": float(beta_value),
             "c_beta_T": float(cbeta),
+            # Backward-compatible aliases. Delta_dyn is now exactly Delta_scale.
+            "Delta_dyn_abs_l2h": delta_scale_value,
+            "rhs_beta_abs_l2h": rhs_beta_value,
+            "rhs_beta0_abs_l2h": rhs_beta0_value,
         }
         rows.append(row)
     return rows
@@ -542,31 +650,42 @@ def run_error_decomposition(
     else:
         calibration_target_states, calibration_surrogate_states = target_states, surrogate_states
 
-    beta_value, beta_details = compute_beta(
-        calibration_target_states=calibration_target_states,
-        calibration_surrogate_states=calibration_surrogate_states,
-        cfg=cfg,
-    )
-
     rows: list[dict[str, Any]] = []
+    beta_details_by_ttilde: dict[str, dict[str, Any]] = {}
+    beta_values_by_ttilde: dict[str, float] = {}
     for ttilde in cfg.Ttilde_values:
+        ttilde_float = float(ttilde)
+        alpha = ttilde_float / float(cfg.T)
+        cal_r_alpha = rescaled_surrogate_states(calibration_surrogate_states, cfg, alpha=alpha)
+        cal_target = calibration_target_states[: cal_r_alpha.shape[0]]
+        beta_value, beta_details = compute_beta(
+            calibration_target_states=cal_target,
+            calibration_surrogate_states=cal_r_alpha,
+            cfg=cfg,
+        )
+        key = format(ttilde_float, ".12g")
+        beta_details_by_ttilde[key] = {**beta_details, "Ttilde": ttilde_float, "alpha": alpha}
+        beta_values_by_ttilde[key] = beta_value
         rows.extend(
             _compute_rows_for_ttilde(
                 target_states,
                 surrogate_states,
                 cfg=cfg,
-                Ttilde=float(ttilde),
+                Ttilde=ttilde_float,
                 beta_value=beta_value,
             )
         )
     summary_rows = aggregate_metric_rows(rows)
+    first_key = format(float(cfg.Ttilde_values[0]), ".12g")
     result = {
         "config": _config_to_jsonable(cfg),
         "full_state_special_case": True,
+        "theory": "time_scaled_model1",
         "beta_mode": cfg.beta_mode,
-        "beta_value": beta_value,
-        "beta_empirical": beta_value,
-        "beta_details": beta_details,
+        "beta_value": beta_values_by_ttilde[first_key],
+        "beta_empirical": beta_values_by_ttilde[first_key],
+        "beta_details": beta_details_by_ttilde[first_key],
+        "beta_details_by_ttilde": beta_details_by_ttilde,
         "rows": rows,
         "summary_rows": summary_rows,
     }
@@ -623,22 +742,17 @@ def _scatter_with_groups(
     plt.close(fig)
 
 
-def _time_mismatch_envelope_plot(summary_rows: list[dict[str, Any]], out_path_no_ext: str) -> None:
+def _delta_scale_plot(summary_rows: list[dict[str, Any]], out_path_no_ext: str) -> None:
     ttilde = np.asarray([row["Ttilde"] for row in summary_rows], dtype=float)
-    matched = np.asarray([row["matched_time_error"] for row in summary_rows], dtype=float)
-    delta_time = np.asarray([row["Delta_time"] for row in summary_rows], dtype=float)
+    delta_scale = np.asarray([row["Delta_scale"] for row in summary_rows], dtype=float)
     d1 = np.asarray([row["D1"] for row in summary_rows], dtype=float)
-    envelope = matched + delta_time
 
     fig, ax = plt.subplots(figsize=(7.0, 4.6))
     ax.plot(ttilde, d1, marker="o", linewidth=1.8, label="D1")
-    ax.plot(ttilde, matched, marker="o", linewidth=1.4, label="matched_time_error")
-    ax.plot(ttilde, delta_time, marker="o", linewidth=1.4, label="Delta_time")
-    ax.fill_between(ttilde, matched, envelope, alpha=0.2, label="matched + Delta_time")
-    ax.plot(ttilde, envelope, marker="o", linewidth=1.4, linestyle="--", label="triangle bound")
+    ax.plot(ttilde, delta_scale, marker="o", linewidth=1.6, label="Delta_scale")
     ax.set_xlabel("Ttilde")
     ax.set_ylabel("absolute discrete L2h")
-    ax.set_title("Time mismatch envelope")
+    ax.set_title("Time-scaled defect vs Ttilde")
     ax.grid(True, alpha=0.3)
     ax.legend()
     fig.tight_layout()
@@ -646,7 +760,7 @@ def _time_mismatch_envelope_plot(summary_rows: list[dict[str, Any]], out_path_no
     plt.close(fig)
 
 
-def _aggregate_bound_plot(summary_rows: list[dict[str, Any]], out_path_no_ext: str) -> None:
+def _scaled_bound_plot(summary_rows: list[dict[str, Any]], out_path_no_ext: str) -> None:
     ttilde = np.asarray([row["Ttilde"] for row in summary_rows], dtype=float)
     d1 = np.asarray([row["D1"] for row in summary_rows], dtype=float)
     rhs_beta = np.asarray([row["rhs_beta"] for row in summary_rows], dtype=float)
@@ -658,7 +772,7 @@ def _aggregate_bound_plot(summary_rows: list[dict[str, Any]], out_path_no_ext: s
     ax.plot(ttilde, rhs_beta0, marker="o", linewidth=1.6, label="rhs_beta0")
     ax.set_xlabel("Ttilde")
     ax.set_ylabel("absolute discrete L2h")
-    ax.set_title("Aggregate bound vs Ttilde")
+    ax.set_title("Time-scaled bound vs Ttilde")
     ax.grid(True, alpha=0.3)
     ax.legend()
     fig.tight_layout()
@@ -683,9 +797,11 @@ def save_error_decomposition_outputs(result: dict[str, Any], out_dir: str) -> No
             {
                 "config": result["config"],
                 "full_state_special_case": result["full_state_special_case"],
+                "theory": result["theory"],
                 "beta_mode": result["beta_mode"],
                 "beta_value": result["beta_value"],
                 "beta_details": result["beta_details"],
+                "beta_details_by_ttilde": result["beta_details_by_ttilde"],
                 "summary_rows": summary_rows,
             },
             f,
@@ -695,29 +811,11 @@ def save_error_decomposition_outputs(result: dict[str, Any], out_dir: str) -> No
     _scatter_with_groups(
         rows,
         x_key="rhs_beta0_pathwise_abs_l2h",
-        y_key="matched_time_error_abs_l2h",
-        xlabel="sqrt(T) Delta_dyn",
-        ylabel="matched_time_error",
-        title="Matched-time scatter (beta0 baseline)",
-        out_path_no_ext=os.path.join(out_dir, "matched_time_scatter_beta0_baseline"),
-    )
-    _scatter_with_groups(
-        rows,
-        x_key="rhs_beta0_pathwise_abs_l2h",
         y_key="D1_abs_l2h",
         xlabel="rhs_beta0_pathwise",
         ylabel="D1",
-        title="Combined scatter (beta0 baseline)",
-        out_path_no_ext=os.path.join(out_dir, "combined_scatter_beta0_baseline"),
-    )
-    _scatter_with_groups(
-        rows,
-        x_key="matched_rhs_beta_pathwise_abs_l2h",
-        y_key="matched_time_error_abs_l2h",
-        xlabel="matched_rhs_beta_pathwise",
-        ylabel="matched_time_error",
-        title="Matched-time scatter (selected beta)",
-        out_path_no_ext=os.path.join(out_dir, "matched_time_scatter_selected_beta"),
+        title="Time-scaled bound scatter (beta0)",
+        out_path_no_ext=os.path.join(out_dir, "scaled_bound_scatter_beta0"),
     )
     _scatter_with_groups(
         rows,
@@ -725,20 +823,20 @@ def save_error_decomposition_outputs(result: dict[str, Any], out_dir: str) -> No
         y_key="D1_abs_l2h",
         xlabel="rhs_beta_pathwise",
         ylabel="D1",
-        title="Combined scatter (selected beta)",
-        out_path_no_ext=os.path.join(out_dir, "combined_scatter_selected_beta"),
+        title="Time-scaled bound scatter",
+        out_path_no_ext=os.path.join(out_dir, "scaled_bound_scatter"),
     )
     _scatter_with_groups(
         rows,
-        x_key="Delta_time_abs_l2h",
+        x_key="Delta_scale_abs_l2h",
         y_key="D1_abs_l2h",
-        xlabel="Delta_time",
+        xlabel="Delta_scale",
         ylabel="D1",
-        title="Time mismatch scatter",
-        out_path_no_ext=os.path.join(out_dir, "time_mismatch_scatter"),
+        title="Delta_scale scatter",
+        out_path_no_ext=os.path.join(out_dir, "delta_scale_scatter"),
     )
-    _time_mismatch_envelope_plot(summary_rows, os.path.join(out_dir, "time_mismatch_envelope"))
-    _aggregate_bound_plot(summary_rows, os.path.join(out_dir, "aggregate_bound_vs_ttilde"))
+    _delta_scale_plot(summary_rows, os.path.join(out_dir, "delta_scale_vs_ttilde"))
+    _scaled_bound_plot(summary_rows, os.path.join(out_dir, "scaled_bound_vs_ttilde"))
 
 
 __all__ = [
@@ -753,9 +851,16 @@ __all__ = [
     "discrete_l2_h",
     "estimate_empirical_beta",
     "generator_defect",
+    "interpolate_trajectory_at_times",
     "make_initial_conditions",
     "make_time_quadrature_weights",
+    "rescaled_surrogate_states",
     "run_error_decomposition",
     "save_error_decomposition_outputs",
+    "scaled_defect_burgers_reservoir",
+    "scaled_defect_ks_reservoir",
+    "scaled_defect_reaction_diffusion_reservoir",
+    "scaled_generator_defect",
     "spectral_derivatives_1d",
+    "target_time_grid",
 ]

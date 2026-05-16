@@ -137,13 +137,13 @@ def main():
     result = run_error_decomposition(cfg, save_outputs=True)
     for row in result["summary_rows"]:
         print(
-            "Ttilde=%g D1=%.6e matched=%.6e Delta_time=%.6e Delta_dyn=%.6e beta=%.6e mode=%s"
+            "Ttilde=%g alpha=%.6g D1=%.6e Delta_scale=%.6e rhs_beta=%.6e beta=%.6e mode=%s"
             % (
                 row["Ttilde"],
+                row["alpha"],
                 row["D1"],
-                row["matched_time_error"],
-                row["Delta_time"],
-                row["Delta_dyn"],
+                row["Delta_scale"],
+                row["rhs_beta"],
                 row["beta_value"],
                 row["beta_mode"],
             ),
