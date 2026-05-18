@@ -2,8 +2,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import torch
 
+from test_utils import run_cli
 from pol.elm import FixedRandomELM
 from pol.features_1d import build_sensor_indices, collect_observations, flatten_observations
 from pol.reservoir_1d import Reservoir1DSolver, ReservoirConfig
@@ -184,6 +186,7 @@ def test_burgers_scheme_coexistence():
     assert torch.isfinite(torch.stack(states_split, dim=0)).all()
 
 
+@pytest.mark.slow
 def test_dataset_generator_smoke(tmp_path):
     out_file = tmp_path / "burgers_small.mat"
     repo_root = Path(__file__).resolve().parents[1]
@@ -209,7 +212,7 @@ def test_dataset_generator_smoke(tmp_path):
         "--device",
         "cpu",
     ]
-    proc = subprocess.run(cmd, cwd=repo_root, capture_output=True, text=True)
+    proc = run_cli(cmd, cwd=repo_root)
     assert proc.returncode == 0, proc.stdout + "\n" + proc.stderr
     assert out_file.exists()
 

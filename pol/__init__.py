@@ -14,6 +14,7 @@ from .features_1d import (
     collect_observations,
     flatten_observations,
 )
+from .time_grid import require_time_aligned
 from .reservoir_1d import Reservoir1DSolver
 from .ridge import fit_ridge_streaming, fit_ridge_streaming_standardized, predict_linear
 from .model123_1d import DatasetBundle, DatasetConfig, ExperimentConfig, build_dataset, run_experiment, save_dataset_bundle
@@ -27,6 +28,7 @@ __all__ = [
     "simulate_burgers_split_step",
     "Reservoir1DSolver",
     "build_time_grid",
+    "require_time_aligned",
     "build_sensor_indices",
     "collect_observations",
     "flatten_observations",

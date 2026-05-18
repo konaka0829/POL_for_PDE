@@ -2,8 +2,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import torch
 
+from test_utils import run_cli
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -33,6 +35,16 @@ def test_dataset_builder_shapes():
     assert bundle.y_test.shape == (6, 64)
 
 
+def test_dataset_builder_allows_empty_test_split():
+    cfg = DatasetConfig(total_samples=3, ntrain=3, ntest=0, nx=32, dt=1e-2, fine_dt=2e-3, batch_size=3)
+    bundle = build_dataset(cfg)
+    assert bundle.u0_train.shape == (3, 32)
+    assert bundle.y_train.shape == (3, 32)
+    assert bundle.u0_test.shape == (0, 32)
+    assert bundle.y_test.shape == (0, 32)
+
+
+@pytest.mark.slow
 def test_exact_burgers_inclusion_chain_smoke(tmp_path):
     cfg = ExperimentConfig(
         total_samples=18,
@@ -60,11 +72,12 @@ def test_exact_burgers_inclusion_chain_smoke(tmp_path):
     assert "E1_train_rel_l2h_mean" in metrics
 
 
+@pytest.mark.slow
 def test_cli_smoke(tmp_path):
     out_dir = tmp_path / "cli_out"
     cmd = [
         sys.executable,
-        "model123_error_study.py",
+        "scripts/run_model123_synthetic_study.py",
         "--total-samples",
         "18",
         "--ntrain",
@@ -94,6 +107,6 @@ def test_cli_smoke(tmp_path):
         "--out-dir",
         str(out_dir),
     ]
-    proc = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+    proc = run_cli(cmd, cwd=REPO_ROOT)
     assert proc.returncode == 0, proc.stdout + "\n" + proc.stderr
     assert (out_dir / "metrics.json").exists()

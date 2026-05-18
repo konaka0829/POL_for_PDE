@@ -3,9 +3,11 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 import scipy.io
 import torch
 
+from test_utils import run_cli
 from pol.model123_1d.initial_conditions import sample_gaussian_random_field_initial_conditions
 
 
@@ -33,11 +35,12 @@ def run_generator(out_file: Path, seed: int) -> dict:
         "--device",
         "cpu",
     ]
-    proc = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+    proc = run_cli(cmd, cwd=REPO_ROOT)
     assert proc.returncode == 0, proc.stdout + "\n" + proc.stderr
     return scipy.io.loadmat(out_file)
 
 
+@pytest.mark.slow
 def test_model123_generator_smoke_metadata_and_reproducibility(tmp_path):
     payload0 = run_generator(tmp_path / "run0.mat", seed=3)
     payload1 = run_generator(tmp_path / "run1.mat", seed=3)
@@ -49,6 +52,47 @@ def test_model123_generator_smoke_metadata_and_reproducibility(tmp_path):
     assert float(payload0["dt"][0, 0]) == 0.01
     assert int(payload0["nx"][0, 0]) == 64
     assert int(payload0["num_samples"][0, 0]) == 4
+
+
+@pytest.mark.slow
+def test_generator_pt_has_no_extra_sample_when_ntest_zero(tmp_path):
+    out_file = tmp_path / "small.pt"
+    cmd = [
+        sys.executable,
+        "scripts/generate_burgers_1d.py",
+        "--out-file",
+        str(out_file),
+        "--format",
+        "pt",
+        "--num-samples",
+        "3",
+        "--grid-size",
+        "32",
+        "--T",
+        "0.03",
+        "--dt",
+        "0.01",
+        "--fine-dt",
+        "0.002",
+        "--batch-size",
+        "3",
+        "--device",
+        "cpu",
+    ]
+    proc = run_cli(cmd, cwd=REPO_ROOT)
+    assert proc.returncode == 0, proc.stdout + "\n" + proc.stderr
+    payload = torch.load(out_file, map_location="cpu", weights_only=False)
+    assert payload["u0_train"].shape == (3, 32)
+    assert payload["y_train"].shape == (3, 32)
+    assert payload["u0_test"].shape == (0, 32)
+    assert payload["y_test"].shape == (0, 32)
+
+
+@pytest.mark.slow
+def test_generator_mat_sample_count_matches_request(tmp_path):
+    payload = run_generator(tmp_path / "small.mat", seed=5)
+    assert payload["a"].shape[0] == 4
+    assert payload["u"].shape[0] == 4
 
 
 def test_gaussian_rf_zero_mean_matches_matlab_periodic_convention():

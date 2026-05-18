@@ -75,8 +75,12 @@ def _simulate_target(
 def build_dataset(cfg: DatasetConfig, *, device: torch.device | None = None) -> DatasetBundle:
     if cfg.total_samples != cfg.ntrain + cfg.ntest:
         raise ValueError("total_samples must equal ntrain + ntest")
-    if cfg.ntrain <= 0 or cfg.ntest <= 0:
-        raise ValueError("ntrain and ntest must be positive")
+    if cfg.ntrain <= 0:
+        raise ValueError("ntrain must be positive")
+    if cfg.ntest < 0:
+        raise ValueError("ntest must be nonnegative")
+    if cfg.total_samples <= 0:
+        raise ValueError("total_samples must be positive")
 
     work_device = device or torch.device("cpu")
     dtype = cfg.torch_dtype()

@@ -134,6 +134,8 @@ def _predict_all(model, loader) -> torch.Tensor:
 
 
 def run_experiment(cfg: ExperimentConfig) -> dict[str, float | str]:
+    if cfg.ntest <= 0:
+        raise ValueError("ExperimentConfig.ntest must be positive")
     os.makedirs(cfg.out_dir, exist_ok=True)
     device = _resolve_device(cfg.device)
 

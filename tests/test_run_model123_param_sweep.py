@@ -4,6 +4,7 @@ import pytest
 
 from scripts.run_model123_param_sweep import (
     build_job_env,
+    build_parser,
     build_range_values,
     canonical_parameter_name,
     clip_for_log,
@@ -57,6 +58,13 @@ def test_build_job_env_limits_blas_threads():
     assert env["TORCH_NUM_THREADS"] == "1"
 
 
+def test_parser_defaults_match_lightweight_model123_dataset():
+    args = build_parser().parse_args(["--sweep", "Ttilde=1.0"])
+    assert args.data_file == "data/burgers_model123.mat"
+    assert args.dt == 1e-2
+    assert args.burgers_fine_dt == 1e-4
+
+
 def test_validate_args_rejects_nonpositive_max_workers_before_missing_data_file():
     args = Namespace(
         data_file="does_not_exist.mat",
@@ -67,8 +75,8 @@ def test_validate_args_rejects_nonpositive_max_workers_before_missing_data_file(
         sub=1,
         T=1.0,
         Ttilde=1.0,
-        dt=1e-4,
-        burgers_fine_dt=1e-5,
+        dt=1e-2,
+        burgers_fine_dt=1e-4,
         max_workers=0,
         best_k=10,
         models="model1",

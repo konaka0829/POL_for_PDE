@@ -15,6 +15,7 @@ from pol.features_1d import (
 )
 from pol.reservoir_1d import Reservoir1DSolver, ReservoirConfig
 from pol.ridge import fit_ridge_streaming, fit_ridge_streaming_standardized, predict_linear
+from pol.time_grid import require_time_aligned
 
 
 def _resolve_device(device: str | torch.device) -> torch.device:
@@ -138,7 +139,9 @@ class ObservedTrajectoryFeature1D:
     def simulate_state_at_time(self, u0_batch: torch.Tensor, t: float) -> torch.Tensor:
         if t <= 0.0:
             raise ValueError("t must be positive")
-        step = max(1, int(round(float(t) / self.config.dt)))
+        step = require_time_aligned(float(t), self.config.dt, "t")
+        if step <= 0:
+            raise ValueError("t must be positive")
         z0 = self.encode(u0_batch)
         return self.reservoir.simulate(
             z0,

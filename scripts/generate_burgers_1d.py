@@ -48,25 +48,33 @@ def _resolve_device(name: str) -> torch.device:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     total = args.total_samples if args.total_samples > 0 else args.num_samples
+    if total <= 0:
+        raise ValueError("--num-samples/--total-samples must be positive")
+    if args.ntrain < 0 or args.ntest < 0:
+        raise ValueError("--ntrain and --ntest must be nonnegative")
     if args.ntrain <= 0 and args.ntest <= 0:
         ntrain = total
         ntest = 0
+    elif args.ntrain <= 0:
+        ntest = args.ntest
+        ntrain = total - ntest
+    elif args.ntest <= 0:
+        ntrain = args.ntrain
+        ntest = total - ntrain
     else:
         ntrain = args.ntrain
         ntest = args.ntest
-    if ntest == 0:
-        cfg_total = total + 1
-        cfg_ntrain = total
-        cfg_ntest = 1
-    else:
-        cfg_total = total
-        cfg_ntrain = ntrain
-        cfg_ntest = ntest
+    if ntrain <= 0:
+        raise ValueError("resolved ntrain must be positive")
+    if ntest < 0:
+        raise ValueError("resolved ntest must be nonnegative")
+    if ntrain + ntest != total:
+        raise ValueError("resolved ntrain + ntest must equal total samples")
 
     cfg = DatasetConfig(
-        total_samples=cfg_total,
-        ntrain=cfg_ntrain,
-        ntest=cfg_ntest,
+        total_samples=total,
+        ntrain=ntrain,
+        ntest=ntest,
         seed=args.seed,
         nx=args.nx,
         target_nu=args.nu,
@@ -81,12 +89,8 @@ def main(argv: list[str] | None = None) -> int:
     out_file.parent.mkdir(parents=True, exist_ok=True)
     output_format = args.format or out_file.suffix.lower().lstrip(".") or "mat"
 
-    if ntest == 0:
-        a = bundle.u0_train[:total]
-        u = bundle.y_train[:total]
-    else:
-        a = torch.cat([bundle.u0_train, bundle.u0_test], dim=0)
-        u = torch.cat([bundle.y_train, bundle.y_test], dim=0)
+    a = torch.cat([bundle.u0_train, bundle.u0_test], dim=0)
+    u = torch.cat([bundle.y_train, bundle.y_test], dim=0)
 
     if output_format == "pt":
         save_dataset_bundle(bundle, out_file)

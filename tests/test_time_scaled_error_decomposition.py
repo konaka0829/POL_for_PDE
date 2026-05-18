@@ -3,8 +3,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import torch
 
+from test_utils import run_cli
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -97,6 +99,7 @@ def test_ttilde_not_equal_t_uses_rescaled_trajectory_not_native_time():
     assert row["Delta_scale"] < 1e-10
 
 
+@pytest.mark.slow
 def test_end_to_end_cli_smoke_uses_scaled_output_names(tmp_path):
     out_dir = tmp_path / "error_decomp"
     cmd = [
@@ -127,7 +130,7 @@ def test_end_to_end_cli_smoke_uses_scaled_output_names(tmp_path):
         "--out-dir",
         str(out_dir),
     ]
-    proc = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+    proc = run_cli(cmd, cwd=REPO_ROOT)
     assert proc.returncode == 0, proc.stdout + "\n" + proc.stderr
     assert "Delta_scale" in proc.stdout
     assert "Delta_time" not in proc.stdout

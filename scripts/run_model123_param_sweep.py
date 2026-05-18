@@ -361,7 +361,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Range sweep spec such as Ttilde:0.5:1.5:0.05",
     )
-    parser.add_argument("--data-file", default="data/burgers_T10_nu001.mat")
+    parser.add_argument("--data-file", default="data/burgers_model123.mat")
     parser.add_argument("--out-root", default="outputs/model123_param_sweep")
     parser.add_argument("--train-split", type=float, default=1000.0 / 1200.0)
     parser.add_argument("--ntrain", type=int, default=1000)
@@ -372,7 +372,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--T", type=float, default=1.0)
     parser.add_argument("--Ttilde", type=float, default=1.0)
-    parser.add_argument("--dt", type=float, default=1e-4)
+    parser.add_argument("--dt", type=float, default=1e-2)
     parser.add_argument("--feature-times", type=str, default="")
     parser.add_argument("--K", type=int, default=1)
     parser.add_argument("--reservoir", choices=("burgers", "reaction_diffusion", "ks"), default="burgers")
@@ -396,7 +396,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ks-eta", type=float, default=1.0)
     parser.add_argument("--ks-kappa", type=float, default=1.0)
     parser.add_argument("--burgers-scheme", choices=("semi_implicit", "split_step"), default="split_step")
-    parser.add_argument("--burgers-fine-dt", type=float, default=1e-5)
+    parser.add_argument("--burgers-fine-dt", type=float, default=1e-4)
     parser.add_argument("--burgers-dealias", type=int, choices=(0, 1), default=1)
     parser.add_argument("--elm-h", type=int, default=1024)
     parser.add_argument("--elm-activation", choices=("tanh", "relu", "identity"), default="tanh")

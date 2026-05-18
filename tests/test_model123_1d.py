@@ -3,15 +3,19 @@ import sys
 import json
 from pathlib import Path
 
+import pytest
 import scipy.io
 import torch
 
+from test_utils import run_cli
 from pol.model123_1d import (
     Model1Predictor1D,
     Model2Regressor1D,
     Model3Regressor1D,
     Model123Config,
 )
+from pol.features_1d import build_time_grid
+from pol.time_grid import require_time_aligned
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -98,6 +102,38 @@ def test_model3_contains_model2_via_skip_block():
     assert torch.allclose(aug[:, : phi.shape[1]], phi, atol=1e-7, rtol=1e-7)
 
 
+def test_require_time_aligned_accepts_integer_step():
+    assert require_time_aligned(0.05, 0.01) == 5
+
+
+def test_require_time_aligned_rejects_non_grid_time():
+    with pytest.raises(ValueError, match="not aligned"):
+        require_time_aligned(0.055, 0.01)
+
+
+def test_model1_rejects_non_grid_ttilde():
+    x, _ = make_data(num_samples=2, s=32)
+    with pytest.raises(ValueError, match="not aligned"):
+        model = Model1Predictor1D(s=x.shape[1], config=base_config(Ttilde=0.055, dt=0.01))
+        model.predict(x)
+
+
+def test_build_time_grid_rejects_explicit_non_grid_time():
+    with pytest.raises(ValueError, match="not aligned"):
+        build_time_grid(Tr=0.05, dt=0.01, K=1, feature_times="0.015")
+
+
+def test_build_time_grid_rejects_non_grid_tr_with_explicit_times():
+    with pytest.raises(ValueError, match="not aligned"):
+        build_time_grid(Tr=0.055, dt=0.01, K=1, feature_times="0.01,0.03")
+
+
+def test_build_time_grid_automatic_uses_integer_steps():
+    times, steps = build_time_grid(Tr=0.05, dt=0.01, K=3, feature_times="")
+    assert steps == [1, 3, 5]
+    assert all(require_time_aligned(t, 0.01) == step for t, step in zip(times, steps))
+
+
 def test_model2_progress_output(capsys):
     x, y = make_data()
     model = Model2Regressor1D(s=x.shape[1], config=base_config(obs="points", J=12))
@@ -115,6 +151,7 @@ def test_model2_progress_output(capsys):
     assert "[model2 train] ridge solve done" in captured.out
 
 
+@pytest.mark.slow
 def test_model123_cli_smoke(tmp_path):
     x, y = make_data(num_samples=8, s=64)
     data_file = tmp_path / "small.mat"
@@ -156,7 +193,7 @@ def test_model123_cli_smoke(tmp_path):
         "--out-dir",
         str(out_dir),
     ]
-    proc = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+    proc = run_cli(cmd, cwd=REPO_ROOT)
     assert proc.returncode == 0, proc.stdout + "\n" + proc.stderr
     assert (out_dir / "run_config.json").exists()
     payload = json.loads((out_dir / "run_config.json").read_text(encoding="utf-8"))

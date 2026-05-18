@@ -75,6 +75,10 @@ python scripts/generate_burgers_1d.py --out-file data/burgers_model123.mat --num
 ```
 
 The `.mat` output includes `a`, `u`, `T`, `dt`, `nu`, `nx`, and `num_samples`.
+For `.pt` output, the saved bundle contains exactly the requested split:
+`u0_train/y_train` have `ntrain` samples and `u0_test/y_test` have `ntest`
+samples. If no split is specified, `--num-samples N --format pt` writes
+train `N` / test `0`.
 
 ## Running Model123
 
@@ -85,6 +89,21 @@ python model123_burgers_1d.py --model model3 --data-file data/burgers_model123.m
 ```
 
 Runs write `run_config.json` with `main_metric = "abs_l2h"`, `train_absL2h`, `test_absL2h`, `train_relL2`, and `test_relL2`.
+The Model123 runner and feature extraction require `Ttilde`, `Tr`, and any
+explicit `--feature-times` to lie on the `dt` grid. Non-grid values such as
+`--Ttilde 0.055 --dt 0.01` raise `ValueError` instead of silently rounding.
+This grid-alignment rule is only for predictors/features; the time-scaled error
+decomposition still uses interpolation for `r_alpha(s)` as required by the
+theory.
+
+For synthetic exact-inclusion and smoke studies, use:
+
+```bash
+python scripts/run_model123_synthetic_study.py --total-samples 120 --ntrain 100 --ntest 20
+```
+
+The old root command `python model123_error_study.py ...` remains as a backward
+compatible wrapper. The main real-data runner is `model123_burgers_1d.py`.
 
 ## Running Time-Scaled Error Decomposition
 
@@ -97,10 +116,14 @@ Printed summaries include `Ttilde`, `alpha`, `D1`, `Delta_scale`, `rhs_beta`, `b
 ## Running Parameter Sweeps
 
 ```bash
-python scripts/run_model123_param_sweep.py --sweep Ttilde=0.8,1.0,1.2 --data-file data/burgers_model123.mat --models model1,model2,model3
+python scripts/run_model123_param_sweep.py --sweep Ttilde=0.8,1.0,1.2 --models model1,model2,model3
 ```
 
 The unified sweep supports `Ttilde`, `res_burgers_nu`, `res_burgers_b`, `rd_nu`, `rd_alpha`, `rd_beta`, `ks_b`, `ks_eta`, `ks_kappa`, `dt`, `K`, and `J`. It ranks and plots by `test_absL2h` while retaining relative metrics in CSV/JSON.
+Its default data file is `data/burgers_model123.mat`, matching the generation
+example above. Default `dt` is `1e-2` and default Burgers inner `fine_dt` is
+`1e-4` for practical smoke and sweep startup runs; override them for higher
+accuracy studies.
 
 ## Output Schema
 
@@ -123,9 +146,13 @@ Delta_scale, rhs_beta0, rhs_beta, beta_mode, beta_value, c_beta_T
 ## Tests
 
 ```bash
-pytest -q
 pytest -q -m "not slow"
+pytest -q
 ```
+
+`pytest -q -m "not slow"` runs the lightweight unit checks. Full `pytest -q`
+also runs subprocess and dataset-generation smoke tests, which are marked
+`slow`, have explicit timeouts, and pin BLAS/Torch thread counts to one.
 
 ## Removed Legacy Code
 

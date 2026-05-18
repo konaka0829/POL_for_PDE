@@ -124,3 +124,17 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Generated experiment data and outputs
+/data/
+outputs/
+visualizations/
+image/
+*.mat
+*.pt
+*.pth
+*.npz
+*.npy
+
+# Common generated reports / sweep outputs
+*.csv

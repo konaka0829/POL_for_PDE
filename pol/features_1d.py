@@ -5,6 +5,8 @@ from typing import Iterable, List, Sequence
 import numpy as np
 import torch
 
+from pol.time_grid import require_time_aligned
+
 
 def build_time_grid(
     *,
@@ -15,24 +17,34 @@ def build_time_grid(
 ) -> tuple[List[float], List[int]]:
     if Tr <= 0.0 or dt <= 0.0:
         raise ValueError("Tr and dt must be positive")
+    step_T = require_time_aligned(Tr, dt, "Tr")
+    if step_T <= 0:
+        raise ValueError("Tr must be positive")
 
     if feature_times.strip():
         times = [float(v.strip()) for v in feature_times.split(",") if v.strip()]
         if not times:
             raise ValueError("feature-times is empty")
+        steps = [require_time_aligned(t, dt, f"feature_times[{idx}]") for idx, t in enumerate(times)]
     else:
         if K <= 0:
             raise ValueError("K must be positive when feature-times is not provided")
+        if K > step_T:
+            raise ValueError("K cannot exceed the number of positive dt steps in Tr")
         if K == 1:
-            times = [Tr]
+            steps = [step_T]
         else:
-            times = np.linspace(dt, Tr, num=K).tolist()
+            steps = np.linspace(1, step_T, num=K)
+            steps = [int(round(v)) for v in steps.tolist()]
+            steps = sorted(set(steps))
+        times = [step * dt for step in steps]
 
-    for t in times:
+    for t, step in zip(times, steps):
         if t <= 0.0 or t > Tr + 1e-12:
             raise ValueError(f"Feature time {t} must be in (0, Tr]")
+        if step <= 0:
+            raise ValueError(f"Feature time {t} must be positive")
 
-    steps = [max(1, int(round(t / dt))) for t in times]
     # Keep unique steps in ascending order while preserving matching times at those steps.
     step_to_time = {}
     for t, s in zip(times, steps):
