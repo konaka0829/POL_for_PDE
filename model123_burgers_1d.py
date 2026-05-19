@@ -11,12 +11,17 @@ if sys.version_info < (3, 10):
     raise SystemExit(1)
 
 import argparse
+import csv
 import json
 import os
 from dataclasses import asdict
 import time
 import warnings
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
@@ -29,7 +34,11 @@ from pol.model123_1d.metrics import (
     per_sample_abs_l2h_error,
     per_sample_rel_l2h_error,
 )
-from pol.plotting import plot_1d_prediction, plot_error_histogram
+from pol.model123_1d.error_decomposition import (
+    ErrorDecompositionConfig,
+    compute_time_scaled_defect_for_dataset,
+)
+from pol.plotting import plot_1d_prediction, plot_error_histogram, save_figure_all_formats
 
 
 def parse_args():
@@ -93,6 +102,17 @@ def parse_args():
     parser.add_argument("--burgers-dealias", type=int, choices=(0, 1), default=1)
 
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    parser.add_argument("--compute-time-scaled-defect", action="store_true")
+    parser.add_argument(
+        "--defect-target-nu",
+        type=float,
+        default=None,
+        help="target Burgers viscosity used in the defect computation. If omitted, read `nu` from the dataset metadata when available; otherwise warn and fall back to 0.05.",
+    )
+    parser.add_argument("--defect-time-quadrature", choices=("trapezoid", "left"), default="trapezoid")
+    parser.add_argument("--defect-beta-mode", choices=("zero", "fixed"), default="zero")
+    parser.add_argument("--defect-beta-fixed", type=float, default=0.0)
+    parser.add_argument("--defect-dtype", choices=("float32", "float64"), default="float64")
     parser.add_argument("--out-dir", type=str, default="outputs/model123_burgers_1d")
     parser.add_argument(
         "--save-model",
@@ -169,6 +189,41 @@ def _validate_target_time(args, train_reader, test_reader=None):
             "The CLI target time must match the dataset target."
             % (args.T, data_T)
         )
+
+
+def _meta_nu_from_path(path):
+    if not path:
+        return None
+    try:
+        reader = MatReader(path)
+    except Exception:
+        return None
+    return _extract_scalar_meta(reader, "nu")
+
+
+def resolve_defect_target_nu(args):
+    if args.defect_target_nu is not None:
+        return float(args.defect_target_nu)
+    if args.data_mode == "single_split":
+        value = _meta_nu_from_path(args.data_file)
+        if value is not None:
+            return float(value)
+    else:
+        train_nu = _meta_nu_from_path(args.train_file)
+        test_nu = _meta_nu_from_path(args.test_file)
+        if train_nu is not None and test_nu is not None:
+            if not np.isclose(train_nu, test_nu):
+                raise ValueError("Train/test nu metadata mismatch: %s vs %s" % (train_nu, test_nu))
+            return float(train_nu)
+        if train_nu is not None:
+            return float(train_nu)
+        if test_nu is not None:
+            return float(test_nu)
+    warnings.warn(
+        "Dataset does not provide nu metadata for defect diagnostics; using fallback target_nu=0.05.",
+        RuntimeWarning,
+    )
+    return 0.05
 
 
 def load_data(args):
@@ -302,6 +357,160 @@ def make_progress_fn(label):
     return progress_fn
 
 
+def _average_ranks(values):
+    arr = np.asarray(values, dtype=float)
+    order = np.argsort(arr, kind="mergesort")
+    ranks = np.empty(arr.shape[0], dtype=float)
+    idx = 0
+    while idx < arr.shape[0]:
+        end = idx + 1
+        while end < arr.shape[0] and arr[order[end]] == arr[order[idx]]:
+            end += 1
+        avg_rank = 0.5 * (idx + end - 1) + 1.0
+        ranks[order[idx:end]] = avg_rank
+        idx = end
+    return ranks
+
+
+def pearson_corr_or_none(x, y):
+    x_arr = np.asarray(list(x), dtype=float)
+    y_arr = np.asarray(list(y), dtype=float)
+    if x_arr.size < 2 or y_arr.size < 2 or x_arr.size != y_arr.size:
+        return None
+    x_centered = x_arr - float(np.mean(x_arr))
+    y_centered = y_arr - float(np.mean(y_arr))
+    denom = float(np.sqrt(np.sum(x_centered * x_centered) * np.sum(y_centered * y_centered)))
+    if denom <= 0.0:
+        return None
+    return float(np.sum(x_centered * y_centered) / denom)
+
+
+def spearman_corr_or_none(x, y):
+    x_arr = np.asarray(list(x), dtype=float)
+    y_arr = np.asarray(list(y), dtype=float)
+    if x_arr.size < 2 or y_arr.size < 2 or x_arr.size != y_arr.size:
+        return None
+    if float(np.max(x_arr) - np.min(x_arr)) == 0.0 or float(np.max(y_arr) - np.min(y_arr)) == 0.0:
+        return None
+    return pearson_corr_or_none(_average_ranks(x_arr), _average_ranks(y_arr))
+
+
+def _write_dict_rows_csv(path, rows):
+    if not rows:
+        return
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _plot_error_vs_defect(rows, out_path_no_ext):
+    fig, ax = plt.subplots(figsize=(6.2, 4.4))
+    ax.scatter(
+        [float(row["delta_scale_pathwise_abs_l2h"]) for row in rows],
+        [float(row["model_error_abs_l2h"]) for row in rows],
+        s=22,
+        alpha=0.8,
+    )
+    ax.set_xlabel("delta_scale_pathwise_abs_l2h")
+    ax.set_ylabel("model_error_abs_l2h")
+    ax.set_title("Error vs integrated generator defect")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    save_figure_all_formats(fig, out_path_no_ext)
+    plt.close(fig)
+
+
+def compute_and_save_defect_outputs(args, s, x_test_all, y_test_all, per_sample_abs, per_sample_rel):
+    target_nu = resolve_defect_target_nu(args)
+    defect_cfg = ErrorDecompositionConfig(
+        num_samples=args.ntest,
+        nx=s,
+        batch_size=args.batch_size,
+        target_nu=target_nu,
+        T=args.T,
+        Ttilde_values=[args.Ttilde],
+        dt=args.dt,
+        fine_dt=args.burgers_fine_dt,
+        reservoir=args.reservoir,
+        rd_nu=args.rd_nu,
+        rd_alpha=args.rd_alpha,
+        rd_beta=args.rd_beta,
+        res_burgers_nu=args.res_burgers_nu,
+        res_burgers_b=args.res_burgers_b,
+        ks_b=args.ks_b,
+        ks_eta=args.ks_eta,
+        ks_kappa=args.ks_kappa,
+        ks_dealias=args.ks_dealias,
+        dtype=args.defect_dtype,
+        device=args.device,
+        beta_mode=args.defect_beta_mode,
+        beta_fixed=args.defect_beta_fixed,
+        time_quadrature=args.defect_time_quadrature,
+    )
+    result = compute_time_scaled_defect_for_dataset(
+        u0=x_test_all,
+        target_T=y_test_all,
+        cfg=defect_cfg,
+        Ttilde=args.Ttilde,
+    )
+    per_sample_abs_list = [float(v) for v in per_sample_abs.tolist()]
+    per_sample_rel_list = [float(v) for v in per_sample_rel.tolist()]
+    joined_rows = []
+    for idx, defect_row in enumerate(result["rows"]):
+        joined_rows.append(
+            {
+                "model": args.model,
+                "sample_index": int(defect_row["sample_index"]),
+                "model_error_abs_l2h": per_sample_abs_list[idx],
+                "model_error_rel_l2": per_sample_rel_list[idx],
+                "D1_model1_abs_l2h": float(defect_row["D1_model1_abs_l2h"]),
+                "delta_scale_pathwise_abs_l2h": float(defect_row["delta_scale_pathwise_abs_l2h"]),
+                "Delta_scale_abs_l2h": float(defect_row["Delta_scale_abs_l2h"]),
+                "T": float(defect_row["T"]),
+                "Ttilde": float(defect_row["Ttilde"]),
+                "alpha": float(defect_row["alpha"]),
+                "beta_mode": defect_row["beta_mode"],
+                "beta_value": float(defect_row["beta_value"]),
+                "beta_empirical": float(defect_row["beta_empirical"]),
+                "c_beta_T": float(defect_row["c_beta_T"]),
+            }
+        )
+
+    delta_values = [row["delta_scale_pathwise_abs_l2h"] for row in joined_rows]
+    error_values = [row["model_error_abs_l2h"] for row in joined_rows]
+    metrics = {
+        **result["summary"],
+        "target_nu": float(target_nu),
+        "model": args.model,
+        "corr_error_delta_scale_pearson": pearson_corr_or_none(error_values, delta_values),
+        "corr_error_delta_scale_spearman": spearman_corr_or_none(error_values, delta_values),
+        "applies_directly_to_model1_bound": bool(args.model == "model1"),
+        "defect_interpretation": (
+            "model1_time_scaled_integrated_generator_defect"
+            if args.model == "model1"
+            else "underlying_surrogate_pde_time_scaled_integrated_generator_defect"
+        ),
+    }
+    if args.model == "model1":
+        metrics["max_abs_difference_model1_D1"] = float(
+            np.max(
+                np.abs(
+                    np.asarray(error_values, dtype=float)
+                    - np.asarray([row["D1_model1_abs_l2h"] for row in joined_rows], dtype=float)
+                )
+            )
+        )
+
+    _write_dict_rows_csv(os.path.join(args.out_dir, "time_scaled_defect_per_sample.csv"), joined_rows)
+    with open(os.path.join(args.out_dir, "time_scaled_defect_per_sample.json"), "w", encoding="utf-8") as f:
+        json.dump(joined_rows, f, indent=2)
+    with open(os.path.join(args.out_dir, "time_scaled_defect_metrics.json"), "w", encoding="utf-8") as f:
+        json.dump(metrics, f, indent=2)
+    _plot_error_vs_defect(joined_rows, os.path.join(args.out_dir, "error_vs_defect_scatter"))
+    return metrics
+
+
 def main():
     args = parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
@@ -384,6 +593,17 @@ def main():
             ensure_ascii=False,
         )
 
+    defect_metrics = None
+    if args.compute_time_scaled_defect:
+        defect_metrics = compute_and_save_defect_outputs(
+            args,
+            s,
+            x_test_all,
+            y_test_all,
+            per_sample_abs,
+            per_sample_rel,
+        )
+
     x_grid = np.linspace(0.0, 1.0, s, endpoint=False)
     for idx in [0, min(1, args.ntest - 1), min(2, args.ntest - 1)]:
         plot_1d_prediction(
@@ -417,17 +637,34 @@ def main():
         print("saved model: %s" % save_path)
 
     with open(os.path.join(args.out_dir, "run_config.json"), "w", encoding="utf-8") as f:
+        run_payload = {
+            "args": vars(args),
+            "resolved_obs": actual_obs,
+            "resolved_J": actual_J,
+            "main_metric": "abs_l2h",
+            "alpha": float(args.Ttilde / args.T),
+            "train_absL2h": train_abs,
+            "test_absL2h": test_abs,
+            "train_relL2": train_rel,
+            "test_relL2": test_rel,
+        }
+        if defect_metrics is not None:
+            run_payload.update(
+                {
+                    "time_scaled_defect_metric": defect_metrics["defect_metric"],
+                    "delta_scale_rms_abs_l2h": defect_metrics["delta_scale_rms_abs_l2h"],
+                    "delta_scale_mean_abs_l2h": defect_metrics["delta_scale_mean_abs_l2h"],
+                    "delta_scale_std_abs_l2h": defect_metrics["delta_scale_std_abs_l2h"],
+                    "corr_error_delta_scale_pearson": defect_metrics["corr_error_delta_scale_pearson"],
+                    "corr_error_delta_scale_spearman": defect_metrics["corr_error_delta_scale_spearman"],
+                    "applies_directly_to_model1_bound": defect_metrics["applies_directly_to_model1_bound"],
+                    "defect_interpretation": defect_metrics["defect_interpretation"],
+                }
+            )
+            if "max_abs_difference_model1_D1" in defect_metrics:
+                run_payload["max_abs_difference_model1_D1"] = defect_metrics["max_abs_difference_model1_D1"]
         json.dump(
-            {
-                "args": vars(args),
-                "resolved_obs": actual_obs,
-                "resolved_J": actual_J,
-                "main_metric": "abs_l2h",
-                "train_absL2h": train_abs,
-                "test_absL2h": test_abs,
-                "train_relL2": train_rel,
-                "test_relL2": test_rel,
-            },
+            run_payload,
             f,
             indent=2,
             ensure_ascii=False,

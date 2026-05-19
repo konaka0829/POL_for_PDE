@@ -39,6 +39,13 @@ class SweepParameter:
 
 
 PARAMETERS: dict[str, SweepParameter] = {
+    "alpha": SweepParameter(
+        name="alpha",
+        cli_flag="",
+        kind="float",
+        label="alpha = Ttilde/T",
+        positive=True,
+    ),
     "Ttilde": SweepParameter(
         name="Ttilde",
         cli_flag="--Ttilde",
@@ -135,6 +142,11 @@ PARAMETERS: dict[str, SweepParameter] = {
 }
 
 ALIASES = {
+    "alpha": "alpha",
+    "time_alpha": "alpha",
+    "time-alpha": "alpha",
+    "alpha_scale": "alpha",
+    "alpha-scale": "alpha",
     "ttilde": "Ttilde",
     "t_tilde": "Ttilde",
     "res_burgers_nu": "res_burgers_nu",
@@ -320,16 +332,52 @@ def run_one(cmd: list[str], log_path: Path, env: dict[str, str], dry_run: bool) 
     return proc.returncode
 
 
+def resolved_times(args: argparse.Namespace, overrides: dict[str, Any]) -> dict[str, float]:
+    T = float(args.T)
+    if "alpha" in overrides:
+        alpha = float(overrides["alpha"])
+        Ttilde = alpha * T
+    else:
+        Ttilde = float(overrides.get("Ttilde", args.Ttilde))
+        alpha = Ttilde / T
+    return {"T": T, "Ttilde": Ttilde, "alpha": alpha}
+
+
 def load_run_metrics(run_dir: Path) -> dict[str, Any]:
     payload = json.loads((run_dir / "run_config.json").read_text(encoding="utf-8"))
-    return {
+    args_payload = payload.get("args", {})
+    T = float(payload.get("T", args_payload.get("T", 1.0)))
+    Ttilde = float(payload.get("Ttilde", args_payload.get("Ttilde", T)))
+    metrics = {
         "train_absL2h": float(payload["train_absL2h"]),
         "test_absL2h": float(payload["test_absL2h"]),
         "train_relL2": float(payload["train_relL2"]),
         "test_relL2": float(payload["test_relL2"]),
+        "T": T,
+        "Ttilde": Ttilde,
+        "alpha": float(payload.get("alpha", Ttilde / T)),
         "resolved_obs": payload["resolved_obs"],
         "resolved_J": int(payload["resolved_J"]),
     }
+    optional_keys = [
+        "delta_scale_rms_abs_l2h",
+        "delta_scale_mean_abs_l2h",
+        "delta_scale_std_abs_l2h",
+        "corr_error_delta_scale_pearson",
+        "corr_error_delta_scale_spearman",
+        "applies_directly_to_model1_bound",
+        "time_scaled_defect_metric",
+    ]
+    defect_path = run_dir / "time_scaled_defect_metrics.json"
+    defect_payload = json.loads(defect_path.read_text(encoding="utf-8")) if defect_path.exists() else {}
+    for key in optional_keys:
+        if key in defect_payload:
+            metrics[key] = defect_payload[key]
+        elif key in payload:
+            metrics[key] = payload[key]
+        else:
+            metrics[key] = None
+    return metrics
 
 
 def write_csv(path: Path, rows: Iterable[dict[str, Any]], fieldnames: list[str]) -> None:
@@ -404,6 +452,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--elm-weight-scale", type=float, default=0.0)
     parser.add_argument("--elm-bias-scale", type=float, default=1.0)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    parser.add_argument("--compute-time-scaled-defect", action="store_true")
+    parser.add_argument("--defect-target-nu", type=float, default=None)
+    parser.add_argument("--defect-time-quadrature", choices=("trapezoid", "left"), default="trapezoid")
+    parser.add_argument("--defect-beta-mode", choices=("zero", "fixed"), default="zero")
+    parser.add_argument("--defect-beta-fixed", type=float, default=0.0)
+    parser.add_argument("--defect-dtype", choices=("float32", "float64"), default="float64")
     parser.add_argument("--save-model", action="store_true")
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument("--max-workers", type=int, default=1)
@@ -450,7 +504,7 @@ def validate_args(args: argparse.Namespace) -> tuple[list[str], list[SweepSpec]]
         raise ValueError("--max-workers must be positive")
     if args.best_k <= 0:
         raise ValueError("--best-k must be positive")
-    if not os.path.exists(args.data_file):
+    if not args.dry_run and not os.path.exists(args.data_file):
         raise FileNotFoundError("Data file not found: %s" % args.data_file)
     models = parse_models(args.models)
     return models, validate_sweeps(args)
@@ -470,8 +524,9 @@ def build_run_command(
     overrides: dict[str, Any],
     out_dir: Path,
 ) -> list[str]:
+    times = resolved_times(args, overrides)
     effective = {
-        "Ttilde": overrides.get("Ttilde", args.Ttilde),
+        "Ttilde": times["Ttilde"],
         "dt": overrides.get("dt", args.dt),
         "K": overrides.get("K", args.K),
         "J": overrides.get("J", args.J),
@@ -571,6 +626,14 @@ def build_run_command(
     if args.save_model:
         cmd.append("--save-model")
 
+    if getattr(args, "compute_time_scaled_defect", False):
+        cmd.append("--compute-time-scaled-defect")
+        append_optional_flag(cmd, "--defect-target-nu", getattr(args, "defect_target_nu", None))
+        append_optional_flag(cmd, "--defect-time-quadrature", getattr(args, "defect_time_quadrature", "trapezoid"))
+        append_optional_flag(cmd, "--defect-beta-mode", getattr(args, "defect_beta_mode", "zero"))
+        append_optional_flag(cmd, "--defect-beta-fixed", getattr(args, "defect_beta_fixed", 0.0))
+        append_optional_flag(cmd, "--defect-dtype", getattr(args, "defect_dtype", "float64"))
+
     return cmd
 
 
@@ -596,6 +659,16 @@ def make_base_row(
         "train_relL2": None,
         "test_relL2": None,
         "test_relL2_plot": None,
+        "T": None,
+        "Ttilde": None,
+        "alpha": None,
+        "delta_scale_rms_abs_l2h": None,
+        "delta_scale_mean_abs_l2h": None,
+        "delta_scale_std_abs_l2h": None,
+        "corr_error_delta_scale_pearson": None,
+        "corr_error_delta_scale_spearman": None,
+        "applies_directly_to_model1_bound": None,
+        "time_scaled_defect_metric": None,
         "resolved_obs": None,
         "resolved_J": None,
         "run_dir": str(run_dir),
@@ -623,6 +696,7 @@ def run_model_jobs(
     for overrides in build_param_grid(sweep_specs):
         run_dir = build_run_dir(model_dir, overrides, sweep_names)
         row = make_base_row(model=model, run_dir=run_dir, sweep_names=sweep_names, overrides=overrides)
+        row.update(resolved_times(args, overrides))
         config_path = run_dir / "run_config.json"
 
         if args.skip_existing and config_path.exists():
@@ -968,6 +1042,14 @@ def main(argv: list[str] | None = None) -> int:
             "train_relL2",
             "test_relL2",
             "test_relL2_plot",
+            "T",
+            "Ttilde",
+            "alpha",
+            "delta_scale_rms_abs_l2h",
+            "delta_scale_mean_abs_l2h",
+            "delta_scale_std_abs_l2h",
+            "corr_error_delta_scale_pearson",
+            "corr_error_delta_scale_spearman",
             "resolved_obs",
             "resolved_J",
             "run_dir",
@@ -1013,6 +1095,28 @@ def main(argv: list[str] | None = None) -> int:
                 out_path=out_root / f"combined_profile_{sweep_specs[0].parameter.name}",
                 eps=eps,
             )
+            single_name = sweep_specs[0].parameter.name
+            if single_name == "alpha":
+                save_combined_single_param_plot(
+                    model_rows=ok_by_model,
+                    parameter=sweep_specs[0].parameter,
+                    out_path=out_root / "alpha_vs_error_all_models",
+                    eps=eps,
+                )
+            else:
+                save_combined_single_param_plot(
+                    model_rows=ok_by_model,
+                    parameter=sweep_specs[0].parameter,
+                    out_path=out_root / f"parameter_{single_name}_vs_error_all_models",
+                    eps=eps,
+                )
+                if single_name == "Ttilde":
+                    save_combined_single_param_plot(
+                        model_rows=ok_by_model,
+                        parameter=PARAMETERS["alpha"],
+                        out_path=out_root / "alpha_vs_error_all_models",
+                        eps=eps,
+                    )
 
     top_level = {
         "config": vars(args),

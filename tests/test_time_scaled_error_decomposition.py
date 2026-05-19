@@ -1,5 +1,5 @@
+# Model 1 の time-scaled error decomposition が、理論どおり Delta_scale を中心に実装されているかを確認
 import math
-import subprocess
 import sys
 from pathlib import Path
 
@@ -7,13 +7,16 @@ import pytest
 import torch
 
 from test_utils import run_cli
+# リポジトリのpathをREPO_ROOT に保存
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# リポジトリrootがimport探索パスに入っていない場合，先頭に入れる
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from pol.model123_1d.error_decomposition import (
     ErrorDecompositionConfig,
     aggregate_metric_rows,
+    compute_time_scaled_defect_for_dataset,
     interpolate_trajectory_at_times,
     run_error_decomposition,
 )
@@ -97,6 +100,62 @@ def test_ttilde_not_equal_t_uses_rescaled_trajectory_not_native_time():
     row = result["summary_rows"][0]
     assert row["alpha"] == 2.0
     assert row["Delta_scale"] < 1e-10
+
+
+def test_dataset_defect_helper_returns_pathwise_integrated_delta_scale():
+    cfg = ErrorDecompositionConfig(
+        num_samples=3,
+        nx=16,
+        batch_size=2,
+        target_nu=0.05,
+        T=0.04,
+        Ttilde_values=[0.04],
+        dt=0.02,
+        fine_dt=0.002,
+        reservoir="burgers",
+        res_burgers_nu=0.05,
+        res_burgers_b=1.0,
+        beta_mode="zero",
+        dtype="float64",
+        device="cpu",
+    )
+    u0 = torch.zeros(3, 16, dtype=torch.float64)
+    target_T = torch.zeros(3, 16, dtype=torch.float64)
+    result = compute_time_scaled_defect_for_dataset(u0=u0, target_T=target_T, cfg=cfg)
+    rows = result["rows"]
+    assert len(rows) == 3
+    assert "delta_scale_pathwise_abs_l2h" in rows[0]
+    values = torch.tensor([row["delta_scale_pathwise_abs_l2h"] for row in rows], dtype=torch.float64)
+    expected_rms = float(torch.sqrt(torch.mean(values.pow(2))).item())
+    assert result["summary"]["delta_scale_rms_abs_l2h"] == pytest.approx(expected_rms)
+    assert result["summary"]["defect_metric"] == "pathwise_integrated_time_scaled_generator_defect"
+
+
+def test_dataset_defect_helper_matching_burgers_coefficients_near_zero():
+    cfg = ErrorDecompositionConfig(
+        num_samples=2,
+        nx=32,
+        seed=3,
+        batch_size=2,
+        target_nu=0.05,
+        T=0.1,
+        Ttilde_values=[0.2],
+        dt=0.01,
+        fine_dt=0.002,
+        reservoir="burgers",
+        res_burgers_nu=0.025,
+        res_burgers_b=0.5,
+        beta_mode="zero",
+        dtype="float64",
+        device="cpu",
+    )
+    x = torch.linspace(0.0, 1.0, 32, dtype=torch.float64)
+    u0 = torch.stack([torch.sin(2.0 * math.pi * x), torch.cos(2.0 * math.pi * x)], dim=0)
+    target_T = torch.zeros_like(u0)
+    result = compute_time_scaled_defect_for_dataset(u0=u0, target_T=target_T, cfg=cfg, Ttilde=0.2)
+    assert result["summary"]["alpha"] == 2.0
+    assert result["summary"]["delta_scale_rms_abs_l2h"] < 1e-8
+    assert "D1_model1_abs_l2h" in result["rows"][0]
 
 
 @pytest.mark.slow

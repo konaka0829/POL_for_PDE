@@ -569,6 +569,153 @@ def aggregate_metric_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return summary_rows
 
 
+def _dataset_beta_value(cfg: ErrorDecompositionConfig, beta_value: float | None) -> float:
+    if beta_value is not None:
+        return float(beta_value)
+    if cfg.beta_mode == "zero":
+        return 0.0
+    if cfg.beta_mode == "fixed":
+        return float(cfg.beta_fixed)
+    raise ValueError(
+        "compute_time_scaled_defect_for_dataset currently supports beta_mode='zero', "
+        "beta_mode='fixed', or an explicit beta_value. Other beta modes require full "
+        "target trajectories for calibration."
+    )
+
+
+def _summary_for_dataset_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    delta_values = np.asarray([float(row["delta_scale_pathwise_abs_l2h"]) for row in rows], dtype=float)
+    d1_values = np.asarray([float(row["D1_model1_abs_l2h"]) for row in rows], dtype=float)
+    delta_init_values = np.asarray([float(row["Delta_init_abs_l2h"]) for row in rows], dtype=float)
+    rhs_beta_values = np.asarray([float(row["rhs_beta_pathwise_abs_l2h"]) for row in rows], dtype=float)
+    rhs_beta0_values = np.asarray([float(row["rhs_beta0_pathwise_abs_l2h"]) for row in rows], dtype=float)
+    first = rows[0]
+    delta_rms = float(np.sqrt(np.mean(delta_values * delta_values)))
+    d1_rms = float(np.sqrt(np.mean(d1_values * d1_values)))
+    delta_init_rms = float(np.sqrt(np.mean(delta_init_values * delta_init_values)))
+    rhs_beta_rms = float(np.sqrt(np.mean(rhs_beta_values * rhs_beta_values)))
+    rhs_beta0_rms = float(np.sqrt(np.mean(rhs_beta0_values * rhs_beta0_values)))
+    return {
+        "T": float(first["T"]),
+        "Ttilde": float(first["Ttilde"]),
+        "alpha": float(first["alpha"]),
+        "num_samples": len(rows),
+        "D1_model1_rms_abs_l2h": d1_rms,
+        "D1": d1_rms,
+        "Delta_init": delta_init_rms,
+        "delta_scale_rms_abs_l2h": delta_rms,
+        "delta_scale_mean_abs_l2h": float(np.mean(delta_values)),
+        "delta_scale_std_abs_l2h": float(np.std(delta_values)),
+        "delta_scale_min_abs_l2h": float(np.min(delta_values)),
+        "delta_scale_max_abs_l2h": float(np.max(delta_values)),
+        "Delta_scale": delta_rms,
+        "Delta_dyn": delta_rms,
+        "rhs_beta0": rhs_beta0_rms,
+        "rhs_beta": rhs_beta_rms,
+        "rhs_beta_pathwise_rms": rhs_beta_rms,
+        "beta_mode": first["beta_mode"],
+        "beta_value": float(first["beta_value"]),
+        "beta_empirical": float(first["beta_empirical"]),
+        "c_beta_T": float(first["c_beta_T"]),
+        "defect_metric": "pathwise_integrated_time_scaled_generator_defect",
+    }
+
+
+def compute_time_scaled_defect_for_dataset(
+    *,
+    u0: torch.Tensor,
+    target_T: torch.Tensor,
+    cfg: ErrorDecompositionConfig,
+    Ttilde: float | None = None,
+    beta_value: float | None = None,
+) -> dict[str, Any]:
+    """Compute sample-wise integrated time-scaled generator defect on a provided test set."""
+    if u0.ndim != 2:
+        raise ValueError("u0 must have shape (N, S)")
+    if target_T.ndim != 2:
+        raise ValueError("target_T must have shape (N, S)")
+    if tuple(u0.shape) != tuple(target_T.shape):
+        raise ValueError("u0 and target_T must have the same shape")
+    if u0.shape[0] <= 0 or u0.shape[1] <= 1:
+        raise ValueError("u0 must contain at least one sample and two spatial points")
+
+    ttilde = float(cfg.Ttilde_values[0] if Ttilde is None else Ttilde)
+    if ttilde <= 0.0:
+        raise ValueError("Ttilde must be positive")
+    alpha = ttilde / float(cfg.T)
+    beta = _dataset_beta_value(cfg, beta_value)
+
+    dataset_cfg = ErrorDecompositionConfig(
+        **{
+            **asdict(cfg),
+            "num_samples": int(u0.shape[0]),
+            "nx": int(u0.shape[1]),
+            "Ttilde_values": [ttilde],
+        }
+    )
+    _validate_config(dataset_cfg)
+
+    dtype = _resolve_dtype(dataset_cfg.dtype)
+    u0_work = u0.detach().cpu().to(dtype=dtype)
+    target_work = target_T.detach().cpu().to(dtype=dtype)
+    surrogate_states = _simulate_surrogate_trajectory(u0_work, dataset_cfg)
+    r_alpha = rescaled_surrogate_states(surrogate_states, dataset_cfg, alpha=alpha)
+    surrogate_ttilde = r_alpha[-1]
+
+    step_T = int(round(dataset_cfg.T / dataset_cfg.dt))
+    defects = scaled_generator_defect(r_alpha, dataset_cfg, alpha=alpha)
+    defect_norms = discrete_l2_h(defects.reshape(-1, defects.shape[-1])).reshape(step_T + 1, -1)
+    weights = make_time_quadrature_weights(step_T, dataset_cfg.dt, dataset_cfg.time_quadrature).to(
+        device=defect_norms.device,
+        dtype=defect_norms.dtype,
+    )
+    delta_scale_sq = torch.sum(weights.unsqueeze(1) * defect_norms.pow(2), dim=0)
+    delta_scale = torch.sqrt(delta_scale_sq)
+
+    d1 = discrete_l2_h(target_work - surrogate_ttilde)
+    delta_init = torch.zeros_like(d1)
+    cbeta = c_beta_T(beta, dataset_cfg.T)
+    exp_beta_t = math.exp(beta * dataset_cfg.T)
+    rhs_beta0_pathwise = delta_init + math.sqrt(dataset_cfg.T) * delta_scale
+    rhs_beta_pathwise = exp_beta_t * delta_init + cbeta * delta_scale
+
+    rows: list[dict[str, Any]] = []
+    for idx in range(int(u0_work.shape[0])):
+        delta_scale_value = float(delta_scale[idx].item())
+        rhs_beta0_value = float(rhs_beta0_pathwise[idx].item())
+        rhs_beta_value = float(rhs_beta_pathwise[idx].item())
+        d1_value = float(d1[idx].item())
+        row = {
+            "sample_index": idx,
+            "T": float(dataset_cfg.T),
+            "Ttilde": float(ttilde),
+            "alpha": float(alpha),
+            "D1_model1_abs_l2h": d1_value,
+            "D1_abs_l2h": d1_value,
+            "Delta_init_abs_l2h": float(delta_init[idx].item()),
+            "delta_scale_pathwise_abs_l2h": delta_scale_value,
+            "Delta_scale_abs_l2h": delta_scale_value,
+            "Delta_dyn_abs_l2h": delta_scale_value,
+            "rhs_beta0_pathwise_abs_l2h": rhs_beta0_value,
+            "rhs_beta_pathwise_abs_l2h": rhs_beta_value,
+            "rhs_beta0_abs_l2h": rhs_beta0_value,
+            "rhs_beta_abs_l2h": rhs_beta_value,
+            "beta_mode": dataset_cfg.beta_mode,
+            "beta_value": float(beta),
+            "beta_empirical": float(beta),
+            "c_beta_T": float(cbeta),
+        }
+        rows.append(row)
+
+    summary = _summary_for_dataset_rows(rows)
+    return {
+        "config": _config_to_jsonable(dataset_cfg),
+        "theory": "time_scaled_integrated_generator_defect",
+        "rows": rows,
+        "summary": summary,
+    }
+
+
 def _compute_rows_for_ttilde(
     target_states: torch.Tensor,
     surrogate_states: torch.Tensor,
@@ -845,6 +992,7 @@ __all__ = [
     "burgers_generator",
     "c_beta_T",
     "compute_beta",
+    "compute_time_scaled_defect_for_dataset",
     "defect_burgers_reservoir",
     "defect_ks_reservoir",
     "defect_reaction_diffusion_reservoir",

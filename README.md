@@ -48,11 +48,11 @@ Supported surrogate families are:
 - Reaction-diffusion: `rd_nu * z_xx + rd_alpha*z - rd_beta*z^3`
 - Kuramoto-Sivashinsky style: `-ks_b*z*z_x - ks_eta*z_xx - ks_kappa*z_xxxx`
 
-## Time-Scaled Residual and Delta_scale
+## Time-Scaled Generator Defect and Delta_scale
 
-For `Ttilde != T`, the residual is evaluated along `r_alpha(s)`, not along native surrogate times `s`. Linear interpolation is used when `alpha*s` does not land exactly on the native `dt` grid.
+For `Ttilde != T`, the scaled generator defect is evaluated along `r_alpha(s)`, not along native surrogate times `s`. Linear interpolation is used when `alpha*s` does not land exactly on the native `dt` grid.
 
-Primary output fields use `Delta_scale`. `Delta_dyn` may appear only as a compatibility alias for `Delta_scale`.
+Primary numerical-study diagnostics use the sample-wise integrated quantity `delta_scale_pathwise_abs_l2h`; `Delta_scale_abs_l2h` and `Delta_dyn` may appear as compatibility aliases.
 
 ## Installation
 
@@ -119,11 +119,52 @@ Printed summaries include `Ttilde`, `alpha`, `D1`, `Delta_scale`, `rhs_beta`, `b
 python scripts/run_model123_param_sweep.py --sweep Ttilde=0.8,1.0,1.2 --models model1,model2,model3
 ```
 
-The unified sweep supports `Ttilde`, `res_burgers_nu`, `res_burgers_b`, `rd_nu`, `rd_alpha`, `rd_beta`, `ks_b`, `ks_eta`, `ks_kappa`, `dt`, `K`, and `J`. It ranks and plots by `test_absL2h` while retaining relative metrics in CSV/JSON.
+The unified sweep supports `alpha`, `Ttilde`, `res_burgers_nu`, `res_burgers_b`, `rd_nu`, `rd_alpha`, `rd_beta`, `ks_b`, `ks_eta`, `ks_kappa`, `dt`, `K`, and `J`. It ranks and plots by `test_absL2h` while retaining relative metrics in CSV/JSON.
 Its default data file is `data/burgers_model123.mat`, matching the generation
 example above. Default `dt` is `1e-2` and default Burgers inner `fine_dt` is
 `1e-4` for practical smoke and sweep startup runs; override them for higher
 accuracy studies.
+
+Alpha sweep with integrated defect diagnostics:
+
+```bash
+python scripts/run_model123_param_sweep.py \
+  --models model1,model2,model3 \
+  --reservoir burgers \
+  --sweep alpha=0.6,0.8,1.0,1.2 \
+  --T 1.0 \
+  --compute-time-scaled-defect \
+  --data-file data/burgers_model123.mat
+```
+
+Parameter sweep at fixed alpha:
+
+```bash
+python scripts/run_model123_param_sweep.py \
+  --models model1,model2,model3 \
+  --reservoir burgers \
+  --T 1.0 \
+  --Ttilde 1.0 \
+  --sweep res_burgers_nu=0.02,0.04,0.05,0.06 \
+  --compute-time-scaled-defect \
+  --data-file data/burgers_model123.mat
+```
+
+Full alpha-parameter defect study:
+
+```bash
+python scripts/run_model123_alpha_param_defect_study.py \
+  --models model1,model2,model3 \
+  --reservoir burgers \
+  --parameter res_burgers_nu \
+  --parameter-values 0.02,0.04,0.05,0.06 \
+  --alpha-values 0.6,0.8,1.0,1.2 \
+  --T 1.0 \
+  --data-file data/burgers_model123.mat \
+  --out-root outputs/alpha_param_defect_study
+```
+
+The correlation heatmaps use `corr_i(model_error_abs_l2h_i, delta_scale_pathwise_abs_l2h_i)` across test samples at each grid cell. They are correlations with the integrated generator defect, not instantaneous field values.
 
 ## Output Schema
 

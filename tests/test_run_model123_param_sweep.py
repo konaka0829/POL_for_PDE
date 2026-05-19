@@ -5,6 +5,7 @@ import pytest
 from scripts.run_model123_param_sweep import (
     build_job_env,
     build_parser,
+    build_run_command,
     build_range_values,
     canonical_parameter_name,
     clip_for_log,
@@ -13,11 +14,13 @@ from scripts.run_model123_param_sweep import (
     parse_sweep_assignment,
     validate_args,
 )
+from model123_burgers_1d import pearson_corr_or_none, spearman_corr_or_none
 
 
 def test_parse_sweep_assignment_supports_required_parameters():
     for name in [
         "Ttilde",
+        "alpha",
         "res_burgers_nu",
         "res_burgers_b",
         "rd_nu",
@@ -31,6 +34,12 @@ def test_parse_sweep_assignment_supports_required_parameters():
         "J",
     ]:
         assert parse_sweep_assignment(f"{name}=1").parameter.name == canonical_parameter_name(name)
+
+
+def test_alpha_aliases_canonicalize():
+    assert parse_sweep_assignment("alpha=0.5,1.0").parameter.name == "alpha"
+    assert canonical_parameter_name("time_alpha") == "alpha"
+    assert canonical_parameter_name("alpha_scale") == "alpha"
 
 
 def test_build_range_values():
@@ -98,6 +107,7 @@ def test_load_run_metrics_reads_absolute_and_relative_metrics(tmp_path):
           "test_absL2h": 0.2,
           "train_relL2": 0.3,
           "test_relL2": 0.4,
+          "alpha": 1.0,
           "resolved_obs": "full",
           "resolved_J": 32
         }
@@ -107,3 +117,57 @@ def test_load_run_metrics_reads_absolute_and_relative_metrics(tmp_path):
     metrics = load_run_metrics(run_dir)
     assert metrics["test_absL2h"] == 0.2
     assert metrics["test_relL2"] == 0.4
+
+
+def test_build_run_command_alpha_override_sets_ttilde(tmp_path):
+    args = build_parser().parse_args(["--sweep", "alpha=0.5", "--T", "2.0"])
+    cmd = build_run_command(args, "model1", {"alpha": 0.5}, tmp_path / "run")
+    idx = cmd.index("--Ttilde")
+    assert cmd[idx + 1] == "1.0"
+    assert "--alpha" not in cmd
+
+
+def test_load_run_metrics_reads_optional_defect_metrics(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "run_config.json").write_text(
+        """
+        {
+          "args": {"T": 2.0, "Ttilde": 1.0},
+          "train_absL2h": 0.1,
+          "test_absL2h": 0.2,
+          "train_relL2": 0.3,
+          "test_relL2": 0.4,
+          "resolved_obs": "full",
+          "resolved_J": 32
+        }
+        """,
+        encoding="utf-8",
+    )
+    (run_dir / "time_scaled_defect_metrics.json").write_text(
+        """
+        {
+          "delta_scale_rms_abs_l2h": 1.2,
+          "delta_scale_mean_abs_l2h": 1.0,
+          "delta_scale_std_abs_l2h": 0.2,
+          "corr_error_delta_scale_pearson": 0.5,
+          "corr_error_delta_scale_spearman": 0.25,
+          "applies_directly_to_model1_bound": true,
+          "time_scaled_defect_metric": "pathwise_integrated_time_scaled_generator_defect"
+        }
+        """,
+        encoding="utf-8",
+    )
+    metrics = load_run_metrics(run_dir)
+    assert metrics["T"] == 2.0
+    assert metrics["Ttilde"] == 1.0
+    assert metrics["alpha"] == 0.5
+    assert metrics["delta_scale_rms_abs_l2h"] == 1.2
+    assert metrics["corr_error_delta_scale_pearson"] == 0.5
+
+
+def test_correlation_helpers():
+    assert pearson_corr_or_none([1, 2, 3], [2, 4, 6]) == pytest.approx(1.0)
+    assert pearson_corr_or_none([1, 1, 1], [2, 3, 4]) is None
+    assert spearman_corr_or_none([1, 2, 3], [10, 20, 30]) == pytest.approx(1.0)
+    assert spearman_corr_or_none([1, 1, 1], [10, 20, 30]) is None
