@@ -121,6 +121,7 @@ python scripts/run_model123_param_sweep.py --sweep Ttilde=0.8,1.0,1.2 --models m
 ```
 
 The unified sweep supports `alpha`, `Ttilde`, `res_burgers_nu`, `res_burgers_b`, `rd_nu`, `rd_alpha`, `rd_beta`, `ks_b`, `ks_eta`, `ks_kappa`, `dt`, `K`, and `J`. It ranks and plots by `test_absL2h` while retaining relative metrics in CSV/JSON.
+When `--feature-times` is not provided, `K` selects `K` positive observation times evenly over `(0, Ttilde]`; for example `K=4` uses approximately `Ttilde/4, Ttilde/2, 3*Ttilde/4, Ttilde`.
 Its default data file is `data/burgers_model123.mat`, matching the generation
 example above. Default `dt` is `1e-2` and default Burgers inner `fine_dt` is
 `1e-4` for practical smoke and sweep startup runs; override them for higher

@@ -130,8 +130,14 @@ def test_build_time_grid_rejects_non_grid_tr_with_explicit_times():
 
 def test_build_time_grid_automatic_uses_integer_steps():
     times, steps = build_time_grid(Tr=0.05, dt=0.01, K=3, feature_times="")
-    assert steps == [1, 3, 5]
+    assert steps == [2, 3, 5]
     assert all(require_time_aligned(t, 0.01) == step for t, step in zip(times, steps))
+
+
+def test_build_time_grid_automatic_spaces_positive_times_evenly():
+    times, steps = build_time_grid(Tr=1.0, dt=0.001, K=4, feature_times="")
+    assert steps == [250, 500, 750, 1000]
+    assert times == pytest.approx([0.25, 0.5, 0.75, 1.0])
 
 
 def test_model2_progress_output(capsys):

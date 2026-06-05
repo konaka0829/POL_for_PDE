@@ -34,7 +34,7 @@ def build_time_grid(
         if K == 1:
             steps = [step_T]
         else:
-            steps = np.linspace(1, step_T, num=K)
+            steps = np.linspace(0, step_T, num=K + 1)[1:]
             steps = [int(round(v)) for v in steps.tolist()]
             steps = sorted(set(steps))
         times = [step * dt for step in steps]
