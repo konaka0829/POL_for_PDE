@@ -375,6 +375,11 @@ def _average_ranks(values):
 def pearson_corr_or_none(x, y):
     x_arr = np.asarray(list(x), dtype=float)
     y_arr = np.asarray(list(y), dtype=float)
+    if x_arr.size != y_arr.size:
+        return None
+    valid = np.isfinite(x_arr) & np.isfinite(y_arr)
+    x_arr = x_arr[valid]
+    y_arr = y_arr[valid]
     if x_arr.size < 2 or y_arr.size < 2 or x_arr.size != y_arr.size:
         return None
     x_centered = x_arr - float(np.mean(x_arr))
@@ -388,6 +393,11 @@ def pearson_corr_or_none(x, y):
 def spearman_corr_or_none(x, y):
     x_arr = np.asarray(list(x), dtype=float)
     y_arr = np.asarray(list(y), dtype=float)
+    if x_arr.size != y_arr.size:
+        return None
+    valid = np.isfinite(x_arr) & np.isfinite(y_arr)
+    x_arr = x_arr[valid]
+    y_arr = y_arr[valid]
     if x_arr.size < 2 or y_arr.size < 2 or x_arr.size != y_arr.size:
         return None
     if float(np.max(x_arr) - np.min(x_arr)) == 0.0 or float(np.max(y_arr) - np.min(y_arr)) == 0.0:
@@ -438,10 +448,14 @@ def compute_and_save_defect_outputs(args, s, x_test_all, y_test_all, per_sample_
         rd_beta=args.rd_beta,
         res_burgers_nu=args.res_burgers_nu,
         res_burgers_b=args.res_burgers_b,
+        burgers_scheme=args.burgers_scheme,
+        burgers_dealias=bool(args.burgers_dealias),
         ks_b=args.ks_b,
         ks_eta=args.ks_eta,
         ks_kappa=args.ks_kappa,
         ks_dealias=args.ks_dealias,
+        input_scale=args.input_scale,
+        input_shift=args.input_shift,
         dtype=args.defect_dtype,
         device=args.device,
         beta_mode=args.defect_beta_mode,

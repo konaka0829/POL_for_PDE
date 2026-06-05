@@ -25,6 +25,16 @@ import numpy as np
 
 
 VALID_MODELS = ("model1", "model2", "model3")
+MODEL_LABELS = {
+    "model1": "Model 1",
+    "model2": "Model 2",
+    "model3": "Model 3",
+}
+MODEL_COLORS = {
+    "model1": "#0072B2",
+    "model2": "#E69F00",
+    "model3": "#009E73",
+}
 
 
 @dataclass(frozen=True)
@@ -34,6 +44,7 @@ class SweepParameter:
     kind: str
     label: str
     positive: bool = False
+    nonnegative: bool = False
     prefer_log_axis: bool = False
     reservoirs: tuple[str, ...] = ()
 
@@ -135,7 +146,7 @@ PARAMETERS: dict[str, SweepParameter] = {
         cli_flag="--ks-kappa",
         kind="float",
         label="ks_kappa",
-        positive=True,
+        nonnegative=True,
         prefer_log_axis=True,
         reservoirs=("ks",),
     ),
@@ -251,6 +262,8 @@ def cast_value(raw: str, spec: SweepParameter) -> Any:
             raise ValueError(f"Parameter {spec.name} requires boolean values")
     if spec.positive and value <= 0:
         raise ValueError(f"Parameter {spec.name} must be positive")
+    if spec.nonnegative and value < 0:
+        raise ValueError(f"Parameter {spec.name} must be nonnegative")
     return value
 
 
@@ -332,11 +345,36 @@ def run_one(cmd: list[str], log_path: Path, env: dict[str, str], dry_run: bool) 
     return proc.returncode
 
 
+def dedupe_fieldnames(names: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for name in names:
+        if name in seen:
+            continue
+        deduped.append(name)
+        seen.add(name)
+    return deduped
+
+
+def require_time_grid_aligned_value(value: float, dt: float, name: str, *, alpha: float | None = None, T: float | None = None) -> None:
+    steps = int(round(float(value) / float(dt)))
+    if not math.isclose(steps * float(dt), float(value), rel_tol=1e-9, abs_tol=1e-12):
+        context = ""
+        if alpha is not None and T is not None:
+            context = f" from alpha={alpha} and T={T}"
+        raise ValueError(
+            f"{name}={value}{context} is not aligned with dt={dt}; "
+            "alpha-derived Ttilde must satisfy Ttilde = alpha*T = k*dt."
+        )
+
+
 def resolved_times(args: argparse.Namespace, overrides: dict[str, Any]) -> dict[str, float]:
     T = float(args.T)
     if "alpha" in overrides:
         alpha = float(overrides["alpha"])
         Ttilde = alpha * T
+        dt = float(overrides.get("dt", args.dt))
+        require_time_grid_aligned_value(Ttilde, dt, "Ttilde", alpha=alpha, T=T)
     else:
         Ttilde = float(overrides.get("Ttilde", args.Ttilde))
         alpha = Ttilde / T
@@ -371,7 +409,9 @@ def load_run_metrics(run_dir: Path) -> dict[str, Any]:
     defect_path = run_dir / "time_scaled_defect_metrics.json"
     defect_payload = json.loads(defect_path.read_text(encoding="utf-8")) if defect_path.exists() else {}
     for key in optional_keys:
-        if key in defect_payload:
+        if key == "time_scaled_defect_metric" and "defect_metric" in defect_payload:
+            metrics[key] = defect_payload["defect_metric"]
+        elif key in defect_payload:
             metrics[key] = defect_payload[key]
         elif key in payload:
             metrics[key] = payload[key]
@@ -490,6 +530,9 @@ def validate_sweeps(args: argparse.Namespace) -> list[SweepSpec]:
                 "Parameter %s is not valid for reservoir=%s; valid reservoirs: %s"
                 % (spec.parameter.name, args.reservoir, ", ".join(allowed))
             )
+    names = {spec.parameter.name for spec in specs}
+    if "alpha" in names and "Ttilde" in names:
+        raise ValueError("Cannot sweep both alpha and Ttilde; alpha determines Ttilde = alpha*T.")
     return specs
 
 
@@ -935,6 +978,193 @@ def save_combined_single_param_plot(
     plt.close(fig)
 
 
+def numeric_values_equal(left: Any, right: Any) -> bool:
+    return math.isclose(float(left), float(right), rel_tol=1e-12, abs_tol=1e-12)
+
+
+def best_error_row(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return min(rows, key=lambda row: float(row["test_absL2h"]))
+
+
+def all_model_profile_series(
+    rows: list[dict[str, Any]],
+    parameter_name: str,
+    eps: float,
+) -> tuple[list[Any], list[float]]:
+    groups: dict[Any, list[float]] = {}
+    for row in rows:
+        groups.setdefault(row[parameter_name], []).append(float(row["test_absL2h"]))
+    x_values = sorted(groups.keys(), key=float)
+    y_values = [clip_for_log(min(groups[x_value]), eps) for x_value in x_values]
+    return x_values, y_values
+
+
+def all_model_fixed_slice_series(
+    rows: list[dict[str, Any]],
+    parameter_name: str,
+    fixed_values: dict[str, Any],
+    eps: float,
+) -> tuple[list[Any], list[float]]:
+    groups: dict[Any, list[float]] = {}
+    for row in rows:
+        if all(
+            numeric_values_equal(row[name], value)
+            for name, value in fixed_values.items()
+            if name != parameter_name
+        ):
+            groups.setdefault(row[parameter_name], []).append(float(row["test_absL2h"]))
+    x_values = sorted(groups.keys(), key=float)
+    y_values = [clip_for_log(min(groups[x_value]), eps) for x_value in x_values]
+    return x_values, y_values
+
+
+def save_all_model_param_vs_error_plot(
+    *,
+    series_by_model: dict[str, tuple[list[Any], list[float]]],
+    parameter: SweepParameter,
+    out_path: Path,
+) -> None:
+    fig, ax = plt.subplots(figsize=(6.4, 4.2))
+    plotted = False
+    for model in VALID_MODELS:
+        if model not in series_by_model:
+            continue
+        x_values, y_values = series_by_model[model]
+        if not x_values:
+            continue
+        ax.plot(
+            x_values,
+            y_values,
+            marker="o",
+            linewidth=1.8,
+            markersize=4.5,
+            label=MODEL_LABELS.get(model, model),
+            color=MODEL_COLORS.get(model),
+        )
+        plotted = True
+    if not plotted:
+        plt.close(fig)
+        return
+
+    set_axis_scale(
+        ax,
+        "x",
+        parameter,
+        [x for x_values, _ in series_by_model.values() for x in x_values],
+    )
+    ax.set_yscale("log")
+    ax.set_xlabel(param_vs_error_xlabel(parameter), fontsize=18)
+    ax.set_ylabel("Error", fontsize=18)
+    ax.tick_params(axis="both", which="major", labelsize=13)
+    ax.tick_params(axis="both", which="minor", labelsize=11)
+    ax.grid(True, which="both", linestyle="--", alpha=0.35)
+    ax.legend(fontsize=14)
+    fig.tight_layout()
+    for ext in ("png", "pdf", "svg"):
+        fig.savefig(out_path.with_suffix("." + ext), dpi=300)
+    plt.close(fig)
+
+
+def param_vs_error_xlabel(parameter: SweepParameter) -> str:
+    if parameter.name == "alpha":
+        return r"$\alpha$"
+    if parameter.name == "res_burgers_nu":
+        return r"$\tilde{\nu}$"
+    return parameter.label
+
+
+def save_all_model_param_comparison_plots(
+    *,
+    model_rows: dict[str, list[dict[str, Any]]],
+    sweep_specs: list[SweepSpec],
+    out_root: Path,
+    eps: float,
+) -> None:
+    ok_by_model = {
+        model: [row for row in rows if row["status"] == "ok"]
+        for model, rows in model_rows.items()
+        if any(row["status"] == "ok" for row in rows)
+    }
+    if not ok_by_model:
+        return
+
+    sweep_names = [spec.parameter.name for spec in sweep_specs]
+    model_best_rows = {model: best_error_row(rows) for model, rows in ok_by_model.items()}
+    common_best_model, common_best_row = min(
+        model_best_rows.items(),
+        key=lambda item: float(item[1]["test_absL2h"]),
+    )
+    common_fixed_values = {name: common_best_row[name] for name in sweep_names}
+
+    settings = {
+        "profile_optimized": {
+            "description": (
+                "For each plotted parameter value and model, all other swept parameters "
+                "are optimized by taking the minimum test_absL2h over their grid values."
+            )
+        },
+        "slice_model_best_fixed": {
+            "description": (
+                "For each model, non-plotted swept parameters are fixed to that model's "
+                "global-best row; the plotted parameter is varied."
+            ),
+            "fixed_values_by_model": {
+                model: {name: row[name] for name in sweep_names}
+                for model, row in model_best_rows.items()
+            },
+        },
+        "slice_common_best_fixed": {
+            "description": (
+                "For all models, non-plotted swept parameters are fixed to the "
+                "dataset-wide global-best row; the plotted parameter is varied."
+            ),
+            "source_model": common_best_model,
+            "source_test_absL2h": common_best_row["test_absL2h"],
+            "fixed_values": common_fixed_values,
+        },
+    }
+    (out_root / "all_models_param_vs_error_plot_settings.json").write_text(
+        json.dumps(settings, indent=2), encoding="utf-8"
+    )
+
+    for spec in sweep_specs:
+        parameter = spec.parameter
+        save_all_model_param_vs_error_plot(
+            series_by_model={
+                model: all_model_profile_series(rows, parameter.name, eps)
+                for model, rows in ok_by_model.items()
+            },
+            parameter=parameter,
+            out_path=out_root / f"{parameter.name}_vs_error_profile_optimized_all_models",
+        )
+        save_all_model_param_vs_error_plot(
+            series_by_model={
+                model: all_model_fixed_slice_series(
+                    rows=rows,
+                    parameter_name=parameter.name,
+                    fixed_values={name: model_best_rows[model][name] for name in sweep_names},
+                    eps=eps,
+                )
+                for model, rows in ok_by_model.items()
+            },
+            parameter=parameter,
+            out_path=out_root / f"{parameter.name}_vs_error_slice_model_best_fixed_all_models",
+        )
+        save_all_model_param_vs_error_plot(
+            series_by_model={
+                model: all_model_fixed_slice_series(
+                    rows=rows,
+                    parameter_name=parameter.name,
+                    fixed_values=common_fixed_values,
+                    eps=eps,
+                )
+                for model, rows in ok_by_model.items()
+            },
+            parameter=parameter,
+            out_path=out_root / f"{parameter.name}_vs_error_slice_common_best_fixed_all_models",
+        )
+
+
 def save_best_runs(
     *,
     rows: list[dict[str, Any]],
@@ -955,7 +1185,7 @@ def save_best_runs(
         "run_dir",
         "sweep_id",
     ]
-    write_csv(out_path.with_suffix(".csv"), trimmed, fieldnames)
+    write_csv(out_path.with_suffix(".csv"), trimmed, dedupe_fieldnames(fieldnames))
     out_path.with_suffix(".json").write_text(json.dumps(trimmed, indent=2), encoding="utf-8")
 
 
@@ -1054,7 +1284,7 @@ def main(argv: list[str] | None = None) -> int:
             "resolved_J",
             "run_dir",
         ]
-        write_csv(model_dir / "summary.csv", rows, fieldnames)
+        write_csv(model_dir / "summary.csv", rows, dedupe_fieldnames(fieldnames))
         (model_dir / "summary.json").write_text(
             json.dumps(
                 {
@@ -1117,6 +1347,13 @@ def main(argv: list[str] | None = None) -> int:
                         out_path=out_root / "alpha_vs_error_all_models",
                         eps=eps,
                     )
+
+    save_all_model_param_comparison_plots(
+        model_rows=model_rows,
+        sweep_specs=sweep_specs,
+        out_root=out_root,
+        eps=eps,
+    )
 
     top_level = {
         "config": vars(args),

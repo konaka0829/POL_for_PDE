@@ -1,5 +1,7 @@
+# time-scaled generator defectがコード上で正しく実装されているかを確認する
 import torch
 
+# generatorの差を出力する関数と1 次元周期関数に対してspectral method で微分を計算する関数をインポート
 from pol.model123_1d.error_decomposition import (
     defect_burgers_reservoir,
     scaled_defect_burgers_reservoir,
@@ -9,6 +11,7 @@ from pol.model123_1d.error_decomposition import (
 )
 
 
+# Burgers reservoir の scaled defect において、α=1 とした場合、古い unscaled defect alias と一致するかを確認
 def test_burgers_scaled_defect_alpha_one_matches_unscaled_alias():
     torch.manual_seed(0)
     z = torch.randn(3, 64, dtype=torch.float64)
@@ -25,9 +28,11 @@ def test_burgers_scaled_defect_alpha_one_matches_unscaled_alias():
         res_burgers_nu=0.07,
         res_burgers_b=1.3,
     )
+    # 2 つのテンソルの各成分が近いかを判定
     assert torch.allclose(got, old, atol=1e-10, rtol=1e-10)
 
 
+# Burgers scaled defect において、time-scaled effective coefficients が target の係数と一致すると defect が 0 になるか確認
 def test_burgers_scaled_defect_zero_when_effective_coefficients_match():
     torch.manual_seed(1)
     z = torch.randn(4, 64, dtype=torch.float64)
@@ -41,6 +46,7 @@ def test_burgers_scaled_defect_zero_when_effective_coefficients_match():
     assert torch.linalg.norm(got).item() < 1e-10
 
 
+# reaction-diffusion reservoir と KS reservoir の scaled defect が、手で書いた明示的な数式と一致するか確認する
 def test_rd_and_ks_scaled_defects_match_explicit_formulas():
     torch.manual_seed(2)
     z = torch.randn(3, 64, dtype=torch.float64)

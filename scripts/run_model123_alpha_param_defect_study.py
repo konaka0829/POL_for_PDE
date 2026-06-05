@@ -32,8 +32,10 @@ from scripts.run_model123_param_sweep import (
     build_run_command,
     cast_value,
     canonical_parameter_name,
+    dedupe_fieldnames,
     parse_csv_values,
     parse_models,
+    require_time_grid_aligned_value,
     safe_tag,
 )
 
@@ -143,6 +145,8 @@ def validate_args(args: argparse.Namespace) -> tuple[list[str], SweepParameter, 
         raise ValueError("parameter values must be positive")
     if args.T <= 0.0 or args.dt <= 0.0:
         raise ValueError("--T and --dt must be positive")
+    for alpha in alpha_values:
+        require_time_grid_aligned_value(alpha * float(args.T), args.dt, "Ttilde", alpha=alpha, T=args.T)
     return models, parameter, parameter_values, alpha_values
 
 
@@ -476,9 +480,9 @@ def main(argv: list[str] | None = None) -> int:
         "delta_scale_pathwise_abs_l2h",
         "Delta_scale_abs_l2h",
     ]
-    write_csv(out_root / "summary.csv", summary_rows, summary_fields)
+    write_csv(out_root / "summary.csv", summary_rows, dedupe_fieldnames(summary_fields))
     (out_root / "summary.json").write_text(json.dumps({"config": vars(args), "rows": summary_rows}, indent=2), encoding="utf-8")
-    write_csv(out_root / "per_sample_metrics.csv", per_sample_rows, per_sample_fields)
+    write_csv(out_root / "per_sample_metrics.csv", per_sample_rows, dedupe_fieldnames(per_sample_fields))
     (out_root / "per_sample_metrics.json").write_text(json.dumps(per_sample_rows, indent=2), encoding="utf-8")
     make_plots(summary_rows, models, parameter, parameter_values, alpha_values, plot_dir)
     if args.dry_run:

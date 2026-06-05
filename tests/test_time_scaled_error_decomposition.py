@@ -129,6 +129,41 @@ def test_dataset_defect_helper_returns_pathwise_integrated_delta_scale():
     expected_rms = float(torch.sqrt(torch.mean(values.pow(2))).item())
     assert result["summary"]["delta_scale_rms_abs_l2h"] == pytest.approx(expected_rms)
     assert result["summary"]["defect_metric"] == "pathwise_integrated_time_scaled_generator_defect"
+    assert result["summary"]["Delta_init"] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_error_decomposition_config_contains_solver_and_input_transform_fields():
+    cfg = ErrorDecompositionConfig()
+    assert cfg.burgers_scheme == "split_step"
+    assert cfg.burgers_dealias is False
+    assert cfg.input_scale == 1.0
+    assert cfg.input_shift == 0.0
+
+
+def test_dataset_defect_helper_input_transform_sets_delta_init():
+    cfg = ErrorDecompositionConfig(
+        num_samples=2,
+        nx=16,
+        batch_size=2,
+        target_nu=0.05,
+        T=0.04,
+        Ttilde_values=[0.04],
+        dt=0.02,
+        fine_dt=0.002,
+        reservoir="burgers",
+        res_burgers_nu=0.05,
+        res_burgers_b=1.0,
+        input_scale=2.0,
+        input_shift=0.1,
+        beta_mode="zero",
+        dtype="float64",
+        device="cpu",
+    )
+    x = torch.linspace(0.0, 1.0, 16, dtype=torch.float64)
+    u0 = torch.stack([torch.sin(2.0 * math.pi * x), torch.cos(2.0 * math.pi * x)], dim=0)
+    result = compute_time_scaled_defect_for_dataset(u0=u0, target_T=torch.zeros_like(u0), cfg=cfg)
+    assert result["summary"]["Delta_init"] > 0.0
+    assert all(row["Delta_init_abs_l2h"] > 0.0 for row in result["rows"])
 
 
 def test_dataset_defect_helper_matching_burgers_coefficients_near_zero():

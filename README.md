@@ -53,6 +53,7 @@ Supported surrogate families are:
 For `Ttilde != T`, the scaled generator defect is evaluated along `r_alpha(s)`, not along native surrogate times `s`. Linear interpolation is used when `alpha*s` does not land exactly on the native `dt` grid.
 
 Primary numerical-study diagnostics use the sample-wise integrated quantity `delta_scale_pathwise_abs_l2h`; `Delta_scale_abs_l2h` and `Delta_dyn` may appear as compatibility aliases.
+The alpha/parameter heatmap correlations use this per-sample integrated defect, not instantaneous residual fields. For Model 1 the error variable is `D1`; for Model 2/3 it is the readout prediction error, so the correlation is a diagnostic against the underlying surrogate PDE defect rather than a direct theorem bound.
 
 ## Installation
 
@@ -131,6 +132,7 @@ Alpha sweep with integrated defect diagnostics:
 python scripts/run_model123_param_sweep.py \
   --models model1,model2,model3 \
   --reservoir burgers \
+  --burgers-dealias 0 \
   --sweep alpha=0.6,0.8,1.0,1.2 \
   --T 1.0 \
   --compute-time-scaled-defect \
@@ -143,6 +145,7 @@ Parameter sweep at fixed alpha:
 python scripts/run_model123_param_sweep.py \
   --models model1,model2,model3 \
   --reservoir burgers \
+  --burgers-dealias 0 \
   --T 1.0 \
   --Ttilde 1.0 \
   --sweep res_burgers_nu=0.02,0.04,0.05,0.06 \
@@ -156,6 +159,7 @@ Full alpha-parameter defect study:
 python scripts/run_model123_alpha_param_defect_study.py \
   --models model1,model2,model3 \
   --reservoir burgers \
+  --burgers-dealias 0 \
   --parameter res_burgers_nu \
   --parameter-values 0.02,0.04,0.05,0.06 \
   --alpha-values 0.6,0.8,1.0,1.2 \
@@ -165,6 +169,7 @@ python scripts/run_model123_alpha_param_defect_study.py \
 ```
 
 The correlation heatmaps use `corr_i(model_error_abs_l2h_i, delta_scale_pathwise_abs_l2h_i)` across test samples at each grid cell. They are correlations with the integrated generator defect, not instantaneous field values.
+For theory-consistent Burgers coefficient checks, the examples set `--burgers-dealias 0`; using `--burgers-dealias 1` is valid for dealiased numerical diagnostics, but the analytic defect magnitude need not be exactly zero even when coefficients match.
 
 ## Output Schema
 
@@ -172,7 +177,8 @@ Error decomposition per-sample rows include:
 
 ```text
 sample_index, T, Ttilde, alpha, D1_abs_l2h,
-Delta_init_abs_l2h, Delta_scale_abs_l2h,
+Delta_init_abs_l2h, delta_scale_pathwise_abs_l2h,
+Delta_scale_abs_l2h,
 rhs_beta0_pathwise_abs_l2h, rhs_beta_pathwise_abs_l2h,
 beta_mode, beta_value, c_beta_T
 ```
@@ -181,8 +187,17 @@ Summary rows include:
 
 ```text
 Ttilde, alpha, num_samples, D1, Delta_init,
-Delta_scale, rhs_beta0, rhs_beta, beta_mode, beta_value, c_beta_T
+delta_scale_rms_abs_l2h, delta_scale_mean_abs_l2h,
+delta_scale_std_abs_l2h, Delta_scale, rhs_beta0, rhs_beta,
+beta_mode, beta_value, c_beta_T
 ```
+
+Model123 runs with `--compute-time-scaled-defect` additionally write
+`time_scaled_defect_metrics.json`, `time_scaled_defect_per_sample.csv/json`,
+and `error_vs_defect_scatter.{png,pdf,svg}`. The metrics include
+`corr_error_delta_scale_pearson`, `corr_error_delta_scale_spearman`, and for
+Model 1 `max_abs_difference_model1_D1`, which checks that the Model 1 prediction
+error and `D1_model1_abs_l2h` were computed from the same surrogate trajectory.
 
 ## Tests
 

@@ -42,10 +42,14 @@ class ErrorDecompositionConfig:
     rd_beta: float = 1.0
     res_burgers_nu: float = 0.05
     res_burgers_b: float = 1.0
+    burgers_scheme: str = "split_step"
+    burgers_dealias: bool = False
     ks_b: float = 1.0
     ks_eta: float = 1.0
     ks_kappa: float = 1.0
     ks_dealias: bool = False
+    input_scale: float = 1.0
+    input_shift: float = 0.0
     dtype: str = "float64"
     device: str = "cpu"
     initial_condition_type: str = "fourier"
@@ -100,6 +104,8 @@ def _validate_config(cfg: ErrorDecompositionConfig) -> None:
         raise ValueError("fine_dt must be positive")
     if cfg.reservoir not in {"burgers", "reaction_diffusion", "ks"}:
         raise ValueError(f"Unsupported reservoir family: {cfg.reservoir}")
+    if cfg.burgers_scheme not in {"semi_implicit", "split_step"}:
+        raise ValueError("burgers_scheme must be semi_implicit or split_step")
     if cfg.initial_condition_type not in {"fourier", "grf"}:
         raise ValueError("initial_condition_type must be 'fourier' or 'grf'")
     if cfg.beta_mode not in {"zero", "analytic_safe", "analytic_safe_poincare", "empirical_pairwise", "fixed"}:
@@ -182,9 +188,9 @@ def _make_surrogate_solver(cfg: ErrorDecompositionConfig) -> Reservoir1DSolver:
                 reservoir="burgers",
                 res_burgers_nu=cfg.res_burgers_nu,
                 res_burgers_b=cfg.res_burgers_b,
-                burgers_scheme="split_step",
+                burgers_scheme=cfg.burgers_scheme,
                 burgers_fine_dt=cfg.fine_dt,
-                burgers_dealias=False,
+                burgers_dealias=cfg.burgers_dealias,
             )
         )
     if cfg.reservoir == "reaction_diffusion":
@@ -651,14 +657,23 @@ def compute_time_scaled_defect_for_dataset(
             "num_samples": int(u0.shape[0]),
             "nx": int(u0.shape[1]),
             "Ttilde_values": [ttilde],
+            "input_scale": 1.0,
+            "input_shift": 0.0,
         }
     )
     _validate_config(dataset_cfg)
+    result_cfg = {
+        **_config_to_jsonable(cfg),
+        "num_samples": int(u0.shape[0]),
+        "nx": int(u0.shape[1]),
+        "Ttilde_values": [ttilde],
+    }
 
     dtype = _resolve_dtype(dataset_cfg.dtype)
     u0_work = u0.detach().cpu().to(dtype=dtype)
+    z0_work = float(cfg.input_scale) * u0_work + float(cfg.input_shift)
     target_work = target_T.detach().cpu().to(dtype=dtype)
-    surrogate_states = _simulate_surrogate_trajectory(u0_work, dataset_cfg)
+    surrogate_states = _simulate_surrogate_trajectory(z0_work, dataset_cfg)
     r_alpha = rescaled_surrogate_states(surrogate_states, dataset_cfg, alpha=alpha)
     surrogate_ttilde = r_alpha[-1]
 
@@ -673,7 +688,7 @@ def compute_time_scaled_defect_for_dataset(
     delta_scale = torch.sqrt(delta_scale_sq)
 
     d1 = discrete_l2_h(target_work - surrogate_ttilde)
-    delta_init = torch.zeros_like(d1)
+    delta_init = discrete_l2_h(u0_work - z0_work)
     cbeta = c_beta_T(beta, dataset_cfg.T)
     exp_beta_t = math.exp(beta * dataset_cfg.T)
     rhs_beta0_pathwise = delta_init + math.sqrt(dataset_cfg.T) * delta_scale
@@ -709,7 +724,7 @@ def compute_time_scaled_defect_for_dataset(
 
     summary = _summary_for_dataset_rows(rows)
     return {
-        "config": _config_to_jsonable(dataset_cfg),
+        "config": result_cfg,
         "theory": "time_scaled_integrated_generator_defect",
         "rows": rows,
         "summary": summary,
