@@ -46,6 +46,9 @@ def test_summary_schema_uses_delta_scale_and_theorem_rhs():
         assert "Delta_time" not in row
         assert abs(row["rhs_beta"] - math.sqrt(cfg.T) * row["Delta_scale"]) < 1e-10
         assert abs(row["rhs_beta0"] - row["rhs_beta"]) < 1e-12
+        assert row["rhs_beta_legacy_alias_of"] == "rhs_beta_theorem_components"
+        assert "rhs_beta_theorem_components" in row
+        assert "rhs_beta_pathwise_rms" in row
 
 
 def test_same_burgers_alpha_one_has_near_zero_scaled_defect():
@@ -130,6 +133,45 @@ def test_dataset_defect_helper_returns_pathwise_integrated_delta_scale():
     assert result["summary"]["delta_scale_rms_abs_l2h"] == pytest.approx(expected_rms)
     assert result["summary"]["defect_metric"] == "pathwise_integrated_time_scaled_generator_defect"
     assert result["summary"]["Delta_init"] == pytest.approx(0.0, abs=1e-12)
+    assert result["summary"]["rhs_beta_legacy_alias_of"] == "rhs_beta_pathwise_rms"
+    assert "rhs_beta_theorem_components" in result["summary"]
+
+
+def test_theorem_components_and_pathwise_rms_differ_for_nonproportional_terms():
+    rows = [
+        {
+            "T": 1.0,
+            "Ttilde": 1.0,
+            "alpha": 1.0,
+            "D1_model1_abs_l2h": 0.0,
+            "Delta_init_abs_l2h": 1.0,
+            "delta_scale_pathwise_abs_l2h": 0.0,
+            "rhs_beta_pathwise_abs_l2h": 1.0,
+            "rhs_beta0_pathwise_abs_l2h": 1.0,
+            "beta_mode": "fixed",
+            "beta_value": 0.0,
+            "beta_empirical": 0.0,
+            "c_beta_T": 1.0,
+        },
+        {
+            "T": 1.0,
+            "Ttilde": 1.0,
+            "alpha": 1.0,
+            "D1_model1_abs_l2h": 0.0,
+            "Delta_init_abs_l2h": 0.0,
+            "delta_scale_pathwise_abs_l2h": 1.0,
+            "rhs_beta_pathwise_abs_l2h": 1.0,
+            "rhs_beta0_pathwise_abs_l2h": 1.0,
+            "beta_mode": "fixed",
+            "beta_value": 0.0,
+            "beta_empirical": 0.0,
+            "c_beta_T": 1.0,
+        },
+    ]
+    from pol.model123_1d.error_decomposition import _summary_for_dataset_rows
+
+    summary = _summary_for_dataset_rows(rows)
+    assert summary["rhs_beta_theorem_components"] != pytest.approx(summary["rhs_beta_pathwise_rms"])
 
 
 def test_error_decomposition_config_contains_solver_and_input_transform_fields():

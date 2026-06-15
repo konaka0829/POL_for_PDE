@@ -19,7 +19,8 @@ from pol.model123_1d import DatasetConfig, build_dataset, save_dataset_bundle
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate 1D periodic Burgers data for Model123")
     parser.add_argument("--config", default="")
-    parser.add_argument("--out-file", required=True)
+    parser.add_argument("--out-file", default="")
+    parser.add_argument("--output-dir", default="")
     parser.add_argument("--format", choices=("mat", "pt"), default="")
     parser.add_argument("--num-samples", type=int, default=1200)
     parser.add_argument("--total-samples", type=int, default=0)
@@ -82,6 +83,7 @@ def _apply_config_defaults(parser: argparse.ArgumentParser, args: argparse.Names
     _set_if_default(parser, args, "grf_tau", data.get("grf_tau"))
     _set_if_default(parser, args, "grf_sigma", data.get("grf_sigma"))
     _set_if_default(parser, args, "grf_mean", data.get("grf_mean"))
+    _set_if_default(parser, args, "dtype", data.get("sim_dtype", data.get("data_dtype")))
 
 
 def _resolve_device(name: str) -> torch.device:
@@ -153,6 +155,11 @@ def main(argv: list[str] | None = None) -> int:
         fourier_amplitude=args.fourier_amplitude,
     )
     bundle = build_dataset(cfg, device=_resolve_device(args.device))
+    if not args.out_file:
+        if not args.output_dir:
+            raise ValueError("--out-file or --output-dir is required")
+        suffix = "pt" if args.format == "pt" else "mat"
+        args.out_file = str(Path(args.output_dir) / f"burgers_model123.{suffix}")
     out_file = Path(args.out_file)
     out_file.parent.mkdir(parents=True, exist_ok=True)
     output_format = args.format or out_file.suffix.lower().lstrip(".") or "mat"

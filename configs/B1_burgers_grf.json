@@ -24,10 +24,13 @@
     "grf_gamma": 2.0,
     "grf_tau": 5.0,
     "grf_sigma": 25.0,
-    "grf_mean": 0.0
+    "grf_mean": 0.0,
+    "data_dtype": "preserve",
+    "sim_dtype": "float64"
   },
   "readout": {
     "ridge_convention": "normalized_empirical_l2h_unweighted_frobenius",
+    "ridge_dtype": "float64",
     "zeta_grid": [
       1e-12,
       1e-11,

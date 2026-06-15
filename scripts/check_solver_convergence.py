@@ -19,11 +19,17 @@ from pol.spectral_etdrk4_1d import dealias_mask_2_3, simulate_burgers_etdrk4
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Small ETDRK4 Burgers convergence check.")
-    parser.add_argument("--out-dir", default="outputs/solver_checks/etdrk4_smoke")
+    parser.add_argument("--config", default="")
+    parser.add_argument("--out-dir", "--output-dir", dest="out_dir", default="outputs/solver_checks/etdrk4_smoke")
     parser.add_argument("--nx", type=int, default=64)
     parser.add_argument("--T", type=float, default=0.05)
     parser.add_argument("--nu", type=float, default=0.01)
     args = parser.parse_args(argv)
+    if args.config:
+        cfg = json.loads(Path(args.config).read_text(encoding="utf-8"))
+        args.nx = int(cfg.get("domain", {}).get("nx", args.nx))
+        args.T = float(cfg.get("target", {}).get("T", args.T))
+        args.nu = float(cfg.get("target", {}).get("nu", args.nu))
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     x = torch.linspace(0.0, 1.0, args.nx + 1, dtype=torch.float64)[:-1]
@@ -40,6 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     summary = {
         "dealias_mask_shape": list(dealias_mask_2_3(args.nx).shape),
         "finite": bool(torch.isfinite(ref).all()),
+        "monotonic_improvement": bool(rows[2]["error_to_reference"] <= rows[1]["error_to_reference"] <= rows[0]["error_to_reference"]),
         "rows": rows,
     }
     (out_dir / "convergence_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")

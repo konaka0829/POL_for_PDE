@@ -14,7 +14,7 @@ if str(REPO_ROOT) not in sys.path:
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from pol.cache import to_jsonable
+from pol.metadata import get_command_line, get_git_info, get_runtime_info, to_jsonable
 from run_zeta_path import apply_config_defaults, build_parser as build_zeta_parser, run_zeta_path
 
 
@@ -43,8 +43,10 @@ def main(argv: list[str] | None = None) -> int:
     args.ntrain = max(max(train_sizes), int(args.ntrain))
     rows = []
     details = {}
+    last_summary = None
     for ntrain in train_sizes:
         zeta_rows, summary = run_zeta_path(args, train_limit=ntrain)
+        last_summary = summary
         best = summary["best_by_val"]
         rows.append(
             {
@@ -67,7 +69,23 @@ def main(argv: list[str] | None = None) -> int:
         writer.writeheader()
         writer.writerows(rows)
     (out_dir / "learning_curve.json").write_text(json.dumps(to_jsonable({"rows": rows, "details": details}), indent=2), encoding="utf-8")
-    (out_dir / "run_config.json").write_text(json.dumps(to_jsonable(vars(args)), indent=2), encoding="utf-8")
+    run_config = {
+        "args": vars(args),
+        "git": get_git_info(REPO_ROOT),
+        **get_runtime_info(),
+        "command_line": get_command_line(),
+        "selection": {"selection_metric": "val_absL2h", "selected_by": "validation"},
+        "split": last_summary.get("split") if last_summary else None,
+        "dataset_metadata": last_summary.get("dataset_metadata") if last_summary else None,
+        "metadata_validation": last_summary.get("metadata_validation") if last_summary else None,
+        "dtype": {
+            "data_dtype": args.data_dtype,
+            "sim_dtype": args.sim_dtype,
+            "ridge_dtype": args.ridge_dtype,
+        },
+        "metrics": {"rows": rows},
+    }
+    (out_dir / "run_config.json").write_text(json.dumps(to_jsonable(run_config), indent=2), encoding="utf-8")
     return 0
 
 

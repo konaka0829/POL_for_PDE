@@ -12,12 +12,9 @@ if sys.version_info < (3, 10):
 
 import argparse
 import csv
-import datetime as _dt
-import hashlib
 import json
 import os
 from pathlib import Path
-import platform
 from dataclasses import asdict
 import time
 import warnings
@@ -31,6 +28,16 @@ import torch
 
 from pol.cli import add_data_mode_args, add_split_args, validate_data_mode_args
 from pol.io_mat import MatReader
+from pol.metadata import (
+    file_sha256,
+    get_command_line,
+    get_git_info,
+    get_runtime_info,
+    normalize_dataset_metadata,
+    stable_json_hash,
+    to_jsonable,
+    validate_dataset_metadata,
+)
 from pol.model123_1d import Model1Predictor1D, Model2Regressor1D, Model3Regressor1D, Model123Config
 from pol.model123_1d.metrics import (
     dataset_abs_l2h_error,
@@ -70,10 +77,13 @@ def parse_args():
     parser.add_argument("--ntest", type=int, default=128)
     parser.add_argument("--data-seed", type=int, default=None)
     parser.add_argument("--split-seed", type=int, default=None)
+    parser.add_argument("--data-dtype", choices=("preserve", "float32", "float64"), default="float32")
+    parser.add_argument("--sim-dtype", choices=("float32", "float64"), default="float32")
     parser.add_argument("--sub", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=32)
 
     parser.add_argument("--T", type=float, default=1.0)
+    parser.add_argument("--target-nu", type=float, default=None)
     parser.add_argument("--Ttilde", type=float, default=0.0)
     parser.add_argument("--dt", type=float, default=1e-2)
     parser.add_argument("--feature-times", type=str, default="")
@@ -144,6 +154,17 @@ def parse_args():
     _apply_config_defaults(parser, args)
     if not hasattr(args, "_config_applied"):
         args._config_applied = {}
+    for name in [
+        "expected_ic_type",
+        "expected_solver",
+        "expected_time_integrator",
+        "expected_burgers_scheme",
+        "expected_dealias",
+        "expected_equation",
+        "expected_domain_length",
+    ]:
+        if not hasattr(args, name):
+            setattr(args, name, None)
     args.data_seed = args.seed if args.data_seed is None else args.data_seed
     args.split_seed = args.seed if args.split_seed is None else args.split_seed
     if args.ridge_zeta is None and args.ridge_lambda is None:
@@ -183,16 +204,32 @@ def _apply_config_defaults(parser, args):
     with cfg_path.open("r", encoding="utf-8") as f:
         cfg = json.load(f)
     target = cfg.get("target", {})
+    domain = cfg.get("domain", {})
     data = cfg.get("data", {})
     readout = cfg.get("readout", {})
     _set_if_default(parser, args, "T", target.get("T"))
     _set_if_default(parser, args, "dt", target.get("dt"))
+    _set_if_default(parser, args, "target_nu", target.get("nu", target.get("target_nu")))
+    _set_if_default(parser, args, "burgers_scheme", target.get("time_integrator", target.get("burgers_scheme")))
+    if target.get("dealias") is not None and getattr(args, "burgers_dealias", None) == parser.get_default("burgers_dealias"):
+        args.burgers_dealias = int(bool(target.get("dealias")))
     _set_if_default(parser, args, "ntrain", data.get("ntrain"))
     _set_if_default(parser, args, "nval", data.get("nval"))
     _set_if_default(parser, args, "ntest", data.get("ntest"))
     _set_if_default(parser, args, "data_seed", data.get("data_seed"))
     _set_if_default(parser, args, "split_seed", data.get("split_seed"))
+    _set_if_default(parser, args, "data_dtype", data.get("data_dtype"))
+    _set_if_default(parser, args, "sim_dtype", data.get("sim_dtype"))
     _set_if_default(parser, args, "ridge_convention", readout.get("ridge_convention"))
+    _set_if_default(parser, args, "ridge_dtype", readout.get("ridge_dtype"))
+    args.expected_ic_type = data.get("ic_type")
+    args.expected_solver = target.get("solver")
+    args.expected_time_integrator = target.get("time_integrator")
+    args.expected_burgers_scheme = target.get("burgers_scheme")
+    args.expected_dealias = target.get("dealias")
+    args.expected_equation = target.get("equation", "burgers")
+    if domain.get("length") is not None:
+        args.expected_domain_length = domain.get("length")
 
 
 def ridge_dtype_from_name(name):
@@ -210,7 +247,12 @@ def _extract_scalar_meta(reader, field):
     arr = np.asarray(value)
     if arr.size == 0:
         return None
-    return float(arr.reshape(-1)[0])
+    value = arr.reshape(-1)[0]
+    if arr.dtype.kind in {"U", "S", "O"}:
+        if isinstance(value, bytes):
+            return value.decode("utf-8")
+        return str(value)
+    return float(value)
 
 
 def _validate_shapes(
@@ -235,40 +277,10 @@ def _validate_shapes(
         raise ValueError("Train/val input resolution mismatch: %s vs %s" % (x_train.shape[1], x_val.shape[1]))
 
 
-def _hash_indices(indices) -> str:
+def _hash_indices(indices, split_name: str = "") -> str:
     arr = np.asarray(indices, dtype=np.int64)
-    return hashlib.sha256(arr.tobytes()).hexdigest()
-
-
-def _file_sha256(path: str | os.PathLike[str] | None) -> str | None:
-    if not path:
-        return None
-    p = Path(path)
-    if not p.exists() or not p.is_file():
-        return None
-    h = hashlib.sha256()
-    with p.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _to_jsonable(value):
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, torch.dtype):
-        return str(value).replace("torch.", "")
-    if isinstance(value, torch.Tensor):
-        if value.numel() == 1:
-            return _to_jsonable(value.detach().cpu().item())
-        return {"shape": list(value.shape), "dtype": str(value.dtype).replace("torch.", "")}
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, dict):
-        return {str(k): _to_jsonable(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_to_jsonable(v) for v in value]
-    return value
+    h = stable_json_hash({"split": split_name, "indices": arr.tolist()})
+    return h
 
 
 def _validate_target_time(args, train_reader, test_reader=None):
@@ -311,10 +323,23 @@ def _load_dataset_file(path: str):
                 "a": reader.read_field("a"),
                 "u": reader.read_field("u"),
                 "metadata": {
-                    "T": _extract_scalar_meta(reader, "T"),
-                    "dt": _extract_scalar_meta(reader, "dt"),
-                    "nu": _extract_scalar_meta(reader, "nu"),
-                    "nx": _extract_scalar_meta(reader, "nx"),
+                    field: _extract_scalar_meta(reader, field)
+                    for field in [
+                        "T",
+                        "dt",
+                        "nu",
+                        "target_nu",
+                        "nx",
+                        "ic_type",
+                        "domain_length",
+                        "solver",
+                        "time_integrator",
+                        "burgers_scheme",
+                        "dealias",
+                        "equation",
+                        "target_equation",
+                    ]
+                    if field in reader.data
                 },
             }
     if suffix == ".pt":
@@ -337,28 +362,43 @@ def _load_dataset_file(path: str):
     raise ValueError(f"Unsupported dataset extension for {path}; expected .mat or .pt")
 
 
-def _validate_dataset_metadata(args, metadata, nx_after_sub: int | None = None):
-    if not isinstance(metadata, dict):
-        return
-    checks = {
+def _expected_metadata(args, nx_after_sub: int | None = None) -> dict:
+    return {
         "T": args.T,
         "dt": args.dt,
+        "nx": nx_after_sub,
+        "target_nu": getattr(args, "target_nu", None),
+        "ic_type": getattr(args, "expected_ic_type", None),
+        "domain_length": getattr(args, "expected_domain_length", 1.0),
+        "solver": getattr(args, "expected_solver", None),
+        "time_integrator": getattr(args, "expected_time_integrator", None),
+        "burgers_scheme": getattr(args, "expected_burgers_scheme", None),
+        "dealias": getattr(args, "expected_dealias", None),
+        "target_equation": getattr(args, "expected_equation", None),
     }
-    if nx_after_sub is not None and metadata.get("nx") is not None and int(metadata["nx"]) == nx_after_sub:
-        checks["nx"] = nx_after_sub
-    mismatches = []
-    for key, expected in checks.items():
-        found = metadata.get(key)
-        if found is None:
-            continue
-        if not np.isclose(float(found), float(expected)):
-            mismatches.append(f"{key}: expected {expected}, found {found}")
-    if mismatches:
-        message = "Dataset metadata mismatch: " + "; ".join(mismatches)
-        if args.allow_metadata_mismatch:
-            warnings.warn(message, RuntimeWarning)
-        else:
-            raise ValueError(message)
+
+
+def _validate_dataset_metadata(args, metadata, nx_after_sub: int | None = None):
+    strict = not bool(args.allow_metadata_mismatch)
+    try:
+        result = validate_dataset_metadata(
+            raw_metadata=metadata,
+            expected=_expected_metadata(args, nx_after_sub=nx_after_sub),
+            strict=strict,
+        )
+    except ValueError:
+        raise
+    for message in result["warnings"]:
+        warnings.warn(message, RuntimeWarning)
+    if not strict and not result["ok"]:
+        warnings.warn("Dataset metadata mismatch allowed by --allow-metadata-mismatch.", RuntimeWarning)
+    return result
+
+
+def _cast_data_tensor(tensor: torch.Tensor, data_dtype: str) -> torch.Tensor:
+    if data_dtype == "preserve":
+        return tensor
+    return tensor.to(dtype=torch.float32 if data_dtype == "float32" else torch.float64)
 
 
 def resolve_defect_target_nu(args):
@@ -420,30 +460,31 @@ def load_data(args):
             val_idx = np.arange(args.nval)
             test_idx = np.arange(args.ntest)
             split_meta["split_policy"] = "pre_split_dataset"
-            _validate_dataset_metadata(args, dataset_meta, nx_after_sub=int(x_train.shape[1]))
+            metadata_validation = _validate_dataset_metadata(args, dataset_meta, nx_after_sub=int(x_train.shape[1]))
             _validate_shapes(x_train, y_train, x_val, y_val, x_test, y_test)
             split_meta.update(
                 {
-                    "train_indices_hash": _hash_indices(train_idx),
-                    "val_indices_hash": _hash_indices(val_idx),
-                    "test_indices_hash": _hash_indices(test_idx),
+                    "train_indices_hash": _hash_indices(train_idx, "train"),
+                    "val_indices_hash": _hash_indices(val_idx, "val"),
+                    "test_indices_hash": _hash_indices(test_idx, "test"),
                 }
             )
             s = int(x_train.shape[1])
             return (
-                x_train.reshape(args.ntrain, s).float(),
-                y_train.reshape(args.ntrain, s).float(),
-                x_val.reshape(args.nval, s).float(),
-                y_val.reshape(args.nval, s).float(),
-                x_test.reshape(args.ntest, s).float(),
-                y_test.reshape(args.ntest, s).float(),
+                _cast_data_tensor(x_train.reshape(args.ntrain, s), args.data_dtype),
+                _cast_data_tensor(y_train.reshape(args.ntrain, s), args.data_dtype),
+                _cast_data_tensor(x_val.reshape(args.nval, s), args.data_dtype),
+                _cast_data_tensor(y_val.reshape(args.nval, s), args.data_dtype),
+                _cast_data_tensor(x_test.reshape(args.ntest, s), args.data_dtype),
+                _cast_data_tensor(y_test.reshape(args.ntest, s), args.data_dtype),
                 split_meta,
                 dataset_meta,
+                metadata_validation,
             )
 
         x_data = loaded["a"][:, :: args.sub]
         y_data = loaded["u"][:, :: args.sub]
-        _validate_dataset_metadata(args, dataset_meta, nx_after_sub=int(x_data.shape[1]))
+        metadata_validation = _validate_dataset_metadata(args, dataset_meta, nx_after_sub=int(x_data.shape[1]))
         total = x_data.shape[0]
         indices = np.arange(total)
         if args.shuffle or args.nval > 0:
@@ -487,27 +528,29 @@ def load_data(args):
                 "nu": _extract_scalar_meta(train_reader, "nu"),
                 "nx": _extract_scalar_meta(train_reader, "nx"),
             }
+            metadata_validation = _validate_dataset_metadata(args, dataset_meta, nx_after_sub=int(x_train.shape[1]))
         train_idx = np.arange(args.ntrain)
         val_idx = np.arange(args.ntrain, args.ntrain + args.nval)
         test_idx = np.arange(args.ntest)
     _validate_shapes(x_train, y_train, x_val, y_val, x_test, y_test)
     split_meta.update(
         {
-            "train_indices_hash": _hash_indices(train_idx),
-            "val_indices_hash": _hash_indices(val_idx),
-            "test_indices_hash": _hash_indices(test_idx),
+            "train_indices_hash": _hash_indices(train_idx, "train"),
+            "val_indices_hash": _hash_indices(val_idx, "val"),
+            "test_indices_hash": _hash_indices(test_idx, "test"),
         }
     )
     s = int(x_train.shape[1])
     return (
-        x_train.reshape(args.ntrain, s).float(),
-        y_train.reshape(args.ntrain, s).float(),
-        x_val.reshape(args.nval, s).float(),
-        y_val.reshape(args.nval, s).float(),
-        x_test.reshape(args.ntest, s).float(),
-        y_test.reshape(args.ntest, s).float(),
+        _cast_data_tensor(x_train.reshape(args.ntrain, s), args.data_dtype),
+        _cast_data_tensor(y_train.reshape(args.ntrain, s), args.data_dtype),
+        _cast_data_tensor(x_val.reshape(args.nval, s), args.data_dtype),
+        _cast_data_tensor(y_val.reshape(args.nval, s), args.data_dtype),
+        _cast_data_tensor(x_test.reshape(args.ntest, s), args.data_dtype),
+        _cast_data_tensor(y_test.reshape(args.ntest, s), args.data_dtype),
         split_meta,
         dataset_meta,
+        metadata_validation,
     )
 
 
@@ -550,7 +593,7 @@ def build_model_config(args):
         burgers_fine_dt=args.burgers_fine_dt,
         burgers_dealias=bool(args.burgers_dealias),
         device=args.device,
-        dtype=torch.float32,
+        dtype=torch.float32 if args.sim_dtype == "float32" else torch.float64,
         domain_length=1.0,
     )
 
@@ -783,7 +826,7 @@ def main():
     np.random.seed(args.seed)
 
     stage_start = time.perf_counter()
-    x_train, y_train, x_val, y_val, x_test, y_test, split_meta, dataset_meta = load_data(args)
+    x_train, y_train, x_val, y_val, x_test, y_test, split_meta, dataset_meta, metadata_validation = load_data(args)
     print("[%s] data loaded in %.2fs" % (args.model, time.perf_counter() - stage_start), flush=True)
     s = int(x_train.shape[1])
     train_loader = torch.utils.data.DataLoader(
@@ -922,8 +965,31 @@ def main():
     with open(os.path.join(args.out_dir, "run_config.json"), "w", encoding="utf-8") as f:
         run_payload = {
             "args": vars(args),
+            "git": get_git_info(Path(__file__).resolve().parent),
+            **get_runtime_info(),
             "resolved_obs": actual_obs,
             "resolved_J": actual_J,
+            "resolved_config": {
+                "target": {
+                    "equation": "burgers",
+                    "target_nu": args.target_nu,
+                    "T": args.T,
+                    "dt": args.dt,
+                    "nx": int(s),
+                    "domain_length": 1.0,
+                    "solver": args.expected_solver,
+                    "dealias": args.expected_dealias,
+                    "ic_type": args.expected_ic_type,
+                },
+                "surrogate": asdict(resolved_cfg),
+                "readout": {
+                    "ridge_zeta": float(args.ridge_zeta),
+                    "ridge_lambda_legacy_input": args.ridge_lambda,
+                    "ridge_convention": args.ridge_convention,
+                    "ridge_dtype": args.ridge_dtype,
+                },
+            },
+            "config_overrides": getattr(args, "_config_applied", {}),
             "main_metric": "abs_l2h",
             "alpha": float(args.Ttilde / args.T),
             "train_absL2h": train_abs,
@@ -939,6 +1005,7 @@ def main():
             "val_relL2_agg": val_rel_agg,
             "test_relL2_agg": test_rel_agg,
             "split": split_meta,
+            "metadata_validation": metadata_validation,
             "selection": {
                 "selection_metric": "val_absL2h" if val_abs is not None else "test_absL2h_legacy_fallback",
                 "selected_by": "single_run",
@@ -954,6 +1021,7 @@ def main():
             },
             "ridge_parameter_name": "zeta",
             "ridge_zeta": float(args.ridge_zeta),
+            "ridge_lambda_legacy_input": args.ridge_lambda,
             "ridge_convention": args.ridge_convention,
             "regularize_bias": False,
             "domain_length": 1.0,
@@ -962,18 +1030,33 @@ def main():
             "num_train_samples": int(args.ntrain),
             "effective_code_lambda_legacy_equivalent": float(args.ntrain * args.ridge_zeta * s),
             "data_file": args.data_file if args.data_mode == "single_split" else args.train_file,
-            "data_sha256": _file_sha256(args.data_file if args.data_mode == "single_split" else args.train_file),
-            "dataset_metadata": dataset_meta,
+            "data_sha256": file_sha256(args.data_file if args.data_mode == "single_split" else args.train_file),
+            "dataset_metadata": normalize_dataset_metadata(dataset_meta),
             "config_name": Path(args.config).stem if args.config else None,
             "config_path": args.config or None,
-            "config_hash": _file_sha256(args.config) if args.config else None,
+            "config_hash": file_sha256(args.config) if args.config else None,
             "config_applied": getattr(args, "_config_applied", {}),
-            "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-            "command_line": sys.argv,
-            "python_version": platform.python_version(),
-            "torch_version": torch.__version__,
-            "numpy_version": np.__version__,
+            "command_line": get_command_line(),
             "device": args.device,
+            "dtype": {
+                "data_dtype": args.data_dtype,
+                "sim_dtype": args.sim_dtype,
+                "ridge_dtype": args.ridge_dtype,
+                "input_tensor_dtype": str(x_train.dtype).replace("torch.", ""),
+                "feature_tensor_dtype": str(resolved_cfg.dtype).replace("torch.", ""),
+                "ridge_tensor_dtype": args.ridge_dtype,
+            },
+            "target": {
+                "equation": "burgers",
+                "target_nu": args.target_nu,
+                "T": args.T,
+                "dt": args.dt,
+                "nx": int(s),
+                "domain_length": 1.0,
+                "solver": args.expected_solver,
+                "dealias": args.expected_dealias,
+                "ic_type": args.expected_ic_type,
+            },
         }
         if ridge_state is not None:
             for src, dst in [
@@ -983,7 +1066,7 @@ def main():
                 ("cond_zeta", "condition_number"),
             ]:
                 if src in ridge_state:
-                    run_payload[dst] = _to_jsonable(ridge_state[src])
+                    run_payload[dst] = to_jsonable(ridge_state[src])
         if defect_metrics is not None:
             run_payload.update(
                 {
@@ -1000,7 +1083,7 @@ def main():
             if "max_abs_difference_model1_D1" in defect_metrics:
                 run_payload["max_abs_difference_model1_D1"] = defect_metrics["max_abs_difference_model1_D1"]
         json.dump(
-            _to_jsonable(run_payload),
+            to_jsonable(run_payload),
             f,
             indent=2,
             ensure_ascii=False,

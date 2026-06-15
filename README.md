@@ -69,17 +69,42 @@ python -m pip install -r requirements.txt
 
 ## Data Generation
 
+Generate a smoke `.pt` dataset from the checked-in B0 config:
+
+```bash
+python scripts/generate_burgers_1d.py \
+  --config configs/B0_smoke.json \
+  --format pt \
+  --output-dir outputs/smoke_data
+```
+
+Generate a larger GRF Burgers dataset from the B1 config:
+
+```bash
+python scripts/generate_burgers_1d.py \
+  --config configs/B1_burgers_grf.json \
+  --format pt \
+  --out-file data/burgers_B1_grf.pt
+```
+
+The runner supports both `.mat` datasets with `a/u` arrays and `.pt`
+datasets containing either raw `a/u` tensors or pre-split
+`u0_train/y_train`, `u0_val/y_val`, and `u0_test/y_test`.
+Dataset metadata is validated by default against the resolved CLI/config
+settings. Mismatches in `T`, `dt`, `nx`, `target_nu`, `ic_type`, solver
+metadata, or dealias metadata raise an error. Use
+`--allow-metadata-mismatch` only for intentional legacy runs; the warning and
+validation result are written to `run_config.json`.
+
 Generate a MATLAB file compatible with `model123_burgers_1d.py`:
 
 ```bash
 python scripts/generate_burgers_1d.py --out-file data/burgers_model123.mat --num-samples 1200 --grid-size 256 --nu 0.05 --T 1.0 --dt 0.001
 ```
 
-The `.mat` output includes `a`, `u`, `T`, `dt`, `nu`, `nx`, and `num_samples`.
-For `.pt` output, the saved bundle contains exactly the requested split:
-`u0_train/y_train` have `ntrain` samples and `u0_test/y_test` have `ntest`
-samples. If no split is specified, `--num-samples N --format pt` writes
-train `N` / test `0`.
+The `.mat` output includes `a`, `u`, `T`, `dt`, `nu`, `nx`, and
+`num_samples`. For `.pt` output, the saved bundle contains exactly the
+requested train/validation/test split.
 
 ## Running Model123
 
@@ -90,6 +115,12 @@ python model123_burgers_1d.py --model model3 --data-file data/burgers_model123.m
 ```
 
 Runs write `run_config.json` with `main_metric = "abs_l2h"`, `train_absL2h`, `test_absL2h`, `train_relL2`, and `test_relL2`.
+Current runs also include `val_absL2h` when `--nval > 0`,
+`relL2_mean`/`relL2_agg`, split hashes, metadata validation results, config
+hashes, git/runtime metadata, command line, and dtype information. Use
+`--data-dtype {preserve,float32,float64}`, `--sim-dtype {float32,float64}`,
+and `--ridge-dtype {float32,float64}` to control data tensors, simulation
+features, and ridge solves separately.
 The Model123 runner and feature extraction require `Ttilde`, `Tr`, and any
 explicit `--feature-times` to lie on the `dt` grid. Non-grid values such as
 `--Ttilde 0.055 --dt 0.01` raise `ValueError` instead of silently rounding.
@@ -120,7 +151,20 @@ Printed summaries include `Ttilde`, `alpha`, `D1`, `Delta_scale`, `rhs_beta`, `b
 python scripts/run_model123_param_sweep.py --sweep Ttilde=0.8,1.0,1.2 --models model1,model2,model3
 ```
 
-The unified sweep supports `alpha`, `Ttilde`, `res_burgers_nu`, `res_burgers_b`, `rd_nu`, `rd_alpha`, `rd_beta`, `ks_b`, `ks_eta`, `ks_kappa`, `dt`, `K`, and `J`. It ranks and plots by `test_absL2h` while retaining relative metrics in CSV/JSON.
+The unified sweep supports `alpha`, `Ttilde`, `res_burgers_nu`,
+`res_burgers_b`, `rd_nu`, `rd_alpha`, `rd_beta`, `ks_b`, `ks_eta`,
+`ks_kappa`, `heat_nu`, `advection_c`, `dt`, `K`, and `J`. Reservoir choices
+include `burgers`, `reaction_diffusion`, `ks`, `static`, `heat`, and
+`advection`; Burgers reservoirs can use `--burgers-scheme etdrk4`.
+
+When validation data is available, hyperparameter and sweep-setting selection
+uses `val_absL2h`. `test_absL2h` is retained for final evaluation after
+selection and must not be used as the formal selection metric. Legacy runs
+without validation are marked with `test_absL2h_legacy_fallback`.
+
+Ridge regularization is reported as `ridge_zeta` with convention
+`normalized_empirical_l2h_unweighted_frobenius`; legacy `--ridge-lambda` is
+accepted as an alias and recorded separately in `run_config.json`.
 When `--feature-times` is not provided, `K` selects `K` positive observation times evenly over `(0, Ttilde]`; for example `K=4` uses approximately `Ttilde/4, Ttilde/2, 3*Ttilde/4, Ttilde`.
 Its default data file is `data/burgers_model123.mat`, matching the generation
 example above. Default `dt` is `1e-2` and default Burgers inner `fine_dt` is
@@ -172,6 +216,66 @@ python scripts/run_model123_alpha_param_defect_study.py \
 The correlation heatmaps use `corr_i(model_error_abs_l2h_i, delta_scale_pathwise_abs_l2h_i)` across test samples at each grid cell. They are correlations with the integrated generator defect, not instantaneous field values.
 For theory-consistent Burgers coefficient checks, the examples set `--burgers-dealias 0`; using `--burgers-dealias 1` is valid for dealiased numerical diagnostics, but the analytic defect magnitude need not be exactly zero even when coefficients match.
 
+Both `run_model123_param_sweep.py` and
+`run_model123_alpha_param_defect_study.py` support strict existing-result
+audits:
+
+```bash
+python scripts/run_model123_param_sweep.py ... --check-existing
+python scripts/run_model123_param_sweep.py ... --skip-existing --reuse-report summary
+```
+
+The audit compares the stored `run_config.json` against the expected data
+hash, config hash, split seeds, model, reservoir parameters, ridge settings,
+dtype settings, and solver settings. It writes `existing_audit.csv/json` and
+returns exit code `2` for missing or mismatched results.
+
+## Validation-Selected Zeta, Learning Curves, and Headroom
+
+Run a zeta path with cached features:
+
+```bash
+python scripts/run_zeta_path.py \
+  --config configs/B0_smoke.json \
+  --data-file outputs/smoke_data/burgers_model123.pt \
+  --model model2 \
+  --reservoir static \
+  --zeta-grid 1e-8,1e-6,1e-4 \
+  --use-feature-cache \
+  --output-dir outputs/smoke_zeta_path
+```
+
+The best zeta is selected by `val_absL2h`; cache metadata includes dataset,
+split, surrogate, observation, feature shape, and feature hash information.
+`scripts/run_learning_curve.py` reuses the same zeta-path machinery while
+fixing validation/test splits and varying only the training subset size.
+
+Fourier diagonal linear headroom is available via:
+
+```bash
+python scripts/run_headroom_burgers.py \
+  --config configs/B0_smoke.json \
+  --data-file outputs/smoke_data/burgers_model123.pt \
+  --zeta-grid 1e-8,1e-6,1e-4 \
+  --output-dir outputs/smoke_headroom
+```
+
+This also selects zeta by validation error and reports `headroom_H` and
+`linear_explained_variance`.
+
+## ETDRK4 Solver Check
+
+`pol/spectral_etdrk4_1d.py` implements Cox--Matthews ETDRK4 for periodic
+Burgers with nonlinear-term dealiasing. The coefficient implementation has
+unit tests for the `L=0` RK4 limit and the `N=0` exact exponential limit.
+Run the small convergence smoke check with:
+
+```bash
+python scripts/check_solver_convergence.py \
+  --config configs/B0_smoke.json \
+  --output-dir outputs/smoke_solver_check
+```
+
 ## Output Schema
 
 Error decomposition per-sample rows include:
@@ -190,6 +294,8 @@ Summary rows include:
 Ttilde, alpha, num_samples, D1, Delta_init,
 delta_scale_rms_abs_l2h, delta_scale_mean_abs_l2h,
 delta_scale_std_abs_l2h, Delta_scale, rhs_beta0, rhs_beta,
+rhs_beta_theorem_components, rhs_beta_pathwise_rms,
+rhs_beta_legacy_alias_of,
 beta_mode, beta_value, c_beta_T
 ```
 

@@ -21,6 +21,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from model123_burgers_1d import load_data, ridge_dtype_from_name
 from pol.cache import file_sha256, stable_hash, to_jsonable
+from pol.metadata import get_command_line, get_git_info, get_runtime_info, normalize_dataset_metadata
 from pol.model123_1d import Model123Config, Model2Regressor1D, Model3Regressor1D
 from pol.model123_1d.feature_cache import (
     feature_cache_dir,
@@ -61,13 +62,17 @@ def apply_config_defaults(parser: argparse.ArgumentParser, args: argparse.Namesp
     data = cfg.get("data", {})
     readout = cfg.get("readout", {})
     _set_if_default(parser, args, "T", target.get("T"))
+    _set_if_default(parser, args, "target_nu", target.get("nu", target.get("target_nu")))
     _set_if_default(parser, args, "dt", target.get("dt"))
     _set_if_default(parser, args, "ntrain", data.get("ntrain"))
     _set_if_default(parser, args, "nval", data.get("nval"))
     _set_if_default(parser, args, "ntest", data.get("ntest"))
     _set_if_default(parser, args, "data_seed", data.get("data_seed"))
     _set_if_default(parser, args, "split_seed", data.get("split_seed"))
+    _set_if_default(parser, args, "data_dtype", data.get("data_dtype"))
+    _set_if_default(parser, args, "sim_dtype", data.get("sim_dtype"))
     _set_if_default(parser, args, "ridge_convention", readout.get("ridge_convention"))
+    _set_if_default(parser, args, "ridge_dtype", readout.get("ridge_dtype"))
     if args.zeta_grid == parser.get_default("zeta_grid") and readout.get("zeta_grid"):
         args.zeta_grid = ",".join(str(v) for v in readout["zeta_grid"])
         args._config_applied["zeta_grid"] = readout["zeta_grid"]
@@ -97,7 +102,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--split-seed", type=int, default=None)
     parser.add_argument("--sub", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--data-dtype", choices=("preserve", "float32", "float64"), default="float32")
+    parser.add_argument("--sim-dtype", choices=("float32", "float64"), default="float32")
     parser.add_argument("--T", type=float, default=1.0)
+    parser.add_argument("--target-nu", type=float, default=None)
     parser.add_argument("--Ttilde", type=float, default=0.0)
     parser.add_argument("--dt", type=float, default=1e-2)
     parser.add_argument("--K", type=int, default=1)
@@ -244,6 +252,7 @@ def feature_tensors(args, x_train, x_val, x_test, split_meta) -> tuple[dict[str,
         "cache_hit": False,
         "cache_dir": str(cache_dir),
         "feature_shape": {name: list(tensor.shape) for name, tensor in tensors.items()},
+        "feature_hash": stable_hash({name: {"shape": list(tensor.shape), "sum": float(tensor.double().sum().item())} for name, tensor in tensors.items()}),
         "dtype": str(tensors["train"].dtype).replace("torch.", ""),
         "ntrain": int(x_train.shape[0]),
         "nval": int(x_val.shape[0]),
@@ -290,7 +299,7 @@ def run_zeta_path(args: argparse.Namespace, *, train_limit: int | None = None) -
     args.split_seed = args.seed if args.split_seed is None else args.split_seed
     if args.nval <= 0:
         raise ValueError("zeta-path requires --nval > 0 so validation, not test, selects zeta")
-    x_train, y_train, x_val, y_val, x_test, y_test, split_meta, dataset_meta = load_data(args)
+    x_train, y_train, x_val, y_val, x_test, y_test, split_meta, dataset_meta, metadata_validation = load_data(args)
     tensors, cache_meta = feature_tensors(args, x_train, x_val, x_test, split_meta)
     standardization_meta = {"enabled": False}
     if bool(args.standardize_features):
@@ -349,7 +358,14 @@ def run_zeta_path(args: argparse.Namespace, *, train_limit: int | None = None) -
         "feature_cache": cache_meta,
         "feature_standardization": standardization_meta,
         "split": split_meta,
-        "dataset_metadata": dataset_meta,
+        "dataset_metadata": normalize_dataset_metadata(dataset_meta),
+        "metadata_validation": metadata_validation,
+        "selection": {
+            "selection_metric": "val_absL2h",
+            "selected_by": "validation",
+            "selected_zeta": best["zeta"],
+            "legacy_fallback_warning": False,
+        },
     }
     return rows, summary
 
@@ -363,7 +379,24 @@ def write_outputs(args: argparse.Namespace, rows: list[dict[str, Any]], summary:
         writer.writerows(rows)
     (out_dir / "zeta_path.json").write_text(json.dumps(to_jsonable(rows), indent=2), encoding="utf-8")
     (out_dir / "best_by_val.json").write_text(json.dumps(to_jsonable(summary), indent=2), encoding="utf-8")
-    (out_dir / "run_config.json").write_text(json.dumps(to_jsonable(vars(args)), indent=2), encoding="utf-8")
+    run_config = {
+        "args": vars(args),
+        "git": get_git_info(REPO_ROOT),
+        **get_runtime_info(),
+        "command_line": get_command_line(),
+        "selection": summary.get("selection"),
+        "feature_cache": summary.get("feature_cache"),
+        "split": summary.get("split"),
+        "dataset_metadata": summary.get("dataset_metadata"),
+        "metadata_validation": summary.get("metadata_validation"),
+        "dtype": {
+            "data_dtype": args.data_dtype,
+            "sim_dtype": args.sim_dtype,
+            "ridge_dtype": args.ridge_dtype,
+        },
+        "metrics": summary.get("best_by_val"),
+    }
+    (out_dir / "run_config.json").write_text(json.dumps(to_jsonable(run_config), indent=2), encoding="utf-8")
     if args.plot:
         fig, ax = plt.subplots(figsize=(6.0, 4.0))
         zeta = [row["zeta"] for row in rows]

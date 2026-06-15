@@ -93,6 +93,7 @@ def build_model123_config_from_experiment(cfg: ExperimentConfig) -> Model123Conf
         sensor_mode="equispaced",
         sensor_seed=cfg.seed,
         ridge_lambda=0.0,
+        ridge_zeta=0.0,
         ridge_dtype=_resolve_dtype(cfg.dtype),
         elm_hidden_dim=cfg.model3_m,
         elm_activation=cfg.model3_activation,

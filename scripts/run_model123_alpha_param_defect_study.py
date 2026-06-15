@@ -27,7 +27,9 @@ from model123_burgers_1d import pearson_corr_or_none, spearman_corr_or_none
 from scripts.run_model123_param_sweep import (
     PARAMETERS,
     SweepParameter,
+    _apply_config_defaults,
     append_optional_flag,
+    audit_existing_run,
     build_job_env,
     build_run_command,
     cast_value,
@@ -82,6 +84,8 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--data-seed", type=int, default=None)
     parser.add_argument("--split-seed", type=int, default=None)
+    parser.add_argument("--data-dtype", choices=("preserve", "float32", "float64"), default="float32")
+    parser.add_argument("--sim-dtype", choices=("float32", "float64"), default="float32")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--T", type=float, default=1.0)
     parser.add_argument("--dt", type=float, default=1e-2)
@@ -108,11 +112,13 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--rd-beta", type=float, default=1.0)
     parser.add_argument("--res-burgers-nu", type=float, default=1e-2)
     parser.add_argument("--res-burgers-b", type=float, default=1.0)
+    parser.add_argument("--heat-nu", type=float, default=1e-2)
+    parser.add_argument("--advection-c", type=float, default=1.0)
     parser.add_argument("--ks-dealias", action="store_true")
     parser.add_argument("--ks-b", type=float, default=1.0)
     parser.add_argument("--ks-eta", type=float, default=1.0)
     parser.add_argument("--ks-kappa", type=float, default=1.0)
-    parser.add_argument("--burgers-scheme", choices=("semi_implicit", "split_step"), default="split_step")
+    parser.add_argument("--burgers-scheme", "--time-integrator", dest="burgers_scheme", choices=("semi_implicit", "split_step", "etdrk4"), default="split_step")
     parser.add_argument("--burgers-fine-dt", type=float, default=1e-4)
     parser.add_argument("--burgers-dealias", type=int, choices=(0, 1), default=1)
     parser.add_argument("--elm-h", type=int, default=1024)
@@ -197,9 +203,13 @@ def load_run_summary(run_dir: Path) -> dict[str, Any]:
     cfg = load_json(run_dir / "run_config.json")
     return {
         "train_absL2h": float(cfg["train_absL2h"]),
+        "val_absL2h": cfg.get("val_absL2h"),
         "test_absL2h": float(cfg["test_absL2h"]),
         "train_relL2": float(cfg["train_relL2"]),
         "test_relL2": float(cfg["test_relL2"]),
+        "train_relL2_mean": cfg.get("train_relL2_mean", cfg.get("train_relL2")),
+        "val_relL2_mean": cfg.get("val_relL2_mean"),
+        "test_relL2_mean": cfg.get("test_relL2_mean", cfg.get("test_relL2")),
     }
 
 
@@ -374,6 +384,9 @@ def make_plots(rows: list[dict[str, Any]], models: list[str], parameter: SweepPa
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    _apply_config_defaults(parser, args)
+    if not hasattr(args, "_config_applied"):
+        args._config_applied = {}
     if args.data_seed is None:
         args.data_seed = args.seed
     if args.split_seed is None:
@@ -408,17 +421,17 @@ def main(argv: list[str] | None = None) -> int:
                 run_dir = runs_root / model / f"{parameter.name}_{safe_tag(parameter_value)}__alpha_{safe_tag(alpha)}"
                 cell_dirs[model] = run_dir
                 compute_defect = model == defect_owner_model
-                config_exists = (run_dir / "run_config.json").exists()
-                defect_exists = (run_dir / "time_scaled_defect_per_sample.json").exists()
+                overrides = {parameter.name: parameter_value, "alpha": alpha}
+                command_args = argparse.Namespace(**vars(args))
+                command_args.compute_time_scaled_defect = bool(compute_defect)
+                audit = audit_existing_run(args=command_args, model=model, overrides=overrides, run_dir=run_dir)
+                if compute_defect and audit["status"] == "ok" and not (run_dir / "time_scaled_defect_metrics.json").exists():
+                    audit["status"] = "missing_defect"
+                    audit["reason"] = "missing time_scaled_defect_metrics.json"
                 if args.check_existing:
                     return_code = 0
-                    if not config_exists:
-                        status = "missing"
-                    elif compute_defect and not defect_exists:
-                        status = "missing_defect"
-                    else:
-                        status = "ok"
-                elif args.skip_existing and config_exists and (not compute_defect or defect_exists):
+                    status = audit["status"]
+                elif args.skip_existing and audit["status"] == "ok":
                     return_code = 0
                     status = "ok"
                 else:
@@ -444,6 +457,7 @@ def main(argv: list[str] | None = None) -> int:
                     "Ttilde": float(alpha) * float(args.T),
                     "alpha": alpha,
                     "train_absL2h": None,
+                    "val_absL2h": None,
                     "test_absL2h": None,
                     "train_relL2": None,
                     "test_relL2": None,
@@ -457,6 +471,16 @@ def main(argv: list[str] | None = None) -> int:
                     "status": cell_results[model][0],
                     "return_code": cell_results[model][1],
                 }
+                if args.check_existing or args.skip_existing:
+                    row.update(audit_existing_run(
+                        args=argparse.Namespace(**{**vars(args), "compute_time_scaled_defect": bool(model == defect_owner_model)}),
+                        model=model,
+                        overrides={parameter.name: parameter_value, "alpha": alpha},
+                        run_dir=run_dir,
+                    ))
+                    row["parameter_name"] = parameter.name
+                    row["parameter_value"] = parameter_value
+                    row["alpha"] = alpha
                 if row["status"] == "ok" and (run_dir / "run_config.json").exists():
                     row.update(load_run_summary(run_dir))
                     defect_source = find_defect_source(owner_dir, run_dir)
@@ -494,6 +518,7 @@ def main(argv: list[str] | None = None) -> int:
         "Ttilde",
         "alpha",
         "train_absL2h",
+        "val_absL2h",
         "test_absL2h",
         "train_relL2",
         "test_relL2",
@@ -506,7 +531,12 @@ def main(argv: list[str] | None = None) -> int:
         "run_dir",
         "status",
         "return_code",
+        "reason",
+        "has_run_config",
+        "has_defect_metrics",
     ]
+    dynamic_audit_fields = sorted({key for row in summary_rows for key in row if key.startswith("expected_") or key.startswith("found_")})
+    summary_fields = dedupe_fieldnames(summary_fields + dynamic_audit_fields)
     per_sample_fields = [
         "model",
         "sample_index",

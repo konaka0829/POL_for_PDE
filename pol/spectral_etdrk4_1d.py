@@ -36,6 +36,36 @@ def burgers_nonlinear_hat(u: torch.Tensor, k: torch.Tensor, *, b: float = 1.0, d
     return nh
 
 
+def cox_matthews_coefficients(L: torch.Tensor, dt: float) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    z = float(dt) * L
+    E = torch.exp(z)
+    E2 = torch.exp(z / 2.0)
+    Q = 0.5 * float(dt) * _phi(z / 2.0, 1)
+    f1 = float(dt) * (_phi(z, 1) - 3.0 * _phi(z, 2) + 4.0 * _phi(z, 3))
+    f2 = float(dt) * (_phi(z, 2) - 2.0 * _phi(z, 3))
+    f3 = float(dt) * (-_phi(z, 2) + 4.0 * _phi(z, 3))
+    return E, E2, Q, f1, f2, f3
+
+
+@torch.no_grad()
+def cox_matthews_etdrk4_step(
+    v: torch.Tensor,
+    *,
+    L: torch.Tensor,
+    dt: float,
+    nonlinear,
+) -> torch.Tensor:
+    E, E2, Q, f1, f2, f3 = cox_matthews_coefficients(L, dt)
+    Nv = nonlinear(v)
+    a = E2 * v + Q * Nv
+    Na = nonlinear(a)
+    b = E2 * v + Q * Na
+    Nb = nonlinear(b)
+    c = E2 * a + Q * (2.0 * Nb - Nv)
+    Nc = nonlinear(c)
+    return E * v + f1 * Nv + 2.0 * f2 * (Na + Nb) + f3 * Nc
+
+
 @torch.no_grad()
 def simulate_burgers_etdrk4_trajectory(
     u0: torch.Tensor,
@@ -57,13 +87,7 @@ def simulate_burgers_etdrk4_trajectory(
     dtype = u.real.dtype
     k = rfft_wavenumbers(u.shape[-1], domain_length=domain_length, device=u.device, dtype=dtype)
     L = -float(nu) * k * k
-    z = dt * L
-    E = torch.exp(z)
-    E2 = torch.exp(z / 2.0)
-    Q = dt * _phi(z / 2.0, 1)
-    f1 = dt * (_phi(z, 1) - 3.0 * _phi(z, 2) + 4.0 * _phi(z, 3))
-    f2 = dt * (2.0 * _phi(z, 2) - 4.0 * _phi(z, 3))
-    f3 = dt * (-_phi(z, 2) + 4.0 * _phi(z, 3))
+    E, E2, Q, f1, f2, f3 = cox_matthews_coefficients(L, dt)
     vh = torch.fft.rfft(u, dim=-1)
     obs_sorted = sorted(set(int(step) for step in (obs_steps if obs_steps is not None else [steps])))
     if not obs_sorted or obs_sorted[0] < 1:

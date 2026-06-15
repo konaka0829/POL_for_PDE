@@ -20,10 +20,13 @@
     "nval": 6,
     "ntest": 6,
     "data_seed": 0,
-    "split_seed": 0
+    "split_seed": 0,
+    "data_dtype": "float32",
+    "sim_dtype": "float32"
   },
   "readout": {
     "ridge_convention": "normalized_empirical_l2h_unweighted_frobenius",
+    "ridge_dtype": "float64",
     "zeta_grid": [1e-8, 1e-6, 1e-4]
   }
 }

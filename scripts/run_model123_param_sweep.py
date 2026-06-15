@@ -154,6 +154,22 @@ PARAMETERS: dict[str, SweepParameter] = {
         prefer_log_axis=True,
         reservoirs=("ks",),
     ),
+    "heat_nu": SweepParameter(
+        name="heat_nu",
+        cli_flag="--heat-nu",
+        kind="float",
+        label="heat_nu",
+        positive=True,
+        prefer_log_axis=True,
+        reservoirs=("heat",),
+    ),
+    "advection_c": SweepParameter(
+        name="advection_c",
+        cli_flag="--advection-c",
+        kind="float",
+        label="advection_c",
+        reservoirs=("advection",),
+    ),
 }
 
 ALIASES = {
@@ -180,6 +196,10 @@ ALIASES = {
     "ks-eta": "ks_eta",
     "ks_kappa": "ks_kappa",
     "ks-kappa": "ks_kappa",
+    "heat_nu": "heat_nu",
+    "heat-nu": "heat_nu",
+    "advection_c": "advection_c",
+    "advection-c": "advection_c",
     "dt": "dt",
     "k": "K",
     "j": "J",
@@ -485,6 +505,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--data-seed", type=int, default=None)
     parser.add_argument("--split-seed", type=int, default=None)
+    parser.add_argument("--data-dtype", choices=("preserve", "float32", "float64"), default="float32")
+    parser.add_argument("--sim-dtype", choices=("float32", "float64"), default="float32")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--T", type=float, default=1.0)
     parser.add_argument("--Ttilde", type=float, default=1.0)
@@ -513,11 +535,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rd-beta", type=float, default=1.0)
     parser.add_argument("--res-burgers-nu", type=float, default=1e-2)
     parser.add_argument("--res-burgers-b", type=float, default=1.0)
+    parser.add_argument("--heat-nu", type=float, default=1e-2)
+    parser.add_argument("--advection-c", type=float, default=1.0)
     parser.add_argument("--ks-dealias", action="store_true")
     parser.add_argument("--ks-b", type=float, default=1.0)
     parser.add_argument("--ks-eta", type=float, default=1.0)
     parser.add_argument("--ks-kappa", type=float, default=1.0)
-    parser.add_argument("--burgers-scheme", choices=("semi_implicit", "split_step"), default="split_step")
+    parser.add_argument("--burgers-scheme", "--time-integrator", dest="burgers_scheme", choices=("semi_implicit", "split_step", "etdrk4"), default="split_step")
     parser.add_argument("--burgers-fine-dt", type=float, default=1e-4)
     parser.add_argument("--burgers-dealias", type=int, choices=(0, 1), default=1)
     parser.add_argument("--elm-h", type=int, default=1024)
@@ -566,7 +590,10 @@ def _apply_config_defaults(parser: argparse.ArgumentParser, args: argparse.Names
     _set_if_default(parser, args, "ntest", data.get("ntest"))
     _set_if_default(parser, args, "data_seed", data.get("data_seed"))
     _set_if_default(parser, args, "split_seed", data.get("split_seed"))
+    _set_if_default(parser, args, "data_dtype", data.get("data_dtype"))
+    _set_if_default(parser, args, "sim_dtype", data.get("sim_dtype"))
     _set_if_default(parser, args, "ridge_convention", readout.get("ridge_convention"))
+    _set_if_default(parser, args, "ridge_dtype", readout.get("ridge_dtype"))
 
 
 def validate_sweeps(args: argparse.Namespace) -> list[SweepSpec]:
@@ -644,6 +671,8 @@ def build_run_command(
         "ks_b": overrides.get("ks_b", args.ks_b),
         "ks_eta": overrides.get("ks_eta", args.ks_eta),
         "ks_kappa": overrides.get("ks_kappa", args.ks_kappa),
+        "heat_nu": overrides.get("heat_nu", args.heat_nu),
+        "advection_c": overrides.get("advection_c", args.advection_c),
     }
     cmd = [
         args.python,
@@ -672,6 +701,10 @@ def build_run_command(
         str(args.split_seed if args.split_seed is not None else args.seed),
         "--batch-size",
         str(args.batch_size),
+        "--data-dtype",
+        args.data_dtype,
+        "--sim-dtype",
+        args.sim_dtype,
         "--T",
         str(args.T),
         "--Ttilde",
@@ -700,6 +733,10 @@ def build_run_command(
         str(effective["res_burgers_nu"]),
         "--res-burgers-b",
         str(effective["res_burgers_b"]),
+        "--heat-nu",
+        str(effective["heat_nu"]),
+        "--advection-c",
+        str(effective["advection_c"]),
         "--burgers-scheme",
         args.burgers_scheme,
         "--burgers-fine-dt",
@@ -731,6 +768,10 @@ def build_run_command(
         append_optional_flag(cmd, "--ks-kappa", effective["ks_kappa"])
         if args.ks_dealias:
             cmd.append("--ks-dealias")
+    elif args.reservoir == "heat":
+        append_optional_flag(cmd, "--heat-nu", effective["heat_nu"])
+    elif args.reservoir == "advection":
+        append_optional_flag(cmd, "--advection-c", effective["advection_c"])
 
     if model == "model3":
         append_optional_flag(cmd, "--elm-h", args.elm_h)
@@ -865,6 +906,12 @@ def expected_run_values(args: argparse.Namespace, model: str, overrides: dict[st
         "ks_b": overrides.get("ks_b", args.ks_b),
         "ks_eta": overrides.get("ks_eta", args.ks_eta),
         "ks_kappa": overrides.get("ks_kappa", args.ks_kappa),
+        "heat_nu": overrides.get("heat_nu", args.heat_nu),
+        "advection_c": overrides.get("advection_c", args.advection_c),
+        "burgers_scheme": args.burgers_scheme,
+        "burgers_dealias": int(args.burgers_dealias),
+        "data_dtype": args.data_dtype,
+        "sim_dtype": args.sim_dtype,
     }
 
 
@@ -887,10 +934,46 @@ def audit_existing_run(
         "has_defect_metrics": False,
     }
     expected = expected_run_values(args, model, overrides)
-    for key in ["alpha", "T", "Ttilde", "dt", "K", "obs", "J", "reservoir"]:
-        row[f"expected_{key}"] = expected.get(key)
-        row[f"found_{key}"] = None
-    for key in ["ridge_zeta", "ridge_convention", "data_file"]:
+    audit_keys = [
+        "model",
+        "data_file",
+        "config_name",
+        "T",
+        "dt",
+        "Ttilde",
+        "alpha",
+        "K",
+        "obs",
+        "J",
+        "reservoir",
+        "ntrain",
+        "nval",
+        "ntest",
+        "seed",
+        "data_seed",
+        "split_seed",
+        "elm_seed",
+        "sensor_seed",
+        "ridge_zeta",
+        "ridge_convention",
+        "ridge_dtype",
+        "standardize_features",
+        "rd_nu",
+        "rd_alpha",
+        "rd_beta",
+        "res_burgers_nu",
+        "res_burgers_b",
+        "ks_b",
+        "ks_eta",
+        "ks_kappa",
+        "heat_nu",
+        "advection_c",
+        "burgers_scheme",
+        "burgers_dealias",
+        "data_dtype",
+        "sim_dtype",
+    ]
+    for key in audit_keys:
         row[f"expected_{key}"] = expected.get(key)
         row[f"found_{key}"] = None
     row["expected_data_sha256"] = expected.get("data_sha256")
@@ -957,10 +1040,16 @@ def audit_existing_run(
         "ks_b": args_payload.get("ks_b"),
         "ks_eta": args_payload.get("ks_eta"),
         "ks_kappa": args_payload.get("ks_kappa"),
+        "heat_nu": args_payload.get("heat_nu"),
+        "advection_c": args_payload.get("advection_c"),
+        "burgers_scheme": args_payload.get("burgers_scheme"),
+        "burgers_dealias": args_payload.get("burgers_dealias"),
+        "data_dtype": args_payload.get("data_dtype", _nested_get(payload, ["dtype", "data_dtype"])),
+        "sim_dtype": args_payload.get("sim_dtype", _nested_get(payload, ["dtype", "sim_dtype"])),
     }
     if found["alpha"] is None and found.get("T") and found.get("Ttilde"):
         found["alpha"] = float(found["Ttilde"]) / float(found["T"])
-    for key in ["alpha", "T", "Ttilde", "dt", "K", "obs", "J", "reservoir", "ridge_zeta", "ridge_convention", "data_file"]:
+    for key in audit_keys:
         row[f"found_{key}"] = found.get(key)
     row["found_data_sha256"] = payload.get("data_sha256")
     row["found_config_hash"] = payload.get("config_hash")
@@ -1505,6 +1594,7 @@ def save_best_runs(
 
 
 def write_audit_outputs(model_dir: Path, rows: list[dict[str, Any]]) -> tuple[Path, Path]:
+    dynamic = sorted({key for row in rows for key in row if key.startswith("expected_") or key.startswith("found_")})
     fieldnames = dedupe_fieldnames(
         [
             "model",
@@ -1519,32 +1609,7 @@ def write_audit_outputs(model_dir: Path, rows: list[dict[str, Any]]) -> tuple[Pa
             "test_relL2_agg",
             "val_relL2_mean",
             "val_relL2_agg",
-            "expected_alpha",
-            "found_alpha",
-            "expected_T",
-            "found_T",
-            "expected_Ttilde",
-            "found_Ttilde",
-            "expected_dt",
-            "found_dt",
-            "expected_K",
-            "found_K",
-            "expected_obs",
-            "found_obs",
-            "expected_J",
-            "found_J",
-            "expected_reservoir",
-            "found_reservoir",
-            "expected_ridge_zeta",
-            "found_ridge_zeta",
-            "expected_ridge_convention",
-            "found_ridge_convention",
-            "expected_data_file",
-            "found_data_file",
-            "expected_data_sha256",
-            "found_data_sha256",
-            "expected_config_hash",
-            "found_config_hash",
+            *dynamic,
             "has_run_config",
             "has_val_metrics",
             "has_test_metrics",

@@ -552,7 +552,7 @@ def aggregate_metric_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         T = float(t_rows[0]["T"])
         exp_beta_t = math.exp(beta_value * T)
         rhs_beta0 = delta_init + math.sqrt(T) * delta_scale
-        rhs_beta = exp_beta_t * delta_init + cbeta * delta_scale
+        rhs_beta_theorem_components = exp_beta_t * delta_init + cbeta * delta_scale
         pathwise_rms = _rms([float(row["rhs_beta_pathwise_abs_l2h"]) for row in t_rows])
         summary_rows.append(
             {
@@ -564,7 +564,9 @@ def aggregate_metric_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "Delta_scale": delta_scale,
                 "Delta_dyn": delta_scale,
                 "rhs_beta0": rhs_beta0,
-                "rhs_beta": rhs_beta,
+                "rhs_beta": rhs_beta_theorem_components,
+                "rhs_beta_legacy_alias_of": "rhs_beta_theorem_components",
+                "rhs_beta_theorem_components": rhs_beta_theorem_components,
                 "rhs_beta_pathwise_rms": pathwise_rms,
                 "beta_mode": t_rows[0]["beta_mode"],
                 "beta_value": beta_value,
@@ -618,6 +620,9 @@ def _summary_for_dataset_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "Delta_dyn": delta_rms,
         "rhs_beta0": rhs_beta0_rms,
         "rhs_beta": rhs_beta_rms,
+        "rhs_beta_legacy_alias_of": "rhs_beta_pathwise_rms",
+        "rhs_beta_theorem_components": math.exp(float(first["beta_value"]) * float(first["T"])) * delta_init_rms
+        + float(first["c_beta_T"]) * delta_rms,
         "rhs_beta_pathwise_rms": rhs_beta_rms,
         "beta_mode": first["beta_mode"],
         "beta_value": float(first["beta_value"]),
