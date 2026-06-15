@@ -41,16 +41,18 @@ def base_args(path, **kwargs):
     return Namespace(**values)
 
 
-def write_mat(path, *, nx=8, nu=0.05, ic_type=None):
+def write_mat(path, *, nx=8, metadata_nx=None, nu=0.05, ic_type=None, domain_length=None):
     a = torch.zeros(4, nx).numpy()
     u = torch.ones(4, nx).numpy()
-    payload = {"a": a, "u": u, "T": 0.1, "dt": 0.01, "nu": nu, "nx": nx}
+    payload = {"a": a, "u": u, "T": 0.1, "dt": 0.01, "nu": nu, "nx": nx if metadata_nx is None else metadata_nx}
     if ic_type is not None:
         payload["ic_type"] = ic_type
+    if domain_length is not None:
+        payload["domain_length"] = domain_length
     scipy.io.savemat(path, payload)
 
 
-def write_pt(path, *, nx=8, target_nu=0.05, ic_type="grf"):
+def write_pt(path, *, nx=8, metadata_nx=None, target_nu=0.05, ic_type="grf", domain_length=None):
     payload = {
         "u0_train": torch.zeros(2, nx),
         "y_train": torch.ones(2, nx),
@@ -58,7 +60,14 @@ def write_pt(path, *, nx=8, target_nu=0.05, ic_type="grf"):
         "y_val": torch.ones(0, nx),
         "u0_test": torch.zeros(2, nx),
         "y_test": torch.ones(2, nx),
-        "metadata": {"T": 0.1, "dt": 0.01, "target_nu": target_nu, "nx": nx, "ic_type": ic_type},
+        "metadata": {
+            "T": 0.1,
+            "dt": 0.01,
+            "target_nu": target_nu,
+            "nx": nx if metadata_nx is None else metadata_nx,
+            "ic_type": ic_type,
+            **({} if domain_length is None else {"domain_length": domain_length}),
+        },
     }
     torch.save(payload, path)
 
@@ -70,11 +79,32 @@ def test_normalize_dataset_metadata_aliases_nu_to_target_nu():
     assert meta["dt"] == 0.01
 
 
-def test_nx_mismatch_errors_for_mat(tmp_path):
+def test_subsampled_mat_validates_metadata_nx_against_raw_nx(tmp_path):
     data = tmp_path / "data.mat"
     write_mat(data, nx=8)
     args = base_args(data, sub=2)
+    loaded = load_data(args)
+    assert loaded[0].shape == (2, 4)
+    assert loaded[6]["dataset_nx"] == 8
+    assert loaded[6]["effective_nx"] == 4
+    assert loaded[-1]["checks"]["nx"]["expected"] == 8
+    assert loaded[-1]["checks"]["nx"]["found"] == 8
+    assert loaded[-1]["checks"]["nx"]["ok"] is True
+
+
+def test_subsampled_mat_still_errors_when_metadata_nx_is_wrong(tmp_path):
+    data = tmp_path / "data.mat"
+    write_mat(data, nx=8, metadata_nx=7)
+    args = base_args(data, sub=2)
     with pytest.raises(ValueError, match="nx"):
+        load_data(args)
+
+
+def test_domain_length_mismatch_errors_for_pt(tmp_path):
+    data = tmp_path / "data.pt"
+    write_pt(data, domain_length=2.0)
+    args = base_args(data, expected_domain_length=1.0)
+    with pytest.raises(ValueError, match="domain_length"):
         load_data(args)
 
 

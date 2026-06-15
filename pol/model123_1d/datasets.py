@@ -70,13 +70,14 @@ def _simulate_target(
     solver: str,
     dealias: bool,
     batch_size: int,
+    domain_length: float,
 ) -> torch.Tensor:
     obs_step = int(round(T / dt))
     chunks: list[torch.Tensor] = []
     for start in range(0, u0.shape[0], batch_size):
         batch = u0[start : start + batch_size]
         if solver in {"etdrk4", "fourier_pseudospectral_etdrk4"}:
-            y = simulate_burgers_etdrk4(batch, nu=nu, T=T, dt=dt, dealias=dealias)
+            y = simulate_burgers_etdrk4(batch, nu=nu, T=T, dt=dt, dealias=dealias, domain_length=domain_length)
         elif solver in {"split_step", "semi_implicit"}:
             states = simulate_burgers_split_step(
                 batch,
@@ -88,6 +89,7 @@ def _simulate_target(
                 forcing=None,
                 forcing_steps=None,
                 dealias=dealias,
+                domain_length=domain_length,
             )
             y = states[-1]
         else:
@@ -147,6 +149,7 @@ def build_dataset(cfg: DatasetConfig, *, device: torch.device | None = None) -> 
         solver=cfg.solver,
         dealias=cfg.dealias,
         batch_size=cfg.batch_size,
+        domain_length=cfg.domain_length,
     ).cpu()
     val_start = cfg.ntrain
     test_start = cfg.ntrain + cfg.nval

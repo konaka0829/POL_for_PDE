@@ -98,6 +98,12 @@ error. Missing metadata is a warning by default for legacy compatibility; add
 error. Use `--allow-metadata-mismatch` only for intentional legacy runs; the
 warning and validation result are written to `run_config.json`.
 
+For spatial subsampling, metadata `nx` means the raw dataset resolution before
+`--sub`. The model uses `effective_nx = dataset_nx / sub` after subsampling.
+`run_config.json` records `grid.dataset_nx`, `grid.raw_nx`,
+`grid.effective_nx`, and `grid.sub`; metadata validation compares `nx` against
+the raw dataset resolution, not the effective model resolution.
+
 Generate a MATLAB file compatible with `model123_burgers_1d.py`:
 
 ```bash
@@ -105,10 +111,12 @@ python scripts/generate_burgers_1d.py --out-file data/burgers_model123.mat --num
 ```
 
 The `.mat` output includes `a`, `u`, `T`, `dt`, `nu`/`target_nu`, `nx`,
-string metadata such as `ic_type` and `solver`, and `num_samples`. Numeric PDE
-fields and metadata are read through separate paths, so `.mat` string metadata
-is not cast to float. For `.pt` output, the saved bundle contains exactly the
-requested train/validation/test split plus normalized metadata when available.
+`domain_length`, string metadata such as `ic_type` and `solver`, and
+`num_samples`. Numeric PDE fields and metadata are read through separate paths,
+so `.mat` string metadata is not cast to float. For `.pt` output, the saved
+bundle contains exactly the requested train/validation/test split plus
+normalized metadata when available. Burgers split-step and ETDRK4 solvers use
+`domain_length` in the Fourier wavenumbers; B0/B1 use `domain_length=1.0`.
 
 ## Running Model123
 
@@ -170,7 +178,9 @@ default is no longer used.
 When validation data is available, hyperparameter and sweep-setting selection
 uses `val_absL2h`. `test_absL2h` is retained for final evaluation after
 selection and must not be used as the formal selection metric. Legacy runs
-without validation are marked with `test_absL2h_legacy_fallback`.
+without validation are marked with `test_absL2h_legacy_fallback`. Sweep
+`summary.csv/json` and `best_runs.csv/json` store the row-level
+`selection_metric`.
 
 Ridge regularization is reported as `ridge_zeta` with convention
 `normalized_empirical_l2h_unweighted_frobenius`; legacy `--ridge-lambda` is
@@ -242,8 +252,15 @@ python scripts/run_model123_param_sweep.py ... --skip-existing --reuse-report su
 
 The audit compares the stored `run_config.json` against the expected data
 hash, config hash, split seeds, model, reservoir parameters, ridge settings,
-dtype settings, and solver settings. It writes `existing_audit.csv/json` and
-returns exit code `2` for missing or mismatched results.
+dtype settings, and solver settings. `--check-existing` is audit-only: it does
+not launch jobs and does not overwrite normal sweep outputs such as
+`summary.csv/json`, `best_runs.csv/json`, profile plots, or comparison plots.
+It writes only audit outputs:
+`existing_audit.csv`, `existing_audit.json`,
+`existing_audit_summary.csv`, and `existing_audit_summary.json`, and returns
+exit code `2` for missing or mismatched results. `--skip-existing
+--reuse-report summary` remains a normal sweep/reuse path and may write normal
+summary files.
 
 ## Validation-Selected Zeta, Learning Curves, and Headroom
 

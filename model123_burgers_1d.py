@@ -438,6 +438,7 @@ def load_data(args):
         loaded = _load_dataset_file(args.data_file)
         dataset_meta = loaded["metadata"]
         if loaded["kind"] == "split":
+            raw_nx = int(loaded["x_train"].shape[-1])
             x_train_full = loaded["x_train"][:, :: args.sub]
             y_train_full = loaded["y_train"][:, :: args.sub]
             x_val_full = loaded["x_val"][:, :: args.sub]
@@ -459,7 +460,9 @@ def load_data(args):
             val_idx = np.arange(args.nval)
             test_idx = np.arange(args.ntest)
             split_meta["split_policy"] = "pre_split_dataset"
-            metadata_validation = _validate_dataset_metadata(args, dataset_meta, nx_after_sub=int(x_train.shape[1]))
+            effective_nx = int(x_train.shape[1])
+            split_meta.update({"dataset_nx": raw_nx, "raw_nx": raw_nx, "effective_nx": effective_nx, "sub": int(args.sub)})
+            metadata_validation = _validate_dataset_metadata(args, dataset_meta, nx_after_sub=raw_nx)
             _validate_shapes(x_train, y_train, x_val, y_val, x_test, y_test)
             split_meta.update(
                 {
@@ -481,9 +484,12 @@ def load_data(args):
                 metadata_validation,
             )
 
+        raw_nx = int(loaded["a"].shape[-1])
         x_data = loaded["a"][:, :: args.sub]
         y_data = loaded["u"][:, :: args.sub]
-        metadata_validation = _validate_dataset_metadata(args, dataset_meta, nx_after_sub=int(x_data.shape[1]))
+        effective_nx = int(x_data.shape[1])
+        split_meta.update({"dataset_nx": raw_nx, "raw_nx": raw_nx, "effective_nx": effective_nx, "sub": int(args.sub)})
+        metadata_validation = _validate_dataset_metadata(args, dataset_meta, nx_after_sub=raw_nx)
         total = x_data.shape[0]
         indices = np.arange(total)
         if args.shuffle or args.nval > 0:
@@ -515,19 +521,26 @@ def load_data(args):
     else:
         with MatReader(args.train_file) as train_reader, MatReader(args.test_file) as test_reader:
             _validate_target_time(args, train_reader, test_reader)
-            x_train = train_reader.read_field("a")[: args.ntrain, :: args.sub]
-            y_train = train_reader.read_field("u")[: args.ntrain, :: args.sub]
-            x_val = train_reader.read_field("a")[args.ntrain : args.ntrain + args.nval, :: args.sub]
-            y_val = train_reader.read_field("u")[args.ntrain : args.ntrain + args.nval, :: args.sub]
-            x_test = test_reader.read_field("a")[: args.ntest, :: args.sub]
-            y_test = test_reader.read_field("u")[: args.ntest, :: args.sub]
+            train_a = train_reader.read_field("a")
+            train_u = train_reader.read_field("u")
+            test_a = test_reader.read_field("a")
+            test_u = test_reader.read_field("u")
+            raw_nx = int(train_a.shape[-1])
+            x_train = train_a[: args.ntrain, :: args.sub]
+            y_train = train_u[: args.ntrain, :: args.sub]
+            x_val = train_a[args.ntrain : args.ntrain + args.nval, :: args.sub]
+            y_val = train_u[args.ntrain : args.ntrain + args.nval, :: args.sub]
+            x_test = test_a[: args.ntest, :: args.sub]
+            y_test = test_u[: args.ntest, :: args.sub]
             dataset_meta = {
                 "T": _extract_scalar_meta(train_reader, "T"),
                 "dt": _extract_scalar_meta(train_reader, "dt"),
                 "nu": _extract_scalar_meta(train_reader, "nu"),
                 "nx": _extract_scalar_meta(train_reader, "nx"),
             }
-            metadata_validation = _validate_dataset_metadata(args, dataset_meta, nx_after_sub=int(x_train.shape[1]))
+            effective_nx = int(x_train.shape[1])
+            split_meta.update({"dataset_nx": raw_nx, "raw_nx": raw_nx, "effective_nx": effective_nx, "sub": int(args.sub)})
+            metadata_validation = _validate_dataset_metadata(args, dataset_meta, nx_after_sub=raw_nx)
         train_idx = np.arange(args.ntrain)
         val_idx = np.arange(args.ntrain, args.ntrain + args.nval)
         test_idx = np.arange(args.ntest)
@@ -554,6 +567,7 @@ def load_data(args):
 
 
 def build_model_config(args):
+    domain_length = float(getattr(args, "expected_domain_length", None) or 1.0)
     return Model123Config(
         reservoir=args.reservoir,
         Ttilde=args.Ttilde,
@@ -593,7 +607,7 @@ def build_model_config(args):
         burgers_dealias=bool(args.burgers_dealias),
         device=args.device,
         dtype=torch.float32 if args.sim_dtype == "float32" else torch.float64,
-        domain_length=1.0,
+        domain_length=domain_length,
     )
 
 
@@ -965,6 +979,9 @@ def main():
         print("saved model: %s" % save_path)
 
     with open(os.path.join(args.out_dir, "run_config.json"), "w", encoding="utf-8") as f:
+        domain_length = float(getattr(args, "expected_domain_length", None) or 1.0)
+        dataset_nx = split_meta.get("dataset_nx", split_meta.get("raw_nx", int(s) * int(args.sub)))
+        effective_nx = split_meta.get("effective_nx", int(s))
         run_payload = {
             "args": vars(args),
             "git": get_git_info(Path(__file__).resolve().parent),
@@ -977,8 +994,9 @@ def main():
                     "target_nu": args.target_nu,
                     "T": args.T,
                     "dt": args.dt,
-                    "nx": int(s),
-                    "domain_length": 1.0,
+                    "nx": int(dataset_nx),
+                    "effective_nx": int(effective_nx),
+                    "domain_length": domain_length,
                     "solver": args.expected_solver,
                     "dealias": args.expected_dealias,
                     "ic_type": args.expected_ic_type,
@@ -1026,9 +1044,19 @@ def main():
             "ridge_lambda_legacy_input": args.ridge_lambda,
             "ridge_convention": args.ridge_convention,
             "regularize_bias": False,
-            "domain_length": 1.0,
+            "domain_length": domain_length,
+            "dataset_nx": int(dataset_nx),
+            "raw_nx": int(dataset_nx),
+            "effective_nx": int(effective_nx),
+            "grid": {
+                "dataset_nx": int(dataset_nx),
+                "raw_nx": int(dataset_nx),
+                "effective_nx": int(effective_nx),
+                "sub": int(args.sub),
+                "domain_length": domain_length,
+            },
             "nx": int(s),
-            "dx": float(1.0 / s),
+            "dx": float(domain_length / s),
             "num_train_samples": int(args.ntrain),
             "effective_code_lambda_legacy_equivalent": float(args.ntrain * args.ridge_zeta * s),
             "data_file": args.data_file if args.data_mode == "single_split" else args.train_file,
@@ -1053,8 +1081,9 @@ def main():
                 "target_nu": args.target_nu,
                 "T": args.T,
                 "dt": args.dt,
-                "nx": int(s),
-                "domain_length": 1.0,
+                "nx": int(dataset_nx),
+                "effective_nx": int(effective_nx),
+                "domain_length": domain_length,
                 "solver": args.expected_solver,
                 "dealias": args.expected_dealias,
                 "ic_type": args.expected_ic_type,

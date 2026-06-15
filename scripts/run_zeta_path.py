@@ -178,6 +178,7 @@ def ensure_metadata_expectation_defaults(args: argparse.Namespace) -> None:
 def model_config_from_args(args: argparse.Namespace, *, zeta: float = 1e-8) -> Model123Config:
     if args.Ttilde <= 0.0:
         args.Ttilde = args.T
+    domain_length = float(getattr(args, "expected_domain_length", None) or 1.0)
     return Model123Config(
         reservoir=args.reservoir,
         Ttilde=args.Ttilde,
@@ -214,6 +215,7 @@ def model_config_from_args(args: argparse.Namespace, *, zeta: float = 1e-8) -> M
         advection_c=args.advection_c,
         device=args.device,
         dtype=torch_dtype_from_name(args.sim_dtype),
+        domain_length=domain_length,
     )
 
 
@@ -249,6 +251,9 @@ def feature_tensors(args, x_train, x_val, x_test, split_meta) -> tuple[dict[str,
         "heat_nu": args.heat_nu,
         "advection_c": args.advection_c,
         "sim_dtype": args.sim_dtype,
+        "domain_length": float(getattr(args, "expected_domain_length", None) or 1.0),
+        "sub": int(args.sub),
+        "effective_nx": s,
         "elm_seed": args.elm_seed if args.model == "model3" else None,
         "elm_h": args.elm_h if args.model == "model3" else None,
     }
@@ -295,6 +300,8 @@ def feature_tensors(args, x_train, x_val, x_test, split_meta) -> tuple[dict[str,
         "nval": int(x_val.shape[0]),
         "ntest": int(x_test.shape[0]),
         "nx": s,
+        "effective_nx": s,
+        "sub": int(args.sub),
         "surrogate_config": surrogate_config,
         "observation_config": observation_config,
     }

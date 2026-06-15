@@ -5,6 +5,7 @@ import pytest
 from scripts.run_model123_param_sweep import (
     PARAMETERS,
     SweepSpec,
+    build_run_dir,
     build_job_env,
     build_parser,
     build_run_command,
@@ -13,10 +14,13 @@ from scripts.run_model123_param_sweep import (
     clip_for_log,
     dedupe_fieldnames,
     load_run_metrics,
+    main as sweep_main,
     parse_models,
     parse_sweep_assignment,
     require_time_grid_aligned_value,
     save_all_model_param_comparison_plots,
+    selection_metric_label_for_row,
+    expected_run_values,
     validate_args,
 )
 from model123_burgers_1d import pearson_corr_or_none, spearman_corr_or_none
@@ -166,6 +170,159 @@ def test_heat_and_advection_parameters_are_not_duplicated(tmp_path):
     adv_cmd = build_run_command(adv_args, "model2", {}, tmp_path / "adv")
     assert adv_cmd.count("--advection-c") == 1
     assert adv_cmd[adv_cmd.index("--advection-c") + 1] == "1.5"
+
+
+def _prepare_args_for_expected(args):
+    if args.data_seed is None:
+        args.data_seed = args.seed
+    if args.split_seed is None:
+        args.split_seed = args.seed
+    if args.ridge_zeta is None and args.ridge_lambda is None:
+        args.ridge_zeta = 1e-4
+        args.ridge_lambda = 1e-4
+    elif args.ridge_zeta is None:
+        args.ridge_zeta = float(args.ridge_lambda)
+    elif args.ridge_lambda is None:
+        args.ridge_lambda = float(args.ridge_zeta)
+    for name in [
+        "expected_ic_type",
+        "expected_solver",
+        "expected_time_integrator",
+        "expected_burgers_scheme",
+        "expected_dealias",
+        "expected_equation",
+        "expected_domain_length",
+    ]:
+        if not hasattr(args, name):
+            setattr(args, name, None)
+    return args
+
+
+def _write_matching_run_config(run_dir, args, overrides):
+    expected = expected_run_values(args, "model2", overrides)
+    payload_args = dict(expected)
+    payload_args.update(
+        {
+            "data_mode": "single_split",
+            "ridge_lambda": expected["ridge_zeta"],
+            "standardize_features": expected["standardize_features"],
+            "burgers_dealias": expected["burgers_dealias"],
+        }
+    )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "run_config.json").write_text(
+        """
+        {
+          "args": %s,
+          "split": {"ntrain": %d, "nval": %d, "ntest": %d, "data_seed": %d, "split_seed": %d},
+          "train_absL2h": 0.1,
+          "val_absL2h": 0.05,
+          "test_absL2h": 0.2,
+          "train_relL2": 0.3,
+          "test_relL2": 0.4,
+          "alpha": %s,
+          "resolved_obs": "full",
+          "resolved_J": %d,
+          "ridge_zeta": %s,
+          "ridge_convention": "%s",
+          "data_file": "%s",
+          "data_sha256": "%s",
+          "config_name": null,
+          "config_hash": null
+        }
+        """
+        % (
+            __import__("json").dumps(payload_args),
+            expected["ntrain"],
+            expected["nval"],
+            expected["ntest"],
+            expected["data_seed"],
+            expected["split_seed"],
+            expected["alpha"],
+            expected["J"],
+            expected["ridge_zeta"],
+            expected["ridge_convention"],
+            expected["data_file"],
+            expected["data_sha256"],
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_check_existing_does_not_overwrite_normal_summary_files(tmp_path):
+    data_file = tmp_path / "data.pt"
+    data_file.write_bytes(b"not a real dataset; audit only")
+    out_root = tmp_path / "sweep"
+    argv = [
+        "--data-file",
+        str(data_file),
+        "--out-root",
+        str(out_root),
+        "--models",
+        "model2",
+        "--reservoir",
+        "static",
+        "--sweep",
+        "alpha=1.0",
+        "--check-existing",
+    ]
+    args = _prepare_args_for_expected(build_parser().parse_args(argv))
+    run_dir = build_run_dir(out_root / "model2", {"alpha": 1.0}, ["alpha"])
+    _write_matching_run_config(run_dir, args, {"alpha": 1.0})
+
+    model_dir = out_root / "model2"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    summary_csv = model_dir / "summary.csv"
+    summary_json = model_dir / "summary.json"
+    best_csv = model_dir / "best_runs.csv"
+    best_json = model_dir / "best_runs.json"
+    for path in [summary_csv, summary_json, best_csv, best_json]:
+        path.write_text(f"original {path.name}", encoding="utf-8")
+    before = {path: path.read_text(encoding="utf-8") for path in [summary_csv, summary_json, best_csv, best_json]}
+
+    assert sweep_main(argv) == 0
+    after = {path: path.read_text(encoding="utf-8") for path in before}
+    assert after == before
+    assert (model_dir / "existing_audit.csv").exists()
+    assert (model_dir / "existing_audit.json").exists()
+    assert (model_dir / "existing_audit_summary.csv").exists()
+    assert (model_dir / "existing_audit_summary.json").exists()
+
+
+def test_check_existing_config_mismatch_does_not_overwrite_summary(tmp_path):
+    data_file = tmp_path / "data.pt"
+    data_file.write_bytes(b"not a real dataset; audit only")
+    out_root = tmp_path / "sweep"
+    base_argv = [
+        "--data-file",
+        str(data_file),
+        "--out-root",
+        str(out_root),
+        "--models",
+        "model2",
+        "--reservoir",
+        "static",
+        "--sweep",
+        "alpha=1.0",
+        "--ridge-zeta",
+        "1e-4",
+    ]
+    args = _prepare_args_for_expected(build_parser().parse_args([*base_argv, "--check-existing"]))
+    run_dir = build_run_dir(out_root / "model2", {"alpha": 1.0}, ["alpha"])
+    _write_matching_run_config(run_dir, args, {"alpha": 1.0})
+    summary = out_root / "model2" / "summary.csv"
+    summary.parent.mkdir(parents=True, exist_ok=True)
+    summary.write_text("normal summary", encoding="utf-8")
+
+    assert sweep_main([*base_argv, "--ridge-zeta", "1e-5", "--check-existing"]) == 2
+    assert summary.read_text(encoding="utf-8") == "normal summary"
+    audit = (out_root / "model2" / "existing_audit.json").read_text(encoding="utf-8")
+    assert "config_mismatch" in audit
+
+
+def test_selection_metric_label_is_set_for_new_and_reuse_rows():
+    assert selection_metric_label_for_row({"val_absL2h": 0.1, "test_absL2h": 0.2}) == "val_absL2h"
+    assert selection_metric_label_for_row({"val_absL2h": None, "test_absL2h": 0.2}) == "test_absL2h_legacy_fallback"
 
 
 def test_validate_args_rejects_simultaneous_alpha_and_ttilde_sweeps():

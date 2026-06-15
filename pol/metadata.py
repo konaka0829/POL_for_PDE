@@ -219,6 +219,8 @@ def validate_dataset_metadata(
             continue
         ok = _compare_metadata_value(exp, found)
         checks[key] = {"expected": exp, "found": found, "ok": ok, "missing": False}
+        if key == "nx":
+            checks[key]["meaning"] = "dataset/raw spatial resolution before --sub"
     mismatches = [key for key, check in checks.items() if not check["ok"] and not check.get("missing")]
     missing = [key for key, check in checks.items() if check.get("missing")]
     ok = not mismatches and (not missing or not require_complete_metadata)

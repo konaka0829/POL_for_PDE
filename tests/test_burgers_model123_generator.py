@@ -109,3 +109,43 @@ def test_gaussian_rf_zero_mean_matches_matlab_periodic_convention():
     )
     means = u0.mean(dim=-1)
     assert torch.allclose(means, torch.zeros_like(means), atol=1e-10, rtol=1e-10)
+
+
+def test_generator_domain_length_is_saved_in_pt_and_mat_metadata(tmp_path):
+    common = [
+        sys.executable,
+        "scripts/generate_burgers_1d.py",
+        "--total-samples",
+        "3",
+        "--ntrain",
+        "1",
+        "--nval",
+        "1",
+        "--ntest",
+        "1",
+        "--grid-size",
+        "8",
+        "--T",
+        "0.01",
+        "--dt",
+        "0.01",
+        "--fine-dt",
+        "0.01",
+        "--domain-length",
+        "2.0",
+        "--batch-size",
+        "3",
+        "--device",
+        "cpu",
+    ]
+    pt_path = tmp_path / "domain.pt"
+    mat_path = tmp_path / "domain.mat"
+    proc = run_cli([*common, "--format", "pt", "--out-file", str(pt_path)], cwd=REPO_ROOT)
+    assert proc.returncode == 0, proc.stdout + "\n" + proc.stderr
+    proc = run_cli([*common, "--format", "mat", "--out-file", str(mat_path)], cwd=REPO_ROOT)
+    assert proc.returncode == 0, proc.stdout + "\n" + proc.stderr
+
+    pt_payload = torch.load(pt_path, map_location="cpu", weights_only=False)
+    assert pt_payload["metadata"]["domain_length"] == pytest.approx(2.0)
+    mat_payload = scipy.io.loadmat(mat_path)
+    assert float(mat_payload["domain_length"][0, 0]) == pytest.approx(2.0)

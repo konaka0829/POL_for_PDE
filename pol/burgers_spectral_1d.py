@@ -6,10 +6,18 @@ from typing import Iterable, Optional
 import torch
 
 
-def make_wavenumbers(s: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+def make_wavenumbers(
+    s: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    *,
+    domain_length: float = 1.0,
+) -> torch.Tensor:
     if s <= 1:
         raise ValueError("s must be >= 2")
-    dx = 1.0 / float(s)
+    if domain_length <= 0.0:
+        raise ValueError("domain_length must be positive")
+    dx = float(domain_length) / float(s)
     k = 2.0 * torch.pi * torch.fft.rfftfreq(s, d=dx, device=device)
     return k.to(dtype=dtype)
 
@@ -95,6 +103,7 @@ def simulate_burgers_split_step(
     forcing: Optional[torch.Tensor] = None,
     forcing_steps: Optional[tuple[int, int]] = None,
     dealias: bool = False,
+    domain_length: float = 1.0,
 ) -> list[torch.Tensor]:
     if z0.ndim != 2:
         raise ValueError(f"z0 must have shape (B, s), got {tuple(z0.shape)}")
@@ -116,7 +125,7 @@ def simulate_burgers_split_step(
         raise ValueError(f"obs step {obs_sorted[-1]} exceeds total integration steps {t_steps}")
 
     s = z0.shape[-1]
-    k = make_wavenumbers(s, z0.device, z0.dtype)
+    k = make_wavenumbers(s, z0.device, z0.dtype, domain_length=domain_length)
     mask = make_dealias_mask(s, z0.device, z0.dtype) if dealias else None
 
     forcing_hat: Optional[torch.Tensor] = None

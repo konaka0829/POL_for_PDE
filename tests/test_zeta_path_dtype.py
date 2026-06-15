@@ -103,3 +103,50 @@ def test_zeta_path_cache_key_includes_sim_dtype(tmp_path):
     cfg32 = json.loads((tmp_path / "out32" / "run_config.json").read_text(encoding="utf-8"))
     cfg64 = json.loads((tmp_path / "out64" / "run_config.json").read_text(encoding="utf-8"))
     assert cfg32["feature_cache"]["surrogate_hash"] != cfg64["feature_cache"]["surrogate_hash"]
+
+
+def test_zeta_path_subsample_uses_raw_nx_for_validation_and_effective_nx_for_cache(tmp_path):
+    data = tmp_path / "data.pt"
+    _write_split_pt(data)
+    out_dir = tmp_path / "out_sub2"
+    assert (
+        zeta_main(
+            [
+                "--data-file",
+                str(data),
+                "--output-dir",
+                str(out_dir),
+                "--feature-cache-dir",
+                str(tmp_path / "cache"),
+                "--model",
+                "model2",
+                "--reservoir",
+                "static",
+                "--ntrain",
+                "2",
+                "--nval",
+                "1",
+                "--ntest",
+                "1",
+                "--T",
+                "0.1",
+                "--dt",
+                "0.01",
+                "--target-nu",
+                "0.01",
+                "--zeta-grid",
+                "1e-8",
+                "--sub",
+                "2",
+                "--use-feature-cache",
+            ]
+        )
+        == 0
+    )
+    cfg = json.loads((out_dir / "run_config.json").read_text(encoding="utf-8"))
+    assert cfg["metadata_validation"]["checks"]["nx"]["expected"] == 8
+    assert cfg["metadata_validation"]["checks"]["nx"]["found"] == 8
+    assert cfg["split"]["dataset_nx"] == 8
+    assert cfg["split"]["effective_nx"] == 4
+    assert cfg["feature_cache"]["effective_nx"] == 4
+    assert cfg["feature_cache"]["sub"] == 2

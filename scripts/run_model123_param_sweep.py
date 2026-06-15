@@ -1148,7 +1148,7 @@ def run_model_jobs(
                 row.update(metrics)
                 row["status"] = "ok"
                 row["return_code"] = 0
-                row["selection_metric"] = "val_absL2h" if row.get("val_absL2h") is not None else "test_absL2h_legacy_fallback"
+                row["selection_metric"] = selection_metric_label_for_row(row)
                 row["test_absL2h_plot"] = clip_for_log(float(row["test_absL2h"]), eps)
                 row["test_relL2_plot"] = clip_for_log(float(row["test_relL2"]), eps)
                 rows.append(row)
@@ -1234,6 +1234,7 @@ def run_model_jobs(
                 metrics = load_run_metrics(Path(row["run_dir"]))
                 row.update(metrics)
                 row["status"] = "ok"
+                row["selection_metric"] = selection_metric_label_for_row(row)
                 row["test_absL2h_plot"] = clip_for_log(float(row["test_absL2h"]), eps)
                 row["test_relL2_plot"] = clip_for_log(float(row["test_relL2"]), eps)
                 print(
@@ -1411,6 +1412,10 @@ def best_error_row(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def selection_metric_for_rows(rows: list[dict[str, Any]]) -> str:
     return "val_absL2h" if any(row.get("val_absL2h") is not None for row in rows) else "test_absL2h"
+
+
+def selection_metric_label_for_row(row: dict[str, Any]) -> str:
+    return "val_absL2h" if row.get("val_absL2h") is not None else "test_absL2h_legacy_fallback"
 
 
 def selection_score(row: dict[str, Any], metric: str | None = None) -> float:
@@ -1617,6 +1622,7 @@ def save_best_runs(
         "test_absL2h",
         "val_absL2h",
         "train_absL2h",
+        "selection_metric",
         "test_relL2",
         "train_relL2",
         *sweep_names,
@@ -1654,6 +1660,19 @@ def write_audit_outputs(model_dir: Path, rows: list[dict[str, Any]]) -> tuple[Pa
     json_path = model_dir / "existing_audit.json"
     write_csv(csv_path, rows, fieldnames)
     json_path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+    return csv_path, json_path
+
+
+def write_audit_summary_outputs(model_dir: Path, rows: list[dict[str, Any]]) -> tuple[Path, Path]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        status = row.get("status", "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    summary_rows = [{"status": status, "count": count} for status, count in sorted(counts.items())]
+    csv_path = model_dir / "existing_audit_summary.csv"
+    json_path = model_dir / "existing_audit_summary.json"
+    write_csv(csv_path, summary_rows, ["status", "count"])
+    json_path.write_text(json.dumps({"counts": counts, "rows": summary_rows}, indent=2), encoding="utf-8")
     return csv_path, json_path
 
 
@@ -1782,8 +1801,12 @@ def main(argv: list[str] | None = None) -> int:
         audit_csv = audit_json = None
         if args.skip_existing or args.check_existing:
             audit_csv, audit_json = write_audit_outputs(model_dir, rows)
+            if args.check_existing:
+                write_audit_summary_outputs(model_dir, rows)
             if args.reuse_report == "summary":
                 print_reuse_summary(model, rows, audit_csv, audit_json)
+        if args.check_existing:
+            continue
 
         fieldnames = [
             "model",
@@ -1846,6 +1869,10 @@ def main(argv: list[str] | None = None) -> int:
             best_k=args.best_k,
         )
 
+    if args.check_existing:
+        bad_status = {"missing", "config_mismatch", "missing_defect", "missing_metric", "invalid_json", "failed_run"}
+        return 2 if any(row.get("status") in bad_status for rows in model_rows.values() for row in rows) else 0
+
     if len(sweep_specs) == 1:
         ok_by_model = {
             model: [row for row in rows if row["status"] == "ok"]
@@ -1904,9 +1931,6 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.dry_run:
         return 0
-    if args.check_existing:
-        bad_status = {"missing", "config_mismatch", "missing_defect", "missing_metric", "invalid_json", "failed_run"}
-        return 2 if any(row.get("status") in bad_status for rows in model_rows.values() for row in rows) else 0
     return 1 if had_failure else 0
 
 

@@ -140,6 +140,7 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         data_seed=args.data_seed,
         nx=args.nx,
+        domain_length=args.domain_length,
         target_nu=args.nu,
         T=args.T,
         dt=args.dt,
