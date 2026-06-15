@@ -28,6 +28,7 @@ def base_args(path, **kwargs):
         target_nu=0.05,
         data_dtype="float32",
         allow_metadata_mismatch=False,
+        require_complete_metadata=False,
         expected_ic_type=None,
         expected_solver=None,
         expected_time_integrator=None,
@@ -77,6 +78,21 @@ def test_nx_mismatch_errors_for_mat(tmp_path):
         load_data(args)
 
 
+def test_mat_string_metadata_loads_without_float_cast(tmp_path):
+    data = tmp_path / "data.mat"
+    write_mat(data, nx=8, nu=0.05, ic_type="grf")
+    args = base_args(
+        data,
+        expected_ic_type="grf",
+        expected_solver=None,
+        expected_domain_length=None,
+    )
+    loaded = load_data(args)
+    assert loaded[0].shape == (2, 8)
+    validation = loaded[-1]
+    assert validation["checks"]["ic_type"]["found"] == "grf"
+
+
 def test_target_nu_mismatch_errors_for_pt(tmp_path):
     data = tmp_path / "data.pt"
     write_pt(data, target_nu=0.04)
@@ -107,3 +123,14 @@ def test_missing_legacy_metadata_warns_but_does_not_fail():
     result = validate_dataset_metadata(raw_metadata={}, expected={"T": 0.1}, strict=True)
     assert result["ok"] is True
     assert result["warnings"]
+    assert result["has_missing"] is True
+
+
+def test_require_complete_metadata_errors_on_missing():
+    with pytest.raises(ValueError, match="incomplete"):
+        validate_dataset_metadata(
+            raw_metadata={},
+            expected={"T": 0.1},
+            strict=True,
+            require_complete_metadata=True,
+        )

@@ -131,6 +131,7 @@ def parse_args():
 
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--allow-metadata-mismatch", action="store_true")
+    parser.add_argument("--require-complete-metadata", action="store_true")
     parser.add_argument("--compute-time-scaled-defect", action="store_true")
     parser.add_argument(
         "--defect-target-nu",
@@ -239,20 +240,7 @@ def ridge_dtype_from_name(name):
 def _extract_scalar_meta(reader, field):
     if field not in reader.data:
         return None
-    value = reader.read_field(field)
-    if isinstance(value, torch.Tensor):
-        if value.numel() == 0:
-            return None
-        return float(value.reshape(-1)[0].item())
-    arr = np.asarray(value)
-    if arr.size == 0:
-        return None
-    value = arr.reshape(-1)[0]
-    if arr.dtype.kind in {"U", "S", "O"}:
-        if isinstance(value, bytes):
-            return value.decode("utf-8")
-        return str(value)
-    return float(value)
+    return reader.read_scalar_meta(field)
 
 
 def _validate_shapes(
@@ -308,8 +296,10 @@ def _meta_nu_from_path(path):
     if not path:
         return None
     try:
-        with MatReader(path) as reader:
-            return _extract_scalar_meta(reader, "nu")
+        meta = _load_dataset_file(path).get("metadata", {})
+        normalized = normalize_dataset_metadata(meta)
+        value = normalized.get("target_nu")
+        return float(value) if value is not None else None
     except Exception:
         return None
 
@@ -385,6 +375,7 @@ def _validate_dataset_metadata(args, metadata, nx_after_sub: int | None = None):
             raw_metadata=metadata,
             expected=_expected_metadata(args, nx_after_sub=nx_after_sub),
             strict=strict,
+            require_complete_metadata=bool(getattr(args, "require_complete_metadata", False)),
         )
     except ValueError:
         raise
@@ -401,29 +392,37 @@ def _cast_data_tensor(tensor: torch.Tensor, data_dtype: str) -> torch.Tensor:
     return tensor.to(dtype=torch.float32 if data_dtype == "float32" else torch.float64)
 
 
-def resolve_defect_target_nu(args):
-    if args.defect_target_nu is not None:
-        return float(args.defect_target_nu)
-    if args.data_mode == "single_split":
-        value = _meta_nu_from_path(args.data_file)
-        if value is not None:
-            return float(value)
+def _dataset_target_nu_from_args(args):
+    paths = []
+    if getattr(args, "data_mode", "single_split") == "single_split":
+        paths.append(getattr(args, "data_file", None))
     else:
-        train_nu = _meta_nu_from_path(args.train_file)
-        test_nu = _meta_nu_from_path(args.test_file)
-        if train_nu is not None and test_nu is not None:
-            if not np.isclose(train_nu, test_nu):
-                raise ValueError("Train/test nu metadata mismatch: %s vs %s" % (train_nu, test_nu))
-            return float(train_nu)
-        if train_nu is not None:
-            return float(train_nu)
-        if test_nu is not None:
-            return float(test_nu)
-    warnings.warn(
-        "Dataset does not provide nu metadata for defect diagnostics; using fallback target_nu=0.05.",
-        RuntimeWarning,
-    )
-    return 0.05
+        paths.extend([getattr(args, "train_file", None), getattr(args, "test_file", None)])
+    values = []
+    for path in paths:
+        value = _meta_nu_from_path(path)
+        if value is not None:
+            values.append(float(value))
+    if not values:
+        return None
+    first = values[0]
+    for value in values[1:]:
+        if not np.isclose(first, value):
+            raise ValueError("Dataset target_nu metadata mismatch across files: %s vs %s" % (first, value))
+    return first
+
+
+def resolve_defect_target_nu(args):
+    if getattr(args, "defect_target_nu", None) is not None:
+        return {"target_nu": float(args.defect_target_nu), "target_nu_source": "defect_target_nu", "target_nu_warning": None}
+    if getattr(args, "target_nu", None) is not None:
+        return {"target_nu": float(args.target_nu), "target_nu_source": "args.target_nu", "target_nu_warning": None}
+    dataset_nu = _dataset_target_nu_from_args(args)
+    if dataset_nu is not None:
+        return {"target_nu": float(dataset_nu), "target_nu_source": "dataset_metadata", "target_nu_warning": None}
+    warning = "Dataset/config did not provide target_nu for defect diagnostics; using fallback target_nu=0.05."
+    warnings.warn(warning, RuntimeWarning)
+    return {"target_nu": 0.05, "target_nu_source": "fallback", "target_nu_warning": warning}
 
 
 def load_data(args):
@@ -726,7 +725,8 @@ def _plot_error_vs_defect(rows, out_path_no_ext):
 
 
 def compute_and_save_defect_outputs(args, s, x_test_all, y_test_all, per_sample_abs, per_sample_rel):
-    target_nu = resolve_defect_target_nu(args)
+    target_nu_resolution = resolve_defect_target_nu(args)
+    target_nu = float(target_nu_resolution["target_nu"])
     defect_cfg = ErrorDecompositionConfig(
         num_samples=args.ntest,
         nx=s,
@@ -790,6 +790,8 @@ def compute_and_save_defect_outputs(args, s, x_test_all, y_test_all, per_sample_
     metrics = {
         **result["summary"],
         "target_nu": float(target_nu),
+        "target_nu_source": target_nu_resolution["target_nu_source"],
+        "target_nu_warning": target_nu_resolution.get("target_nu_warning"),
         "model": args.model,
         "corr_error_delta_scale_pearson": pearson_corr_or_none(error_values, delta_values),
         "corr_error_delta_scale_spearman": spearman_corr_or_none(error_values, delta_values),
@@ -1071,6 +1073,9 @@ def main():
             run_payload.update(
                 {
                     "time_scaled_defect_metric": defect_metrics["defect_metric"],
+                    "defect_target_nu": defect_metrics["target_nu"],
+                    "defect_target_nu_source": defect_metrics["target_nu_source"],
+                    "defect_target_nu_warning": defect_metrics.get("target_nu_warning"),
                     "delta_scale_rms_abs_l2h": defect_metrics["delta_scale_rms_abs_l2h"],
                     "delta_scale_mean_abs_l2h": defect_metrics["delta_scale_mean_abs_l2h"],
                     "delta_scale_std_abs_l2h": defect_metrics["delta_scale_std_abs_l2h"],

@@ -80,7 +80,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--nval", type=int, default=0)
     parser.add_argument("--ntest", type=int, default=200)
     parser.add_argument("--sub", type=int, default=1)
-    parser.add_argument("--shuffle", action="store_true")
+    parser.add_argument("--shuffle", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--data-seed", type=int, default=None)
     parser.add_argument("--split-seed", type=int, default=None)
@@ -88,6 +88,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--sim-dtype", choices=("float32", "float64"), default="float32")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--T", type=float, default=1.0)
+    parser.add_argument("--target-nu", type=float, default=None)
     parser.add_argument("--dt", type=float, default=1e-2)
     parser.add_argument("--feature-times", type=str, default="")
     parser.add_argument("--K", type=int, default=1)
@@ -127,6 +128,8 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--elm-weight-scale", type=float, default=0.0)
     parser.add_argument("--elm-bias-scale", type=float, default=1.0)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    parser.add_argument("--allow-metadata-mismatch", action="store_true")
+    parser.add_argument("--require-complete-metadata", action="store_true")
     parser.add_argument("--defect-target-nu", type=float, default=None)
     parser.add_argument("--defect-time-quadrature", choices=("trapezoid", "left"), default="trapezoid")
     parser.add_argument("--defect-beta-mode", choices=("zero", "fixed"), default="zero")
@@ -387,6 +390,17 @@ def main(argv: list[str] | None = None) -> int:
     _apply_config_defaults(parser, args)
     if not hasattr(args, "_config_applied"):
         args._config_applied = {}
+    for name in [
+        "expected_ic_type",
+        "expected_solver",
+        "expected_time_integrator",
+        "expected_burgers_scheme",
+        "expected_dealias",
+        "expected_equation",
+        "expected_domain_length",
+    ]:
+        if not hasattr(args, name):
+            setattr(args, name, None)
     if args.data_seed is None:
         args.data_seed = args.seed
     if args.split_seed is None:

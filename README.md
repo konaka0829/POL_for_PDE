@@ -91,10 +91,12 @@ The runner supports both `.mat` datasets with `a/u` arrays and `.pt`
 datasets containing either raw `a/u` tensors or pre-split
 `u0_train/y_train`, `u0_val/y_val`, and `u0_test/y_test`.
 Dataset metadata is validated by default against the resolved CLI/config
-settings. Mismatches in `T`, `dt`, `nx`, `target_nu`, `ic_type`, solver
-metadata, or dealias metadata raise an error. Use
-`--allow-metadata-mismatch` only for intentional legacy runs; the warning and
-validation result are written to `run_config.json`.
+settings. Mismatches in `T`, `dt`, `nx`, `target_nu`, `ic_type`,
+`domain_length`, solver/time-integrator metadata, or dealias metadata raise an
+error. Missing metadata is a warning by default for legacy compatibility; add
+`--require-complete-metadata` for B1/paper runs to make missing fields an
+error. Use `--allow-metadata-mismatch` only for intentional legacy runs; the
+warning and validation result are written to `run_config.json`.
 
 Generate a MATLAB file compatible with `model123_burgers_1d.py`:
 
@@ -102,9 +104,11 @@ Generate a MATLAB file compatible with `model123_burgers_1d.py`:
 python scripts/generate_burgers_1d.py --out-file data/burgers_model123.mat --num-samples 1200 --grid-size 256 --nu 0.05 --T 1.0 --dt 0.001
 ```
 
-The `.mat` output includes `a`, `u`, `T`, `dt`, `nu`, `nx`, and
-`num_samples`. For `.pt` output, the saved bundle contains exactly the
-requested train/validation/test split.
+The `.mat` output includes `a`, `u`, `T`, `dt`, `nu`/`target_nu`, `nx`,
+string metadata such as `ic_type` and `solver`, and `num_samples`. Numeric PDE
+fields and metadata are read through separate paths, so `.mat` string metadata
+is not cast to float. For `.pt` output, the saved bundle contains exactly the
+requested train/validation/test split plus normalized metadata when available.
 
 ## Running Model123
 
@@ -121,6 +125,9 @@ hashes, git/runtime metadata, command line, and dtype information. Use
 `--data-dtype {preserve,float32,float64}`, `--sim-dtype {float32,float64}`,
 and `--ridge-dtype {float32,float64}` to control data tensors, simulation
 features, and ridge solves separately.
+`--sim-dtype float64` is used by the surrogate feature generation in the main
+runner, zeta-path, and learning-curve scripts; the feature cache key includes
+the simulation dtype, so float32 and float64 cached features do not collide.
 The Model123 runner and feature extraction require `Ttilde`, `Tr`, and any
 explicit `--feature-times` to lie on the `dt` grid. Non-grid values such as
 `--Ttilde 0.055 --dt 0.01` raise `ValueError` instead of silently rounding.
@@ -156,6 +163,9 @@ The unified sweep supports `alpha`, `Ttilde`, `res_burgers_nu`,
 `ks_kappa`, `heat_nu`, `advection_c`, `dt`, `K`, and `J`. Reservoir choices
 include `burgers`, `reaction_diffusion`, `ks`, `static`, `heat`, and
 `advection`; Burgers reservoirs can use `--burgers-scheme etdrk4`.
+If `--Ttilde` is not specified, sweeps resolve `Ttilde = T`. For `alpha`
+sweeps, each child run uses `Ttilde = alpha*T`; the old implicit `Ttilde=1.0`
+default is no longer used.
 
 When validation data is available, hyperparameter and sweep-setting selection
 uses `val_absL2h`. `test_absL2h` is retained for final evaluation after
@@ -215,6 +225,11 @@ python scripts/run_model123_alpha_param_defect_study.py \
 
 The correlation heatmaps use `corr_i(model_error_abs_l2h_i, delta_scale_pathwise_abs_l2h_i)` across test samples at each grid cell. They are correlations with the integrated generator defect, not instantaneous field values.
 For theory-consistent Burgers coefficient checks, the examples set `--burgers-dealias 0`; using `--burgers-dealias 1` is valid for dealiased numerical diagnostics, but the analytic defect magnitude need not be exactly zero even when coefficients match.
+Defect diagnostics resolve target viscosity in this order:
+`--defect-target-nu`, resolved `--target-nu`/config value, dataset metadata
+`target_nu` or `nu`, then a warning fallback of `0.05`. Both
+`time_scaled_defect_metrics.json` and `run_config.json` record
+`target_nu_source`.
 
 Both `run_model123_param_sweep.py` and
 `run_model123_alpha_param_defect_study.py` support strict existing-result
@@ -247,6 +262,9 @@ python scripts/run_zeta_path.py \
 
 The best zeta is selected by `val_absL2h`; cache metadata includes dataset,
 split, surrogate, observation, feature shape, and feature hash information.
+On cache hits the script reads `metadata.json` back into `run_config.json`,
+including feature paths and dtype. zeta-path, learning-curve, and headroom use
+the same dataset loading and metadata validation policy as the main runner.
 `scripts/run_learning_curve.py` reuses the same zeta-path machinery while
 fixing validation/test splits and varying only the training subset size.
 

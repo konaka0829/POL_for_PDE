@@ -50,7 +50,8 @@ def add_split_args(
     parser.add_argument("--seed", type=int, default=default_seed, help="Random seed.")
     parser.add_argument(
         "--shuffle",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Shuffle samples before splitting in single_split mode.",
     )
     return parser
@@ -65,4 +66,3 @@ def validate_data_mode_args(args: argparse.Namespace, parser: argparse.ArgumentP
     else:
         if not args.train_file or not args.test_file:
             parser.error("--train-file and --test-file are required when --data-mode=separate_files")
-

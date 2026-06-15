@@ -6,6 +6,8 @@ import numpy as np
 import scipy.io
 import torch
 
+from pol.metadata import normalize_meta_value
+
 try:
     import h5py
 except ImportError:  # pragma: no cover
@@ -53,13 +55,32 @@ class MatReader:
             x = x[()]
             x = np.transpose(x, axes=range(len(x.shape) - 1, -1, -1))
         if self.to_float:
-            x = x.astype(np.float32)
+            try:
+                x = x.astype(np.float32)
+            except (TypeError, ValueError) as exc:
+                raise TypeError(
+                    f"Field {field!r} is not numeric; use read_meta/read_scalar_meta for MATLAB metadata fields."
+                ) from exc
         if self.to_torch:
             tensor = torch.from_numpy(np.asarray(x))
             if self.to_cuda:
                 tensor = tensor.cuda()
             return tensor
         return x
+
+    def read_raw(self, field: str):
+        if self.data is None:
+            raise RuntimeError("No file loaded")
+        value = self.data[field]
+        if not self.old_mat:
+            value = value[()]
+        return value
+
+    def read_meta(self, field: str):
+        return self.read_raw(field)
+
+    def read_scalar_meta(self, field: str):
+        return normalize_meta_value(self.read_meta(field))
 
     def set_cuda(self, to_cuda: bool) -> None:
         self.to_cuda = to_cuda

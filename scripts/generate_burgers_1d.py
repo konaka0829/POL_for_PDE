@@ -28,6 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--nval", type=int, default=0)
     parser.add_argument("--ntest", type=int, default=0)
     parser.add_argument("--grid-size", "--nx", dest="nx", type=int, default=256)
+    parser.add_argument("--domain-length", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--data-seed", type=int, default=None)
     parser.add_argument("--nu", type=float, default=0.05)
@@ -67,6 +68,7 @@ def _apply_config_defaults(parser: argparse.ArgumentParser, args: argparse.Names
     target = cfg.get("target", {})
     data = cfg.get("data", {})
     _set_if_default(parser, args, "nx", domain.get("nx"))
+    _set_if_default(parser, args, "domain_length", domain.get("length"))
     _set_if_default(parser, args, "nu", target.get("nu"))
     _set_if_default(parser, args, "T", target.get("T"))
     _set_if_default(parser, args, "dt", target.get("dt"))
@@ -178,9 +180,15 @@ def main(argv: list[str] | None = None) -> int:
                 "T": float(args.T),
                 "dt": float(args.dt),
                 "nu": float(args.nu),
+                "target_nu": float(args.nu),
                 "nx": int(args.nx),
+                "domain_length": float(args.domain_length),
                 "num_samples": int(a.shape[0]),
+                "equation": "burgers",
+                "target_equation": "burgers",
                 "solver": args.solver,
+                "time_integrator": args.solver,
+                "burgers_scheme": args.solver,
                 "dealias": bool(args.dealias),
                 "ic_type": args.ic_type,
                 "grf_gamma": float(args.grf_gamma),

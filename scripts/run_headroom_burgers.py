@@ -16,7 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 from model123_burgers_1d import load_data
 from pol.metadata import file_sha256, get_command_line, get_git_info, get_runtime_info, normalize_dataset_metadata, to_jsonable
 from pol.model123_1d.readouts import FourierDiagonalReadout, evaluate_readout, target_variance_l2h
-from scripts.run_zeta_path import apply_config_defaults
+from scripts.run_zeta_path import apply_config_defaults, ensure_metadata_expectation_defaults
 
 
 def _zeta_grid(raw: str) -> list[float]:
@@ -35,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--nval", type=int, default=200)
     parser.add_argument("--ntest", type=int, default=200)
     parser.add_argument("--train-split", type=float, default=0.75)
-    parser.add_argument("--shuffle", action="store_true", default=True)
+    parser.add_argument("--shuffle", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--data-seed", type=int, default=None)
     parser.add_argument("--split-seed", type=int, default=None)
@@ -50,6 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ridge-dtype", choices=("float32", "float64"), default="float64")
     parser.add_argument("--zeta-grid", default="1e-12,1e-10,1e-8,1e-6,1e-4,1e-2,1e0")
     parser.add_argument("--allow-metadata-mismatch", action="store_true")
+    parser.add_argument("--require-complete-metadata", action="store_true")
     return parser
 
 
@@ -59,6 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     apply_config_defaults(parser, args)
     if not hasattr(args, "_config_applied"):
         args._config_applied = {}
+    ensure_metadata_expectation_defaults(args)
     args.data_seed = args.seed if args.data_seed is None else args.data_seed
     args.split_seed = args.seed if args.split_seed is None else args.split_seed
     if args.Ttilde <= 0.0:

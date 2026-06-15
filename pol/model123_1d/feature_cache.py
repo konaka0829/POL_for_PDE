@@ -48,12 +48,20 @@ def save_feature_cache(path: str | Path, *, tensors: dict[str, torch.Tensor], me
     (root / "metadata.json").write_text(json.dumps(to_jsonable(metadata), indent=2), encoding="utf-8")
 
 
-def load_feature_cache(path: str | Path, *, expected_metadata: dict[str, Any] | None = None) -> dict[str, torch.Tensor]:
+def load_feature_cache(
+    path: str | Path,
+    *,
+    expected_metadata: dict[str, Any] | None = None,
+    return_metadata: bool = False,
+):
     root = Path(path)
     meta_path = root / "metadata.json"
     if not meta_path.exists():
         raise FileNotFoundError(f"feature cache metadata not found: {meta_path}")
-    metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    try:
+        metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid feature cache metadata JSON: {meta_path}") from exc
     if expected_metadata:
         for key, expected in expected_metadata.items():
             if metadata.get(key) != expected:
@@ -63,4 +71,13 @@ def load_feature_cache(path: str | Path, *, expected_metadata: dict[str, Any] | 
         tensor_path = root / f"{split}_features.pt"
         if tensor_path.exists():
             tensors[split] = torch.load(tensor_path, map_location="cpu")
+    if return_metadata:
+        metadata = {
+            **metadata,
+            "cache_metadata_path": str(meta_path),
+            "train_feature_path": str(root / "train_features.pt"),
+            "val_feature_path": str(root / "val_features.pt"),
+            "test_feature_path": str(root / "test_features.pt"),
+        }
+        return tensors, metadata
     return tensors

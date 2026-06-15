@@ -165,8 +165,16 @@ def build_dataset(cfg: DatasetConfig, *, device: torch.device | None = None) -> 
 def save_dataset_bundle(bundle: DatasetBundle, out_file: str | Path) -> None:
     path = Path(out_file)
     path.parent.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        **asdict(bundle.config),
+        "nu": bundle.config.target_nu,
+        "equation": "burgers",
+        "target_equation": "burgers",
+        "time_integrator": bundle.config.solver,
+        "burgers_scheme": bundle.config.solver,
+    }
     payload = {
-        "config": asdict(bundle.config),
+        "config": metadata,
         "coeffs_a": bundle.coeffs.a,
         "coeffs_b": bundle.coeffs.b,
         "u0_train": bundle.u0_train,
@@ -175,6 +183,6 @@ def save_dataset_bundle(bundle: DatasetBundle, out_file: str | Path) -> None:
         "y_val": bundle.y_val,
         "u0_test": bundle.u0_test,
         "y_test": bundle.y_test,
-        "metadata": asdict(bundle.config),
+        "metadata": metadata,
     }
     torch.save(payload, path)

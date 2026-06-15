@@ -123,17 +123,27 @@ _ALIASES = {
 }
 
 
-def _metadata_scalar(value: Any) -> Any:
+def normalize_meta_value(value: Any) -> Any:
     if torch is not None and isinstance(value, torch.Tensor):
         if value.numel() == 0:
             return None
-        value = value.detach().cpu().reshape(-1)[0].item()
+        value = value.detach().cpu().numpy()
     if isinstance(value, np.ndarray):
         if value.size == 0:
             return None
         if value.dtype.kind in {"U", "S", "O"}:
-            value = value.reshape(-1)[0]
+            flat = [normalize_meta_value(item) for item in value.reshape(-1)]
+            flat = [item for item in flat if item is not None]
+            if not flat:
+                return None
+            if all(isinstance(item, str) and len(item) == 1 for item in flat):
+                return "".join(flat)
+            if len(flat) == 1:
+                return flat[0]
+            return flat
         else:
+            if value.size > 1:
+                return [normalize_meta_value(item) for item in value.reshape(-1)]
             value = value.reshape(-1)[0].item()
     if isinstance(value, bytes):
         return value.decode("utf-8")
@@ -141,8 +151,21 @@ def _metadata_scalar(value: Any) -> Any:
         return value.astype(str).item()
     if isinstance(value, str):
         return value
+    if isinstance(value, (list, tuple)):
+        flat = [normalize_meta_value(item) for item in value]
+        flat = [item for item in flat if item is not None]
+        if len(flat) == 1:
+            return flat[0]
+        return flat
     if isinstance(value, np.generic):
         return value.item()
+    return value
+
+
+def _metadata_scalar(value: Any) -> Any:
+    value = normalize_meta_value(value)
+    if isinstance(value, list):
+        return value[0] if value else None
     return value
 
 
@@ -181,6 +204,7 @@ def validate_dataset_metadata(
     raw_metadata: dict[str, Any] | None,
     expected: dict[str, Any],
     strict: bool = True,
+    require_complete_metadata: bool = False,
 ) -> dict[str, Any]:
     normalized = normalize_dataset_metadata(raw_metadata)
     checks: dict[str, dict[str, Any]] = {}
@@ -197,7 +221,7 @@ def validate_dataset_metadata(
         checks[key] = {"expected": exp, "found": found, "ok": ok, "missing": False}
     mismatches = [key for key, check in checks.items() if not check["ok"] and not check.get("missing")]
     missing = [key for key, check in checks.items() if check.get("missing")]
-    ok = not mismatches
+    ok = not mismatches and (not missing or not require_complete_metadata)
     message_parts = []
     if mismatches:
         message_parts.extend(
@@ -206,7 +230,13 @@ def validate_dataset_metadata(
         )
     result = {
         "strict": bool(strict),
+        "strict_mismatch": bool(strict),
+        "require_complete_metadata": bool(require_complete_metadata),
         "ok": bool(ok),
+        "has_missing": bool(missing),
+        "has_mismatch": bool(mismatches),
+        "missing": missing,
+        "mismatches": mismatches,
         "checks": to_jsonable(checks),
         "warnings": warnings,
         "normalized_metadata": to_jsonable(normalized),
@@ -214,4 +244,9 @@ def validate_dataset_metadata(
     }
     if strict and mismatches:
         raise ValueError("Dataset metadata mismatch: " + "; ".join(message_parts))
+    if require_complete_metadata and missing:
+        raise ValueError(
+            "Dataset metadata incomplete: "
+            + "; ".join(f"{key}: expected {checks[key]['expected']!r}, found missing" for key in missing)
+        )
     return result

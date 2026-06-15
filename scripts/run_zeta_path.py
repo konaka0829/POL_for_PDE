@@ -60,6 +60,7 @@ def apply_config_defaults(parser: argparse.ArgumentParser, args: argparse.Namesp
         cfg = json.load(f)
     target = cfg.get("target", {})
     data = cfg.get("data", {})
+    domain = cfg.get("domain", {})
     readout = cfg.get("readout", {})
     _set_if_default(parser, args, "T", target.get("T"))
     _set_if_default(parser, args, "target_nu", target.get("nu", target.get("target_nu")))
@@ -76,6 +77,14 @@ def apply_config_defaults(parser: argparse.ArgumentParser, args: argparse.Namesp
     if args.zeta_grid == parser.get_default("zeta_grid") and readout.get("zeta_grid"):
         args.zeta_grid = ",".join(str(v) for v in readout["zeta_grid"])
         args._config_applied["zeta_grid"] = readout["zeta_grid"]
+    args.expected_ic_type = data.get("ic_type")
+    args.expected_solver = target.get("solver")
+    args.expected_time_integrator = target.get("time_integrator")
+    args.expected_burgers_scheme = target.get("burgers_scheme", target.get("time_integrator"))
+    args.expected_dealias = target.get("dealias")
+    args.expected_equation = target.get("equation", "burgers")
+    if domain.get("length") is not None:
+        args.expected_domain_length = domain.get("length")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -96,7 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--nval", type=int, default=200)
     parser.add_argument("--ntest", type=int, default=200)
     parser.add_argument("--train-split", type=float, default=0.75)
-    parser.add_argument("--shuffle", action="store_true", default=True)
+    parser.add_argument("--shuffle", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--data-seed", type=int, default=None)
     parser.add_argument("--split-seed", type=int, default=None)
@@ -140,7 +149,30 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--advection-c", type=float, default=1.0)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="cpu")
     parser.add_argument("--allow-metadata-mismatch", action="store_true")
+    parser.add_argument("--require-complete-metadata", action="store_true")
     return parser
+
+
+def torch_dtype_from_name(name: str) -> torch.dtype:
+    if name == "float32":
+        return torch.float32
+    if name == "float64":
+        return torch.float64
+    raise ValueError(f"unsupported torch dtype name: {name}")
+
+
+def ensure_metadata_expectation_defaults(args: argparse.Namespace) -> None:
+    for name in [
+        "expected_ic_type",
+        "expected_solver",
+        "expected_time_integrator",
+        "expected_burgers_scheme",
+        "expected_dealias",
+        "expected_equation",
+        "expected_domain_length",
+    ]:
+        if not hasattr(args, name):
+            setattr(args, name, None)
 
 
 def model_config_from_args(args: argparse.Namespace, *, zeta: float = 1e-8) -> Model123Config:
@@ -181,7 +213,7 @@ def model_config_from_args(args: argparse.Namespace, *, zeta: float = 1e-8) -> M
         heat_nu=args.heat_nu,
         advection_c=args.advection_c,
         device=args.device,
-        dtype=torch.float32,
+        dtype=torch_dtype_from_name(args.sim_dtype),
     )
 
 
@@ -216,6 +248,7 @@ def feature_tensors(args, x_train, x_val, x_test, split_meta) -> tuple[dict[str,
         "ks_kappa": args.ks_kappa,
         "heat_nu": args.heat_nu,
         "advection_c": args.advection_c,
+        "sim_dtype": args.sim_dtype,
         "elm_seed": args.elm_seed if args.model == "model3" else None,
         "elm_h": args.elm_h if args.model == "model3" else None,
     }
@@ -236,9 +269,9 @@ def feature_tensors(args, x_train, x_val, x_test, split_meta) -> tuple[dict[str,
     expected_meta = {"dataset_hash": dataset_hash, "split_hash": split_hash, **key}
     if args.use_feature_cache and not args.refresh_feature_cache:
         try:
-            tensors = load_feature_cache(cache_dir, expected_metadata=expected_meta)
+            tensors, cache_metadata = load_feature_cache(cache_dir, expected_metadata=expected_meta, return_metadata=True)
             if {"train", "val", "test"}.issubset(tensors):
-                return tensors, {**expected_meta, "cache_hit": True, "cache_dir": str(cache_dir)}
+                return tensors, {**cache_metadata, **expected_meta, "cache_hit": True, "cache_dir": str(cache_dir)}
         except FileNotFoundError:
             pass
 
@@ -251,6 +284,10 @@ def feature_tensors(args, x_train, x_val, x_test, split_meta) -> tuple[dict[str,
         **expected_meta,
         "cache_hit": False,
         "cache_dir": str(cache_dir),
+        "cache_metadata_path": str(cache_dir / "metadata.json"),
+        "train_feature_path": str(cache_dir / "train_features.pt"),
+        "val_feature_path": str(cache_dir / "val_features.pt"),
+        "test_feature_path": str(cache_dir / "test_features.pt"),
         "feature_shape": {name: list(tensor.shape) for name, tensor in tensors.items()},
         "feature_hash": stable_hash({name: {"shape": list(tensor.shape), "sum": float(tensor.double().sum().item())} for name, tensor in tensors.items()}),
         "dtype": str(tensors["train"].dtype).replace("torch.", ""),
@@ -393,6 +430,8 @@ def write_outputs(args: argparse.Namespace, rows: list[dict[str, Any]], summary:
             "data_dtype": args.data_dtype,
             "sim_dtype": args.sim_dtype,
             "ridge_dtype": args.ridge_dtype,
+            "feature_tensor_dtype": summary.get("feature_cache", {}).get("dtype"),
+            "feature_cache_metadata_dtype": summary.get("feature_cache", {}).get("dtype"),
         },
         "metrics": summary.get("best_by_val"),
     }
@@ -420,6 +459,7 @@ def main(argv: list[str] | None = None) -> int:
     apply_config_defaults(parser, args)
     if not hasattr(args, "_config_applied"):
         args._config_applied = {}
+    ensure_metadata_expectation_defaults(args)
     rows, summary = run_zeta_path(args)
     write_outputs(args, rows, summary)
     return 0

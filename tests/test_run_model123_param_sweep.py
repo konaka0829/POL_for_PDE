@@ -84,6 +84,7 @@ def test_parser_defaults_match_lightweight_model123_dataset():
     assert args.data_file == "data/burgers_model123.mat"
     assert args.dt == 1e-2
     assert args.burgers_fine_dt == 1e-4
+    assert args.Ttilde == 0.0
 
 
 def test_validate_args_rejects_nonpositive_max_workers_before_missing_data_file():
@@ -137,6 +138,34 @@ def test_build_run_command_alpha_override_sets_ttilde(tmp_path):
     idx = cmd.index("--Ttilde")
     assert cmd[idx + 1] == "1.0"
     assert "--alpha" not in cmd
+
+
+def test_build_run_command_unspecified_ttilde_defaults_to_T(tmp_path):
+    args = build_parser().parse_args(["--sweep", "alpha=1.0", "--T", "0.1", "--dt", "0.01"])
+    cmd = build_run_command(args, "model1", {}, tmp_path / "run")
+    idx = cmd.index("--Ttilde")
+    assert cmd[idx + 1] == "0.1"
+
+
+def test_build_run_command_alpha_sweep_sets_ttilde_from_T(tmp_path):
+    args = build_parser().parse_args(["--sweep", "alpha=2.0", "--T", "0.1", "--dt", "0.01"])
+    cmd = build_run_command(args, "model1", {"alpha": 2.0}, tmp_path / "run")
+    idx = cmd.index("--Ttilde")
+    assert cmd[idx + 1] == "0.2"
+
+
+def test_heat_and_advection_parameters_are_not_duplicated(tmp_path):
+    heat_args = build_parser().parse_args(["--sweep", "heat_nu=0.01", "--reservoir", "heat", "--heat-nu", "0.01"])
+    heat_cmd = build_run_command(heat_args, "model2", {}, tmp_path / "heat")
+    assert heat_cmd.count("--heat-nu") == 1
+    assert heat_cmd[heat_cmd.index("--heat-nu") + 1] == "0.01"
+
+    adv_args = build_parser().parse_args(
+        ["--sweep", "advection_c=1.5", "--reservoir", "advection", "--advection-c", "1.5"]
+    )
+    adv_cmd = build_run_command(adv_args, "model2", {}, tmp_path / "adv")
+    assert adv_cmd.count("--advection-c") == 1
+    assert adv_cmd[adv_cmd.index("--advection-c") + 1] == "1.5"
 
 
 def test_validate_args_rejects_simultaneous_alpha_and_ttilde_sweeps():

@@ -15,7 +15,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from pol.metadata import get_command_line, get_git_info, get_runtime_info, to_jsonable
-from run_zeta_path import apply_config_defaults, build_parser as build_zeta_parser, run_zeta_path
+from run_zeta_path import apply_config_defaults, build_parser as build_zeta_parser, ensure_metadata_expectation_defaults, run_zeta_path
 
 
 def parse_ints(raw: str) -> list[int]:
@@ -39,6 +39,7 @@ def main(argv: list[str] | None = None) -> int:
     apply_config_defaults(parser, args)
     if not hasattr(args, "_config_applied"):
         args._config_applied = {}
+    ensure_metadata_expectation_defaults(args)
     train_sizes = parse_ints(args.train_sizes)
     args.ntrain = max(max(train_sizes), int(args.ntrain))
     rows = []

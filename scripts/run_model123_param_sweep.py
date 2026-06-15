@@ -414,6 +414,8 @@ def resolved_times(args: argparse.Namespace, overrides: dict[str, Any]) -> dict[
         require_time_grid_aligned_value(Ttilde, dt, "Ttilde", alpha=alpha, T=T)
     else:
         Ttilde = float(overrides.get("Ttilde", args.Ttilde))
+        if Ttilde <= 0.0:
+            Ttilde = T
         alpha = Ttilde / T
     return {"T": T, "Ttilde": Ttilde, "alpha": alpha}
 
@@ -501,7 +503,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--nval", type=int, default=0)
     parser.add_argument("--ntest", type=int, default=200)
     parser.add_argument("--sub", type=int, default=1)
-    parser.add_argument("--shuffle", action="store_true")
+    parser.add_argument("--shuffle", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--data-seed", type=int, default=None)
     parser.add_argument("--split-seed", type=int, default=None)
@@ -509,7 +511,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sim-dtype", choices=("float32", "float64"), default="float32")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--T", type=float, default=1.0)
-    parser.add_argument("--Ttilde", type=float, default=1.0)
+    parser.add_argument("--target-nu", type=float, default=None)
+    parser.add_argument("--Ttilde", type=float, default=0.0)
     parser.add_argument("--dt", type=float, default=1e-2)
     parser.add_argument("--feature-times", type=str, default="")
     parser.add_argument("--K", type=int, default=1)
@@ -550,6 +553,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--elm-weight-scale", type=float, default=0.0)
     parser.add_argument("--elm-bias-scale", type=float, default=1.0)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    parser.add_argument("--allow-metadata-mismatch", action="store_true")
+    parser.add_argument("--require-complete-metadata", action="store_true")
     parser.add_argument("--compute-time-scaled-defect", action="store_true")
     parser.add_argument("--defect-target-nu", type=float, default=None)
     parser.add_argument("--defect-time-quadrature", choices=("trapezoid", "left"), default="trapezoid")
@@ -582,8 +587,10 @@ def _apply_config_defaults(parser: argparse.ArgumentParser, args: argparse.Names
         cfg = json.load(f)
     target = cfg.get("target", {})
     data = cfg.get("data", {})
+    domain = cfg.get("domain", {})
     readout = cfg.get("readout", {})
     _set_if_default(parser, args, "T", target.get("T"))
+    _set_if_default(parser, args, "target_nu", target.get("nu", target.get("target_nu")))
     _set_if_default(parser, args, "dt", target.get("dt"))
     _set_if_default(parser, args, "ntrain", data.get("ntrain"))
     _set_if_default(parser, args, "nval", data.get("nval"))
@@ -594,6 +601,13 @@ def _apply_config_defaults(parser: argparse.ArgumentParser, args: argparse.Names
     _set_if_default(parser, args, "sim_dtype", data.get("sim_dtype"))
     _set_if_default(parser, args, "ridge_convention", readout.get("ridge_convention"))
     _set_if_default(parser, args, "ridge_dtype", readout.get("ridge_dtype"))
+    args.expected_ic_type = data.get("ic_type")
+    args.expected_solver = target.get("solver")
+    args.expected_time_integrator = target.get("time_integrator")
+    args.expected_burgers_scheme = target.get("burgers_scheme", target.get("time_integrator"))
+    args.expected_dealias = target.get("dealias")
+    args.expected_equation = target.get("equation", "burgers")
+    args.expected_domain_length = domain.get("length")
 
 
 def validate_sweeps(args: argparse.Namespace) -> list[SweepSpec]:
@@ -631,8 +645,8 @@ def validate_args(args: argparse.Namespace) -> tuple[list[str], list[SweepSpec]]
         raise ValueError("--train-split must be in (0, 1)")
     if args.ntrain <= 0 or getattr(args, "nval", 0) < 0 or args.ntest <= 0 or args.batch_size <= 0 or args.sub <= 0:
         raise ValueError("ntrain, ntest, batch-size, and sub must be positive; nval must be nonnegative")
-    if args.T <= 0.0 or args.Ttilde <= 0.0 or args.dt <= 0.0 or args.burgers_fine_dt <= 0.0:
-        raise ValueError("T, Ttilde, dt, and burgers-fine-dt must be positive")
+    if args.T <= 0.0 or args.Ttilde < 0.0 or args.dt <= 0.0 or args.burgers_fine_dt <= 0.0:
+        raise ValueError("T, dt, and burgers-fine-dt must be positive; Ttilde must be nonnegative")
     if args.max_workers <= 0:
         raise ValueError("--max-workers must be positive")
     if args.best_k <= 0:
@@ -733,10 +747,6 @@ def build_run_command(
         str(effective["res_burgers_nu"]),
         "--res-burgers-b",
         str(effective["res_burgers_b"]),
-        "--heat-nu",
-        str(effective["heat_nu"]),
-        "--advection-c",
-        str(effective["advection_c"]),
         "--burgers-scheme",
         args.burgers_scheme,
         "--burgers-fine-dt",
@@ -748,6 +758,7 @@ def build_run_command(
         "--out-dir",
         str(out_dir),
     ]
+    append_optional_flag(cmd, "--target-nu", getattr(args, "target_nu", None))
     append_optional_flag(cmd, "--feature-times", args.feature_times if args.feature_times else None)
     append_optional_flag(cmd, "--sub", args.sub)
     append_optional_flag(cmd, "--input-scale", args.input_scale)
@@ -757,6 +768,12 @@ def build_run_command(
 
     if args.shuffle:
         cmd.append("--shuffle")
+    else:
+        cmd.append("--no-shuffle")
+    if getattr(args, "allow_metadata_mismatch", False):
+        cmd.append("--allow-metadata-mismatch")
+    if getattr(args, "require_complete_metadata", False):
+        cmd.append("--require-complete-metadata")
 
     if args.reservoir == "reaction_diffusion":
         append_optional_flag(cmd, "--rd-nu", effective["rd_nu"])
@@ -895,6 +912,11 @@ def expected_run_values(args: argparse.Namespace, model: str, overrides: dict[st
         "ridge_convention": args.ridge_convention,
         "ridge_dtype": args.ridge_dtype,
         "data_sha256": file_sha256_or_none(args.data_file),
+        "target_nu": getattr(args, "target_nu", None),
+        "ic_type": getattr(args, "expected_ic_type", None),
+        "solver": getattr(args, "expected_solver", None),
+        "time_integrator": getattr(args, "expected_time_integrator", None),
+        "dealias": getattr(args, "expected_dealias", None),
         "config_name": Path(args.config).stem if getattr(args, "config", "") else None,
         "config_hash": file_sha256_or_none(args.config) if getattr(args, "config", "") else None,
         "standardize_features": int(args.standardize_features),
@@ -968,6 +990,11 @@ def audit_existing_run(
         "ks_kappa",
         "heat_nu",
         "advection_c",
+        "target_nu",
+        "ic_type",
+        "solver",
+        "time_integrator",
+        "dealias",
         "burgers_scheme",
         "burgers_dealias",
         "data_dtype",
@@ -1004,6 +1031,8 @@ def audit_existing_run(
         return row
 
     args_payload = payload.get("args", {})
+    normalized_meta = _nested_get(payload, ["metadata_validation", "normalized_metadata"], {})
+    target_payload = payload.get("target", {})
     found = {
         "model": args_payload.get("model"),
         "data_mode": args_payload.get("data_mode"),
@@ -1029,6 +1058,11 @@ def audit_existing_run(
         "ridge_convention": payload.get("ridge_convention", args_payload.get("ridge_convention", "legacy_unnormalized_gram")),
         "ridge_dtype": args_payload.get("ridge_dtype"),
         "data_sha256": payload.get("data_sha256"),
+        "target_nu": target_payload.get("target_nu", args_payload.get("target_nu", normalized_meta.get("target_nu"))),
+        "ic_type": target_payload.get("ic_type", normalized_meta.get("ic_type")),
+        "solver": target_payload.get("solver", normalized_meta.get("solver")),
+        "time_integrator": target_payload.get("time_integrator", normalized_meta.get("time_integrator")),
+        "dealias": target_payload.get("dealias", normalized_meta.get("dealias")),
         "config_name": payload.get("config_name"),
         "config_hash": payload.get("config_hash"),
         "standardize_features": args_payload.get("standardize_features"),
@@ -1698,6 +1732,17 @@ def main(argv: list[str] | None = None) -> int:
     _apply_config_defaults(parser, args)
     if not hasattr(args, "_config_applied"):
         args._config_applied = {}
+    for name in [
+        "expected_ic_type",
+        "expected_solver",
+        "expected_time_integrator",
+        "expected_burgers_scheme",
+        "expected_dealias",
+        "expected_equation",
+        "expected_domain_length",
+    ]:
+        if not hasattr(args, name):
+            setattr(args, name, None)
     if args.data_seed is None:
         args.data_seed = args.seed
     if args.split_seed is None:
