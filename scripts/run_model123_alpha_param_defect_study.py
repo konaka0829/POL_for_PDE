@@ -65,8 +65,9 @@ def save_all(fig: plt.Figure, path_no_ext: Path) -> None:
 
 def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--python", default=sys.executable)
+    parser.add_argument("--config", default="")
     parser.add_argument("--models", default="model1,model2,model3")
-    parser.add_argument("--reservoir", choices=("burgers", "reaction_diffusion", "ks"), default="burgers")
+    parser.add_argument("--reservoir", choices=("burgers", "reaction_diffusion", "ks", "static", "heat", "advection"), default="burgers")
     parser.add_argument("--parameter", required=True)
     parser.add_argument("--parameter-values", required=True)
     parser.add_argument("--alpha-values", required=True)
@@ -74,10 +75,13 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--out-root", default="outputs/alpha_param_defect_study")
     parser.add_argument("--train-split", type=float, default=1000.0 / 1200.0)
     parser.add_argument("--ntrain", type=int, default=1000)
+    parser.add_argument("--nval", type=int, default=0)
     parser.add_argument("--ntest", type=int, default=200)
     parser.add_argument("--sub", type=int, default=1)
     parser.add_argument("--shuffle", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--data-seed", type=int, default=None)
+    parser.add_argument("--split-seed", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--T", type=float, default=1.0)
     parser.add_argument("--dt", type=float, default=1e-2)
@@ -89,7 +93,13 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--sensor-seed", type=int, default=0)
     parser.add_argument("--input-scale", type=float, default=1.0)
     parser.add_argument("--input-shift", type=float, default=0.0)
-    parser.add_argument("--ridge-lambda", type=float, default=1e-4)
+    parser.add_argument("--ridge-zeta", type=float, default=None)
+    parser.add_argument("--ridge-lambda", type=float, default=None)
+    parser.add_argument(
+        "--ridge-convention",
+        default="normalized_empirical_l2h_unweighted_frobenius",
+        choices=("normalized_empirical_l2h_unweighted_frobenius", "legacy_unnormalized_gram"),
+    )
     parser.add_argument("--ridge-dtype", choices=("float32", "float64"), default="float64")
     parser.add_argument("--standardize-features", type=int, choices=(0, 1), default=0)
     parser.add_argument("--feature-std-eps", type=float, default=1e-6)
@@ -117,8 +127,18 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--defect-beta-fixed", type=float, default=0.0)
     parser.add_argument("--defect-dtype", choices=("float32", "float64"), default="float64")
     parser.add_argument("--skip-existing", action="store_true")
+    parser.add_argument("--reuse-report", choices=("summary", "verbose", "silent"), default="summary")
+    parser.add_argument("--check-existing", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--save-model", action="store_true")
+
+
+def safe_numeric_key(value: float, values: list[float]) -> int:
+    arr = np.asarray(values, dtype=float)
+    matches = np.where(np.isclose(arr, float(value), rtol=1e-9, atol=1e-12))[0]
+    if matches.size == 0:
+        raise ValueError(f"value {value} not found in numeric grid")
+    return int(matches[0])
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -233,8 +253,8 @@ def matrix_from_rows(rows: list[dict[str, Any]], parameter_values: list[float], 
             continue
         if model is not None and row["model"] != model:
             continue
-        pi = parameter_values.index(float(row["parameter_value"]))
-        ai = alpha_values.index(float(row["alpha"]))
+        pi = safe_numeric_key(float(row["parameter_value"]), parameter_values)
+        ai = safe_numeric_key(float(row["alpha"]), alpha_values)
         value = row.get(value_key)
         matrix[pi, ai] = np.nan if value is None else float(value)
     return matrix
@@ -354,6 +374,17 @@ def make_plots(rows: list[dict[str, Any]], models: list[str], parameter: SweepPa
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.data_seed is None:
+        args.data_seed = args.seed
+    if args.split_seed is None:
+        args.split_seed = args.seed
+    if args.ridge_zeta is None and args.ridge_lambda is None:
+        args.ridge_zeta = 1e-4
+        args.ridge_lambda = 1e-4
+    elif args.ridge_zeta is None:
+        args.ridge_zeta = float(args.ridge_lambda)
+    elif args.ridge_lambda is None:
+        args.ridge_lambda = float(args.ridge_zeta)
     models, parameter, parameter_values, alpha_values = validate_args(args)
 
     out_root = Path(args.out_root)
@@ -379,7 +410,15 @@ def main(argv: list[str] | None = None) -> int:
                 compute_defect = model == defect_owner_model
                 config_exists = (run_dir / "run_config.json").exists()
                 defect_exists = (run_dir / "time_scaled_defect_per_sample.json").exists()
-                if args.skip_existing and config_exists and (not compute_defect or defect_exists):
+                if args.check_existing:
+                    return_code = 0
+                    if not config_exists:
+                        status = "missing"
+                    elif compute_defect and not defect_exists:
+                        status = "missing_defect"
+                    else:
+                        status = "ok"
+                elif args.skip_existing and config_exists and (not compute_defect or defect_exists):
                     return_code = 0
                     status = "ok"
                 else:
@@ -389,7 +428,10 @@ def main(argv: list[str] | None = None) -> int:
                 if status == "fail":
                     had_failure = True
                 cell_results[model] = (status, return_code)
-                print("[%s] %s=%g alpha=%g -> %s" % (model, parameter.name, parameter_value, alpha, status), flush=True)
+                if args.reuse_report == "verbose" or (
+                    args.reuse_report == "summary" and not args.skip_existing and not args.check_existing
+                ):
+                    print("[%s] %s=%g alpha=%g -> %s" % (model, parameter.name, parameter_value, alpha, status), flush=True)
 
             for model in models:
                 run_dir = cell_dirs[model]
@@ -415,7 +457,7 @@ def main(argv: list[str] | None = None) -> int:
                     "status": cell_results[model][0],
                     "return_code": cell_results[model][1],
                 }
-                if row["status"] == "ok":
+                if row["status"] == "ok" and (run_dir / "run_config.json").exists():
                     row.update(load_run_summary(run_dir))
                     defect_source = find_defect_source(owner_dir, run_dir)
                     if defect_source is not None:
@@ -482,11 +524,21 @@ def main(argv: list[str] | None = None) -> int:
     ]
     write_csv(out_root / "summary.csv", summary_rows, dedupe_fieldnames(summary_fields))
     (out_root / "summary.json").write_text(json.dumps({"config": vars(args), "rows": summary_rows}, indent=2), encoding="utf-8")
+    write_csv(out_root / "existing_audit.csv", summary_rows, dedupe_fieldnames(summary_fields))
+    (out_root / "existing_audit.json").write_text(json.dumps(summary_rows, indent=2), encoding="utf-8")
     write_csv(out_root / "per_sample_metrics.csv", per_sample_rows, dedupe_fieldnames(per_sample_fields))
     (out_root / "per_sample_metrics.json").write_text(json.dumps(per_sample_rows, indent=2), encoding="utf-8")
-    make_plots(summary_rows, models, parameter, parameter_values, alpha_values, plot_dir)
+    if args.reuse_report == "summary" and (args.skip_existing or args.check_existing):
+        counts: dict[str, int] = {}
+        for row in summary_rows:
+            counts[row["status"]] = counts.get(row["status"], 0) + 1
+        print("[alpha-param] audit summary " + " ".join(f"{k}={v}" for k, v in sorted(counts.items())), flush=True)
+    if not args.check_existing:
+        make_plots(summary_rows, models, parameter, parameter_values, alpha_values, plot_dir)
     if args.dry_run:
         return 0
+    if args.check_existing:
+        return 2 if any(row["status"] != "ok" for row in summary_rows) else 0
     return 1 if had_failure else 0
 
 

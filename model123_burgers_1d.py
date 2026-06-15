@@ -12,8 +12,12 @@ if sys.version_info < (3, 10):
 
 import argparse
 import csv
+import datetime as _dt
+import hashlib
 import json
 import os
+from pathlib import Path
+import platform
 from dataclasses import asdict
 import time
 import warnings
@@ -30,6 +34,8 @@ from pol.io_mat import MatReader
 from pol.model123_1d import Model1Predictor1D, Model2Regressor1D, Model3Regressor1D, Model123Config
 from pol.model123_1d.metrics import (
     dataset_abs_l2h_error,
+    dataset_abs_l2h_rmse,
+    dataset_rel_l2h_aggregate,
     dataset_rel_l2h_mean,
     per_sample_abs_l2h_error,
     per_sample_rel_l2h_error,
@@ -43,10 +49,11 @@ from pol.plotting import plot_1d_prediction, plot_error_histogram, save_figure_a
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Model 1 / 2 / 3 runner for 1D Burgers target")
+    parser.add_argument("--config", default="")
     parser.add_argument("--model", choices=("model1", "model2", "model3"), required=True)
     parser.add_argument(
         "--reservoir",
-        choices=("burgers", "reaction_diffusion", "ks"),
+        choices=("burgers", "reaction_diffusion", "ks", "static", "heat", "advection"),
         default="burgers",
     )
 
@@ -59,7 +66,10 @@ def parse_args():
     )
     add_split_args(parser, default_train_split=0.75, default_seed=0)
     parser.add_argument("--ntrain", type=int, default=384)
+    parser.add_argument("--nval", type=int, default=0)
     parser.add_argument("--ntest", type=int, default=128)
+    parser.add_argument("--data-seed", type=int, default=None)
+    parser.add_argument("--split-seed", type=int, default=None)
     parser.add_argument("--sub", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=32)
 
@@ -77,7 +87,13 @@ def parse_args():
     parser.add_argument("--input-scale", type=float, default=1.0)
     parser.add_argument("--input-shift", type=float, default=0.0)
 
-    parser.add_argument("--ridge-lambda", type=float, default=1e-4)
+    parser.add_argument("--ridge-zeta", type=float, default=None)
+    parser.add_argument("--ridge-lambda", type=float, default=None)
+    parser.add_argument(
+        "--ridge-convention",
+        default="normalized_empirical_l2h_unweighted_frobenius",
+        choices=("normalized_empirical_l2h_unweighted_frobenius", "legacy_unnormalized_gram"),
+    )
     parser.add_argument("--ridge-dtype", choices=("float32", "float64"), default="float64")
     parser.add_argument("--standardize-features", type=int, choices=(0, 1), default=0)
     parser.add_argument("--feature-std-eps", type=float, default=1e-6)
@@ -93,15 +109,18 @@ def parse_args():
     parser.add_argument("--rd-beta", type=float, default=1.0)
     parser.add_argument("--res-burgers-nu", type=float, default=0.05)
     parser.add_argument("--res-burgers-b", type=float, default=1.0)
+    parser.add_argument("--heat-nu", type=float, default=1e-2)
+    parser.add_argument("--advection-c", type=float, default=1.0)
     parser.add_argument("--ks-dealias", action="store_true")
     parser.add_argument("--ks-b", type=float, default=1.0)
     parser.add_argument("--ks-eta", type=float, default=1.0)
     parser.add_argument("--ks-kappa", type=float, default=1.0)
-    parser.add_argument("--burgers-scheme", choices=("semi_implicit", "split_step"), default="split_step")
+    parser.add_argument("--burgers-scheme", choices=("semi_implicit", "split_step", "etdrk4"), default="split_step")
     parser.add_argument("--burgers-fine-dt", type=float, default=1e-4)
     parser.add_argument("--burgers-dealias", type=int, choices=(0, 1), default=1)
 
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    parser.add_argument("--allow-metadata-mismatch", action="store_true")
     parser.add_argument("--compute-time-scaled-defect", action="store_true")
     parser.add_argument(
         "--defect-target-nu",
@@ -122,18 +141,58 @@ def parse_args():
         help="Optional save path. If omitted, writes out-dir/model.pt",
     )
     args = parser.parse_args()
+    _apply_config_defaults(parser, args)
+    if not hasattr(args, "_config_applied"):
+        args._config_applied = {}
+    args.data_seed = args.seed if args.data_seed is None else args.data_seed
+    args.split_seed = args.seed if args.split_seed is None else args.split_seed
+    if args.ridge_zeta is None and args.ridge_lambda is None:
+        args.ridge_zeta = 1e-4
+        args.ridge_lambda = 1e-4
+    elif args.ridge_zeta is None:
+        args.ridge_zeta = float(args.ridge_lambda)
+    elif args.ridge_lambda is None:
+        args.ridge_lambda = float(args.ridge_zeta)
     validate_data_mode_args(args, parser)
     if args.Ttilde <= 0.0:
         args.Ttilde = args.T
     if args.T <= 0.0 or args.Ttilde <= 0.0 or args.dt <= 0.0:
         parser.error("--T, --Ttilde, and --dt must be positive")
-    if args.ridge_lambda < 0.0:
-        parser.error("--ridge-lambda must be non-negative")
+    if args.ridge_zeta < 0.0:
+        parser.error("--ridge-zeta must be non-negative")
     if args.feature_std_eps <= 0.0:
         parser.error("--feature-std-eps must be positive")
-    if args.sub <= 0 or args.batch_size <= 0 or args.ntrain <= 0 or args.ntest <= 0:
-        parser.error("--sub, --batch-size, --ntrain, and --ntest must be positive")
+    if args.sub <= 0 or args.batch_size <= 0 or args.ntrain <= 0 or args.nval < 0 or args.ntest <= 0:
+        parser.error("--sub, --batch-size, --ntrain, and --ntest must be positive; --nval must be nonnegative")
     return args
+
+
+def _set_if_default(parser, args, name, value):
+    if value is None or not hasattr(args, name):
+        return
+    if getattr(args, name) == parser.get_default(name):
+        setattr(args, name, value)
+        args._config_applied[name] = value
+
+
+def _apply_config_defaults(parser, args):
+    if not getattr(args, "config", ""):
+        return
+    args._config_applied = {}
+    cfg_path = Path(args.config)
+    with cfg_path.open("r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    target = cfg.get("target", {})
+    data = cfg.get("data", {})
+    readout = cfg.get("readout", {})
+    _set_if_default(parser, args, "T", target.get("T"))
+    _set_if_default(parser, args, "dt", target.get("dt"))
+    _set_if_default(parser, args, "ntrain", data.get("ntrain"))
+    _set_if_default(parser, args, "nval", data.get("nval"))
+    _set_if_default(parser, args, "ntest", data.get("ntest"))
+    _set_if_default(parser, args, "data_seed", data.get("data_seed"))
+    _set_if_default(parser, args, "split_seed", data.get("split_seed"))
+    _set_if_default(parser, args, "ridge_convention", readout.get("ridge_convention"))
 
 
 def ridge_dtype_from_name(name):
@@ -157,6 +216,8 @@ def _extract_scalar_meta(reader, field):
 def _validate_shapes(
     x_train,
     y_train,
+    x_val,
+    y_val,
     x_test,
     y_test,
 ):
@@ -164,10 +225,50 @@ def _validate_shapes(
         raise ValueError("Train a/u resolution mismatch: %s vs %s" % (x_train.shape[1], y_train.shape[1]))
     if x_test.shape[1] != y_test.shape[1]:
         raise ValueError("Test a/u resolution mismatch: %s vs %s" % (x_test.shape[1], y_test.shape[1]))
+    if x_val is not None and x_val.shape[1] != y_val.shape[1]:
+        raise ValueError("Val a/u resolution mismatch: %s vs %s" % (x_val.shape[1], y_val.shape[1]))
     if x_train.shape[1] != x_test.shape[1]:
         raise ValueError("Train/test input resolution mismatch: %s vs %s" % (x_train.shape[1], x_test.shape[1]))
     if y_train.shape[1] != y_test.shape[1]:
         raise ValueError("Train/test output resolution mismatch: %s vs %s" % (y_train.shape[1], y_test.shape[1]))
+    if x_val is not None and x_train.shape[1] != x_val.shape[1]:
+        raise ValueError("Train/val input resolution mismatch: %s vs %s" % (x_train.shape[1], x_val.shape[1]))
+
+
+def _hash_indices(indices) -> str:
+    arr = np.asarray(indices, dtype=np.int64)
+    return hashlib.sha256(arr.tobytes()).hexdigest()
+
+
+def _file_sha256(path: str | os.PathLike[str] | None) -> str | None:
+    if not path:
+        return None
+    p = Path(path)
+    if not p.exists() or not p.is_file():
+        return None
+    h = hashlib.sha256()
+    with p.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _to_jsonable(value):
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, torch.dtype):
+        return str(value).replace("torch.", "")
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 1:
+            return _to_jsonable(value.detach().cpu().item())
+        return {"shape": list(value.shape), "dtype": str(value.dtype).replace("torch.", "")}
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {str(k): _to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_jsonable(v) for v in value]
+    return value
 
 
 def _validate_target_time(args, train_reader, test_reader=None):
@@ -195,10 +296,69 @@ def _meta_nu_from_path(path):
     if not path:
         return None
     try:
-        reader = MatReader(path)
+        with MatReader(path) as reader:
+            return _extract_scalar_meta(reader, "nu")
     except Exception:
         return None
-    return _extract_scalar_meta(reader, "nu")
+
+
+def _load_dataset_file(path: str):
+    suffix = Path(path).suffix.lower()
+    if suffix == ".mat":
+        with MatReader(path) as reader:
+            return {
+                "kind": "raw",
+                "a": reader.read_field("a"),
+                "u": reader.read_field("u"),
+                "metadata": {
+                    "T": _extract_scalar_meta(reader, "T"),
+                    "dt": _extract_scalar_meta(reader, "dt"),
+                    "nu": _extract_scalar_meta(reader, "nu"),
+                    "nx": _extract_scalar_meta(reader, "nx"),
+                },
+            }
+    if suffix == ".pt":
+        payload = torch.load(path, map_location="cpu")
+        meta = payload.get("metadata", payload.get("config", {})) if isinstance(payload, dict) else {}
+        if "a" in payload and "u" in payload:
+            return {"kind": "raw", "a": payload["a"], "u": payload["u"], "metadata": meta}
+        if "u0_train" in payload and "y_train" in payload:
+            return {
+                "kind": "split",
+                "x_train": payload["u0_train"],
+                "y_train": payload["y_train"],
+                "x_val": payload.get("u0_val", payload["u0_train"][:0]),
+                "y_val": payload.get("y_val", payload["y_train"][:0]),
+                "x_test": payload["u0_test"],
+                "y_test": payload["y_test"],
+                "metadata": meta,
+            }
+        raise ValueError(f"Unsupported .pt dataset payload keys: {sorted(payload.keys())}")
+    raise ValueError(f"Unsupported dataset extension for {path}; expected .mat or .pt")
+
+
+def _validate_dataset_metadata(args, metadata, nx_after_sub: int | None = None):
+    if not isinstance(metadata, dict):
+        return
+    checks = {
+        "T": args.T,
+        "dt": args.dt,
+    }
+    if nx_after_sub is not None and metadata.get("nx") is not None and int(metadata["nx"]) == nx_after_sub:
+        checks["nx"] = nx_after_sub
+    mismatches = []
+    for key, expected in checks.items():
+        found = metadata.get(key)
+        if found is None:
+            continue
+        if not np.isclose(float(found), float(expected)):
+            mismatches.append(f"{key}: expected {expected}, found {found}")
+    if mismatches:
+        message = "Dataset metadata mismatch: " + "; ".join(mismatches)
+        if args.allow_metadata_mismatch:
+            warnings.warn(message, RuntimeWarning)
+        else:
+            raise ValueError(message)
 
 
 def resolve_defect_target_nu(args):
@@ -227,42 +387,127 @@ def resolve_defect_target_nu(args):
 
 
 def load_data(args):
+    split_meta = {
+        "ntrain": int(args.ntrain),
+        "nval": int(args.nval),
+        "ntest": int(args.ntest),
+        "data_seed": int(args.data_seed),
+        "split_seed": int(args.split_seed),
+        "split_policy": "deterministic_permutation" if args.shuffle or args.nval > 0 else "legacy_train_split",
+    }
     if args.data_mode == "single_split":
-        reader = MatReader(args.data_file)
-        _validate_target_time(args, reader)
-        x_data = reader.read_field("a")[:, :: args.sub]
-        y_data = reader.read_field("u")[:, :: args.sub]
+        loaded = _load_dataset_file(args.data_file)
+        dataset_meta = loaded["metadata"]
+        if loaded["kind"] == "split":
+            x_train_full = loaded["x_train"][:, :: args.sub]
+            y_train_full = loaded["y_train"][:, :: args.sub]
+            x_val_full = loaded["x_val"][:, :: args.sub]
+            y_val_full = loaded["y_val"][:, :: args.sub]
+            x_test_full = loaded["x_test"][:, :: args.sub]
+            y_test_full = loaded["y_test"][:, :: args.sub]
+            if args.ntrain > x_train_full.shape[0] or args.nval > x_val_full.shape[0] or args.ntest > x_test_full.shape[0]:
+                raise ValueError(
+                    "Not enough split dataset samples for ntrain=%s, nval=%s, ntest=%s; available=%s/%s/%s"
+                    % (args.ntrain, args.nval, args.ntest, x_train_full.shape[0], x_val_full.shape[0], x_test_full.shape[0])
+                )
+            x_train = x_train_full[: args.ntrain]
+            y_train = y_train_full[: args.ntrain]
+            x_val = x_val_full[: args.nval]
+            y_val = y_val_full[: args.nval]
+            x_test = x_test_full[: args.ntest]
+            y_test = y_test_full[: args.ntest]
+            train_idx = np.arange(args.ntrain)
+            val_idx = np.arange(args.nval)
+            test_idx = np.arange(args.ntest)
+            split_meta["split_policy"] = "pre_split_dataset"
+            _validate_dataset_metadata(args, dataset_meta, nx_after_sub=int(x_train.shape[1]))
+            _validate_shapes(x_train, y_train, x_val, y_val, x_test, y_test)
+            split_meta.update(
+                {
+                    "train_indices_hash": _hash_indices(train_idx),
+                    "val_indices_hash": _hash_indices(val_idx),
+                    "test_indices_hash": _hash_indices(test_idx),
+                }
+            )
+            s = int(x_train.shape[1])
+            return (
+                x_train.reshape(args.ntrain, s).float(),
+                y_train.reshape(args.ntrain, s).float(),
+                x_val.reshape(args.nval, s).float(),
+                y_val.reshape(args.nval, s).float(),
+                x_test.reshape(args.ntest, s).float(),
+                y_test.reshape(args.ntest, s).float(),
+                split_meta,
+                dataset_meta,
+            )
+
+        x_data = loaded["a"][:, :: args.sub]
+        y_data = loaded["u"][:, :: args.sub]
+        _validate_dataset_metadata(args, dataset_meta, nx_after_sub=int(x_data.shape[1]))
         total = x_data.shape[0]
         indices = np.arange(total)
-        if args.shuffle:
-            rng = np.random.default_rng(args.seed)
+        if args.shuffle or args.nval > 0:
+            rng = np.random.default_rng(args.split_seed)
             rng.shuffle(indices)
-        split_idx = int(total * args.train_split)
-        train_idx = indices[:split_idx]
-        test_idx = indices[split_idx:]
-        if args.ntrain > len(train_idx) or args.ntest > len(test_idx):
-            raise ValueError("Not enough samples for ntrain=%s, ntest=%s, total=%s" % (args.ntrain, args.ntest, total))
-        train_idx = train_idx[: args.ntrain]
-        test_idx = test_idx[: args.ntest]
+            if args.ntrain + args.nval + args.ntest > total:
+                raise ValueError(
+                    "Not enough samples for ntrain=%s, nval=%s, ntest=%s, total=%s"
+                    % (args.ntrain, args.nval, args.ntest, total)
+                )
+            train_idx = indices[: args.ntrain]
+            val_idx = indices[args.ntrain : args.ntrain + args.nval]
+            test_idx = indices[args.ntrain + args.nval : args.ntrain + args.nval + args.ntest]
+        else:
+            split_idx = int(total * args.train_split)
+            train_pool = indices[:split_idx]
+            test_pool = indices[split_idx:]
+            if args.ntrain > len(train_pool) or args.ntest > len(test_pool):
+                raise ValueError("Not enough samples for ntrain=%s, ntest=%s, total=%s" % (args.ntrain, args.ntest, total))
+            train_idx = train_pool[: args.ntrain]
+            val_idx = np.asarray([], dtype=np.int64)
+            test_idx = test_pool[: args.ntest]
         x_train = x_data[train_idx]
         y_train = y_data[train_idx]
+        x_val = x_data[val_idx] if args.nval > 0 else x_data[train_idx[:0]]
+        y_val = y_data[val_idx] if args.nval > 0 else y_data[train_idx[:0]]
         x_test = x_data[test_idx]
         y_test = y_data[test_idx]
     else:
-        train_reader = MatReader(args.train_file)
-        test_reader = MatReader(args.test_file)
-        _validate_target_time(args, train_reader, test_reader)
-        x_train = train_reader.read_field("a")[: args.ntrain, :: args.sub]
-        y_train = train_reader.read_field("u")[: args.ntrain, :: args.sub]
-        x_test = test_reader.read_field("a")[: args.ntest, :: args.sub]
-        y_test = test_reader.read_field("u")[: args.ntest, :: args.sub]
-    _validate_shapes(x_train, y_train, x_test, y_test)
+        with MatReader(args.train_file) as train_reader, MatReader(args.test_file) as test_reader:
+            _validate_target_time(args, train_reader, test_reader)
+            x_train = train_reader.read_field("a")[: args.ntrain, :: args.sub]
+            y_train = train_reader.read_field("u")[: args.ntrain, :: args.sub]
+            x_val = train_reader.read_field("a")[args.ntrain : args.ntrain + args.nval, :: args.sub]
+            y_val = train_reader.read_field("u")[args.ntrain : args.ntrain + args.nval, :: args.sub]
+            x_test = test_reader.read_field("a")[: args.ntest, :: args.sub]
+            y_test = test_reader.read_field("u")[: args.ntest, :: args.sub]
+            dataset_meta = {
+                "T": _extract_scalar_meta(train_reader, "T"),
+                "dt": _extract_scalar_meta(train_reader, "dt"),
+                "nu": _extract_scalar_meta(train_reader, "nu"),
+                "nx": _extract_scalar_meta(train_reader, "nx"),
+            }
+        train_idx = np.arange(args.ntrain)
+        val_idx = np.arange(args.ntrain, args.ntrain + args.nval)
+        test_idx = np.arange(args.ntest)
+    _validate_shapes(x_train, y_train, x_val, y_val, x_test, y_test)
+    split_meta.update(
+        {
+            "train_indices_hash": _hash_indices(train_idx),
+            "val_indices_hash": _hash_indices(val_idx),
+            "test_indices_hash": _hash_indices(test_idx),
+        }
+    )
     s = int(x_train.shape[1])
     return (
         x_train.reshape(args.ntrain, s).float(),
         y_train.reshape(args.ntrain, s).float(),
+        x_val.reshape(args.nval, s).float(),
+        y_val.reshape(args.nval, s).float(),
         x_test.reshape(args.ntest, s).float(),
         y_test.reshape(args.ntest, s).float(),
+        split_meta,
+        dataset_meta,
     )
 
 
@@ -280,6 +525,8 @@ def build_model_config(args):
         input_scale=args.input_scale,
         input_shift=args.input_shift,
         ridge_lambda=args.ridge_lambda,
+        ridge_zeta=args.ridge_zeta,
+        ridge_convention=args.ridge_convention,
         ridge_dtype=ridge_dtype_from_name(args.ridge_dtype),
         standardize_features=bool(args.standardize_features),
         feature_std_eps=args.feature_std_eps,
@@ -293,6 +540,8 @@ def build_model_config(args):
         rd_beta=args.rd_beta,
         res_burgers_nu=args.res_burgers_nu,
         res_burgers_b=args.res_burgers_b,
+        heat_nu=args.heat_nu,
+        advection_c=args.advection_c,
         ks_dealias=args.ks_dealias,
         ks_b=args.ks_b,
         ks_eta=args.ks_eta,
@@ -302,6 +551,7 @@ def build_model_config(args):
         burgers_dealias=bool(args.burgers_dealias),
         device=args.device,
         dtype=torch.float32,
+        domain_length=1.0,
     )
 
 
@@ -328,9 +578,10 @@ def evaluate_model(model, loader, progress_label=None):
     preds_all = torch.cat(preds)
     ys_all = torch.cat(ys)
     xs_all = torch.cat(xs)
-    abs_l2h = dataset_abs_l2h_error(preds_all, ys_all)
-    rel_l2h = dataset_rel_l2h_mean(preds_all, ys_all)
-    return abs_l2h, rel_l2h, preds_all, ys_all, xs_all
+    abs_l2h = dataset_abs_l2h_rmse(preds_all, ys_all)
+    rel_l2h_mean = dataset_rel_l2h_mean(preds_all, ys_all)
+    rel_l2h_agg = dataset_rel_l2h_aggregate(preds_all, ys_all)
+    return abs_l2h, rel_l2h_mean, rel_l2h_agg, preds_all, ys_all, xs_all
 
 
 def make_progress_fn(label):
@@ -532,7 +783,7 @@ def main():
     np.random.seed(args.seed)
 
     stage_start = time.perf_counter()
-    x_train, y_train, x_test, y_test = load_data(args)
+    x_train, y_train, x_val, y_val, x_test, y_test, split_meta, dataset_meta = load_data(args)
     print("[%s] data loaded in %.2fs" % (args.model, time.perf_counter() - stage_start), flush=True)
     s = int(x_train.shape[1])
     train_loader = torch.utils.data.DataLoader(
@@ -545,6 +796,11 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
     )
+    val_loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(x_val, y_val),
+        batch_size=args.batch_size,
+        shuffle=False,
+    ) if args.nval > 0 else None
     test_loader = torch.utils.data.DataLoader(
         torch.utils.data.TensorDataset(x_test, y_test),
         batch_size=args.batch_size,
@@ -572,8 +828,15 @@ def main():
 
     train_eval_label = "%s eval-train" % args.model if args.model in {"model2", "model3"} else None
     test_eval_label = "%s eval-test" % args.model if args.model in {"model2", "model3"} else None
-    train_abs, train_rel, _, _, _ = evaluate_model(model, eval_train_loader, progress_label=train_eval_label)
-    test_abs, test_rel, pred_test, y_test_all, x_test_all = evaluate_model(
+    train_abs, train_rel_mean, train_rel_agg, _, _, _ = evaluate_model(model, eval_train_loader, progress_label=train_eval_label)
+    if val_loader is not None:
+        val_eval_label = "%s eval-val" % args.model if args.model in {"model2", "model3"} else None
+        val_abs, val_rel_mean, val_rel_agg, _, _, _ = evaluate_model(model, val_loader, progress_label=val_eval_label)
+    else:
+        val_abs = None
+        val_rel_mean = None
+        val_rel_agg = None
+    test_abs, test_rel_mean, test_rel_agg, pred_test, y_test_all, x_test_all = evaluate_model(
         model,
         test_loader,
         progress_label=test_eval_label,
@@ -585,9 +848,13 @@ def main():
     print("model=%s reservoir=%s obs=%s J=%s" % (args.model, args.reservoir, actual_obs, actual_J))
     print("T=%s Ttilde=%s dt=%s" % (args.T, args.Ttilde, args.dt))
     print("train absL2h: %.6f" % train_abs)
+    if val_abs is not None:
+        print("val   absL2h: %.6f" % val_abs)
     print("test  absL2h: %.6f" % test_abs)
-    print("train relL2: %.6f" % train_rel)
-    print("test  relL2: %.6f" % test_rel)
+    print("train relL2_mean: %.6f" % train_rel_mean)
+    if val_rel_mean is not None:
+        print("val   relL2_mean: %.6f" % val_rel_mean)
+    print("test  relL2_mean: %.6f" % test_rel_mean)
 
     per_sample_abs = per_sample_abs_l2h_error(pred_test, y_test_all)
     per_sample_rel = per_sample_rel_l2h_error(pred_test, y_test_all)
@@ -598,7 +865,9 @@ def main():
             {
                 "main_metric": "abs_l2h",
                 "test_absL2h": test_abs,
-                "test_relL2": test_rel,
+                "test_relL2": test_rel_mean,
+                "test_relL2_mean": test_rel_mean,
+                "test_relL2_agg": test_rel_agg,
                 "per_sample_absL2h": [float(v) for v in per_sample_abs.tolist()],
                 "per_sample_relL2": [float(v) for v in per_sample_rel.tolist()],
             },
@@ -658,10 +927,63 @@ def main():
             "main_metric": "abs_l2h",
             "alpha": float(args.Ttilde / args.T),
             "train_absL2h": train_abs,
+            "val_absL2h": val_abs,
             "test_absL2h": test_abs,
-            "train_relL2": train_rel,
-            "test_relL2": test_rel,
+            "train_relL2": train_rel_mean,
+            "val_relL2": val_rel_mean,
+            "test_relL2": test_rel_mean,
+            "train_relL2_mean": train_rel_mean,
+            "val_relL2_mean": val_rel_mean,
+            "test_relL2_mean": test_rel_mean,
+            "train_relL2_agg": train_rel_agg,
+            "val_relL2_agg": val_rel_agg,
+            "test_relL2_agg": test_rel_agg,
+            "split": split_meta,
+            "selection": {
+                "selection_metric": "val_absL2h" if val_abs is not None else "test_absL2h_legacy_fallback",
+                "selected_by": "single_run",
+                "warning_if_legacy_test_selection": val_abs is None,
+            },
+            "readout": {
+                "ridge_parameter_name": "zeta",
+                "ridge_zeta": float(args.ridge_zeta),
+                "ridge_convention": args.ridge_convention,
+                "ridge_dtype": args.ridge_dtype,
+                "regularize_bias": False,
+                "standardize_features": bool(args.standardize_features),
+            },
+            "ridge_parameter_name": "zeta",
+            "ridge_zeta": float(args.ridge_zeta),
+            "ridge_convention": args.ridge_convention,
+            "regularize_bias": False,
+            "domain_length": 1.0,
+            "nx": int(s),
+            "dx": float(1.0 / s),
+            "num_train_samples": int(args.ntrain),
+            "effective_code_lambda_legacy_equivalent": float(args.ntrain * args.ridge_zeta * s),
+            "data_file": args.data_file if args.data_mode == "single_split" else args.train_file,
+            "data_sha256": _file_sha256(args.data_file if args.data_mode == "single_split" else args.train_file),
+            "dataset_metadata": dataset_meta,
+            "config_name": Path(args.config).stem if args.config else None,
+            "config_path": args.config or None,
+            "config_hash": _file_sha256(args.config) if args.config else None,
+            "config_applied": getattr(args, "_config_applied", {}),
+            "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            "command_line": sys.argv,
+            "python_version": platform.python_version(),
+            "torch_version": torch.__version__,
+            "numpy_version": np.__version__,
+            "device": args.device,
         }
+        if ridge_state is not None:
+            for src, dst in [
+                ("W_fro_norm", "W_fro_norm"),
+                ("W_hs_norm_l2h", "W_hs_norm_l2h"),
+                ("d_eff", "effective_dimension"),
+                ("cond_zeta", "condition_number"),
+            ]:
+                if src in ridge_state:
+                    run_payload[dst] = _to_jsonable(ridge_state[src])
         if defect_metrics is not None:
             run_payload.update(
                 {
@@ -678,7 +1000,7 @@ def main():
             if "max_abs_difference_model1_D1" in defect_metrics:
                 run_payload["max_abs_difference_model1_D1"] = defect_metrics["max_abs_difference_model1_D1"]
         json.dump(
-            run_payload,
+            _to_jsonable(run_payload),
             f,
             indent=2,
             ensure_ascii=False,

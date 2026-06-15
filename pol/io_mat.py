@@ -41,6 +41,7 @@ class MatReader:
             self.old_mat = False
 
     def load_file(self, file_path: str | Path) -> None:
+        self.close()
         self.file_path = str(file_path)
         self._load_file()
 
@@ -69,3 +70,13 @@ class MatReader:
     def set_float(self, to_float: bool) -> None:
         self.to_float = to_float
 
+    def close(self) -> None:
+        if self.data is not None and not self.old_mat and hasattr(self.data, "close"):
+            self.data.close()
+        self.data = None
+
+    def __enter__(self) -> "MatReader":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()

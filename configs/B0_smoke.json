@@ -1,0 +1,29 @@
+{
+  "name": "B0_smoke",
+  "domain": {
+    "length": 1.0,
+    "periodic": true,
+    "nx": 64
+  },
+  "target": {
+    "equation": "burgers",
+    "nu": 0.01,
+    "T": 0.1,
+    "dt": 0.01,
+    "solver": "split_step",
+    "dealias": true
+  },
+  "data": {
+    "ic_type": "grf",
+    "total_samples": 24,
+    "ntrain": 12,
+    "nval": 6,
+    "ntest": 6,
+    "data_seed": 0,
+    "split_seed": 0
+  },
+  "readout": {
+    "ridge_convention": "normalized_empirical_l2h_unweighted_frobenius",
+    "zeta_grid": [1e-8, 1e-6, 1e-4]
+  }
+}

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import itertools
 import json
 import math
@@ -22,6 +23,9 @@ matplotlib.use("Agg")
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+MODEL123_RUNNER = REPO_ROOT / "model123_burgers_1d.py"
 
 
 VALID_MODELS = ("model1", "model2", "model3")
@@ -320,6 +324,19 @@ def build_job_env(base_env: dict[str, str]) -> dict[str, str]:
     return env
 
 
+def file_sha256_or_none(path: str | os.PathLike[str] | None) -> str | None:
+    if not path:
+        return None
+    p = Path(path)
+    if not p.exists() or not p.is_file():
+        return None
+    h = hashlib.sha256()
+    with p.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def start_job(cmd: list[str], log_path: Path, env: dict[str, str]) -> tuple[subprocess.Popen[str], Any]:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_file = log_path.open("w", encoding="utf-8")
@@ -388,9 +405,16 @@ def load_run_metrics(run_dir: Path) -> dict[str, Any]:
     Ttilde = float(payload.get("Ttilde", args_payload.get("Ttilde", T)))
     metrics = {
         "train_absL2h": float(payload["train_absL2h"]),
+        "val_absL2h": payload.get("val_absL2h"),
         "test_absL2h": float(payload["test_absL2h"]),
         "train_relL2": float(payload["train_relL2"]),
         "test_relL2": float(payload["test_relL2"]),
+        "train_relL2_mean": float(payload.get("train_relL2_mean", payload.get("train_relL2", np.nan))),
+        "val_relL2_mean": payload.get("val_relL2_mean"),
+        "test_relL2_mean": float(payload.get("test_relL2_mean", payload.get("test_relL2", np.nan))),
+        "train_relL2_agg": payload.get("train_relL2_agg"),
+        "val_relL2_agg": payload.get("val_relL2_agg"),
+        "test_relL2_agg": payload.get("test_relL2_agg"),
         "T": T,
         "Ttilde": Ttilde,
         "alpha": float(payload.get("alpha", Ttilde / T)),
@@ -436,6 +460,7 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument("--python", default=sys.executable)
+    parser.add_argument("--config", default="")
     parser.add_argument("--models", default="model1,model2,model3")
     parser.add_argument(
         "--sweep",
@@ -453,24 +478,33 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out-root", default="outputs/model123_param_sweep")
     parser.add_argument("--train-split", type=float, default=1000.0 / 1200.0)
     parser.add_argument("--ntrain", type=int, default=1000)
+    parser.add_argument("--nval", type=int, default=0)
     parser.add_argument("--ntest", type=int, default=200)
     parser.add_argument("--sub", type=int, default=1)
     parser.add_argument("--shuffle", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--data-seed", type=int, default=None)
+    parser.add_argument("--split-seed", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--T", type=float, default=1.0)
     parser.add_argument("--Ttilde", type=float, default=1.0)
     parser.add_argument("--dt", type=float, default=1e-2)
     parser.add_argument("--feature-times", type=str, default="")
     parser.add_argument("--K", type=int, default=1)
-    parser.add_argument("--reservoir", choices=("burgers", "reaction_diffusion", "ks"), default="burgers")
+    parser.add_argument("--reservoir", choices=("burgers", "reaction_diffusion", "ks", "static", "heat", "advection"), default="burgers")
     parser.add_argument("--obs", choices=("full", "points", "fourier", "proj"), default="full")
     parser.add_argument("--J", type=int, default=1028)
     parser.add_argument("--sensor-mode", choices=("equispaced", "random"), default="equispaced")
     parser.add_argument("--sensor-seed", type=int, default=0)
     parser.add_argument("--input-scale", type=float, default=1.0)
     parser.add_argument("--input-shift", type=float, default=0.0)
-    parser.add_argument("--ridge-lambda", type=float, default=1e-4)
+    parser.add_argument("--ridge-zeta", type=float, default=None)
+    parser.add_argument("--ridge-lambda", type=float, default=None)
+    parser.add_argument(
+        "--ridge-convention",
+        default="normalized_empirical_l2h_unweighted_frobenius",
+        choices=("normalized_empirical_l2h_unweighted_frobenius", "legacy_unnormalized_gram"),
+    )
     parser.add_argument("--ridge-dtype", choices=("float32", "float64"), default="float64")
     parser.add_argument("--standardize-features", type=int, choices=(0, 1), default=0)
     parser.add_argument("--feature-std-eps", type=float, default=1e-6)
@@ -500,10 +534,39 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--defect-dtype", choices=("float32", "float64"), default="float64")
     parser.add_argument("--save-model", action="store_true")
     parser.add_argument("--skip-existing", action="store_true")
+    parser.add_argument("--reuse-report", choices=("summary", "verbose", "silent"), default="summary")
+    parser.add_argument("--check-existing", action="store_true")
     parser.add_argument("--max-workers", type=int, default=1)
     parser.add_argument("--best-k", type=int, default=10)
     parser.add_argument("--dry-run", action="store_true")
     return parser
+
+
+def _set_if_default(parser: argparse.ArgumentParser, args: argparse.Namespace, name: str, value: Any) -> None:
+    if value is None or not hasattr(args, name):
+        return
+    if getattr(args, name) == parser.get_default(name):
+        setattr(args, name, value)
+        args._config_applied[name] = value
+
+
+def _apply_config_defaults(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if not getattr(args, "config", ""):
+        return
+    args._config_applied = {}
+    with Path(args.config).open("r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    target = cfg.get("target", {})
+    data = cfg.get("data", {})
+    readout = cfg.get("readout", {})
+    _set_if_default(parser, args, "T", target.get("T"))
+    _set_if_default(parser, args, "dt", target.get("dt"))
+    _set_if_default(parser, args, "ntrain", data.get("ntrain"))
+    _set_if_default(parser, args, "nval", data.get("nval"))
+    _set_if_default(parser, args, "ntest", data.get("ntest"))
+    _set_if_default(parser, args, "data_seed", data.get("data_seed"))
+    _set_if_default(parser, args, "split_seed", data.get("split_seed"))
+    _set_if_default(parser, args, "ridge_convention", readout.get("ridge_convention"))
 
 
 def validate_sweeps(args: argparse.Namespace) -> list[SweepSpec]:
@@ -539,8 +602,8 @@ def validate_sweeps(args: argparse.Namespace) -> list[SweepSpec]:
 def validate_args(args: argparse.Namespace) -> tuple[list[str], list[SweepSpec]]:
     if not (0.0 < args.train_split < 1.0):
         raise ValueError("--train-split must be in (0, 1)")
-    if args.ntrain <= 0 or args.ntest <= 0 or args.batch_size <= 0 or args.sub <= 0:
-        raise ValueError("ntrain, ntest, batch-size, and sub must be positive")
+    if args.ntrain <= 0 or getattr(args, "nval", 0) < 0 or args.ntest <= 0 or args.batch_size <= 0 or args.sub <= 0:
+        raise ValueError("ntrain, ntest, batch-size, and sub must be positive; nval must be nonnegative")
     if args.T <= 0.0 or args.Ttilde <= 0.0 or args.dt <= 0.0 or args.burgers_fine_dt <= 0.0:
         raise ValueError("T, Ttilde, dt, and burgers-fine-dt must be positive")
     if args.max_workers <= 0:
@@ -584,9 +647,11 @@ def build_run_command(
     }
     cmd = [
         args.python,
-        "model123_burgers_1d.py",
+        str(MODEL123_RUNNER),
         "--model",
         model,
+        "--config",
+        args.config,
         "--data-mode",
         "single_split",
         "--data-file",
@@ -597,8 +662,14 @@ def build_run_command(
         str(args.seed),
         "--ntrain",
         str(args.ntrain),
+        "--nval",
+        str(args.nval),
         "--ntest",
         str(args.ntest),
+        "--data-seed",
+        str(args.data_seed if args.data_seed is not None else args.seed),
+        "--split-seed",
+        str(args.split_seed if args.split_seed is not None else args.seed),
         "--batch-size",
         str(args.batch_size),
         "--T",
@@ -617,8 +688,10 @@ def build_run_command(
         args.sensor_mode,
         "--sensor-seed",
         str(args.sensor_seed),
-        "--ridge-lambda",
-        str(args.ridge_lambda),
+        "--ridge-zeta",
+        str(args.ridge_zeta if args.ridge_zeta is not None else args.ridge_lambda),
+        "--ridge-convention",
+        args.ridge_convention,
         "--ridge-dtype",
         args.ridge_dtype,
         "--reservoir",
@@ -697,10 +770,20 @@ def make_base_row(
         "status": "pending",
         "return_code": None,
         "train_absL2h": None,
+        "val_absL2h": None,
         "test_absL2h": None,
         "test_absL2h_plot": None,
         "train_relL2": None,
+        "val_relL2": None,
         "test_relL2": None,
+        "train_relL2_mean": None,
+        "val_relL2_mean": None,
+        "test_relL2_mean": None,
+        "train_relL2_agg": None,
+        "val_relL2_agg": None,
+        "test_relL2_agg": None,
+        "selection_metric": None,
+        "reason": "",
         "test_relL2_plot": None,
         "T": None,
         "Ttilde": None,
@@ -719,6 +802,198 @@ def make_base_row(
     }
     for name in sweep_names:
         row[name] = overrides[name]
+    return row
+
+
+def values_close(expected: Any, found: Any) -> bool:
+    if expected is None:
+        return True
+    if found is None:
+        return False
+    if isinstance(expected, float) or isinstance(found, float):
+        try:
+            return bool(np.isclose(float(expected), float(found), rtol=1e-9, atol=1e-12))
+        except Exception:
+            return False
+    return expected == found
+
+
+def _nested_get(payload: dict[str, Any], keys: list[str], default: Any = None) -> Any:
+    cur: Any = payload
+    for key in keys:
+        if not isinstance(cur, dict) or key not in cur:
+            return default
+        cur = cur[key]
+    return cur
+
+
+def expected_run_values(args: argparse.Namespace, model: str, overrides: dict[str, Any]) -> dict[str, Any]:
+    times = resolved_times(args, overrides)
+    return {
+        "model": model,
+        "data_mode": "single_split",
+        "data_file": args.data_file,
+        "train_split": args.train_split,
+        "ntrain": args.ntrain,
+        "nval": args.nval,
+        "ntest": args.ntest,
+        "seed": args.seed,
+        "data_seed": args.data_seed if args.data_seed is not None else args.seed,
+        "split_seed": args.split_seed if args.split_seed is not None else args.seed,
+        "elm_seed": args.elm_seed,
+        "sensor_seed": args.sensor_seed,
+        "T": args.T,
+        "Ttilde": times["Ttilde"],
+        "alpha": times["alpha"],
+        "dt": overrides.get("dt", args.dt),
+        "K": overrides.get("K", args.K),
+        "reservoir": args.reservoir,
+        "obs": args.obs,
+        "J": overrides.get("J", args.J),
+        "ridge_zeta": args.ridge_zeta if args.ridge_zeta is not None else args.ridge_lambda,
+        "ridge_convention": args.ridge_convention,
+        "ridge_dtype": args.ridge_dtype,
+        "data_sha256": file_sha256_or_none(args.data_file),
+        "config_name": Path(args.config).stem if getattr(args, "config", "") else None,
+        "config_hash": file_sha256_or_none(args.config) if getattr(args, "config", "") else None,
+        "standardize_features": int(args.standardize_features),
+        "rd_nu": overrides.get("rd_nu", args.rd_nu),
+        "rd_alpha": overrides.get("rd_alpha", args.rd_alpha),
+        "rd_beta": overrides.get("rd_beta", args.rd_beta),
+        "res_burgers_nu": overrides.get("res_burgers_nu", args.res_burgers_nu),
+        "res_burgers_b": overrides.get("res_burgers_b", args.res_burgers_b),
+        "ks_b": overrides.get("ks_b", args.ks_b),
+        "ks_eta": overrides.get("ks_eta", args.ks_eta),
+        "ks_kappa": overrides.get("ks_kappa", args.ks_kappa),
+    }
+
+
+def audit_existing_run(
+    *,
+    args: argparse.Namespace,
+    model: str,
+    overrides: dict[str, Any],
+    run_dir: Path,
+) -> dict[str, Any]:
+    row = {
+        "model": model,
+        "sweep_id": "__".join(f"{k}={overrides[k]}" for k in overrides),
+        "run_dir": str(run_dir),
+        "status": "missing",
+        "reason": "",
+        "has_run_config": False,
+        "has_val_metrics": False,
+        "has_test_metrics": False,
+        "has_defect_metrics": False,
+    }
+    expected = expected_run_values(args, model, overrides)
+    for key in ["alpha", "T", "Ttilde", "dt", "K", "obs", "J", "reservoir"]:
+        row[f"expected_{key}"] = expected.get(key)
+        row[f"found_{key}"] = None
+    for key in ["ridge_zeta", "ridge_convention", "data_file"]:
+        row[f"expected_{key}"] = expected.get(key)
+        row[f"found_{key}"] = None
+    row["expected_data_sha256"] = expected.get("data_sha256")
+    row["found_data_sha256"] = None
+    row["expected_config_hash"] = expected.get("config_hash")
+    row["found_config_hash"] = None
+    for key in [
+        "test_absL2h",
+        "val_absL2h",
+        "train_absL2h",
+        "test_relL2_mean",
+        "test_relL2_agg",
+        "val_relL2_mean",
+        "val_relL2_agg",
+    ]:
+        row[key] = None
+
+    config_path = run_dir / "run_config.json"
+    if not config_path.exists():
+        row["reason"] = "run_config.json not found"
+        return row
+    row["has_run_config"] = True
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        row["status"] = "invalid_json"
+        row["reason"] = str(exc)
+        return row
+
+    args_payload = payload.get("args", {})
+    found = {
+        "model": args_payload.get("model"),
+        "data_mode": args_payload.get("data_mode"),
+        "data_file": payload.get("data_file", args_payload.get("data_file")),
+        "train_split": args_payload.get("train_split"),
+        "ntrain": _nested_get(payload, ["split", "ntrain"], args_payload.get("ntrain")),
+        "nval": _nested_get(payload, ["split", "nval"], args_payload.get("nval", 0)),
+        "ntest": _nested_get(payload, ["split", "ntest"], args_payload.get("ntest")),
+        "seed": args_payload.get("seed"),
+        "data_seed": _nested_get(payload, ["split", "data_seed"], args_payload.get("data_seed", args_payload.get("seed"))),
+        "split_seed": _nested_get(payload, ["split", "split_seed"], args_payload.get("split_seed", args_payload.get("seed"))),
+        "elm_seed": args_payload.get("elm_seed"),
+        "sensor_seed": args_payload.get("sensor_seed"),
+        "T": args_payload.get("T", payload.get("T")),
+        "Ttilde": args_payload.get("Ttilde", payload.get("Ttilde")),
+        "alpha": payload.get("alpha"),
+        "dt": args_payload.get("dt"),
+        "K": args_payload.get("K"),
+        "reservoir": args_payload.get("reservoir"),
+        "obs": args_payload.get("obs"),
+        "J": args_payload.get("J"),
+        "ridge_zeta": payload.get("ridge_zeta", args_payload.get("ridge_zeta", args_payload.get("ridge_lambda"))),
+        "ridge_convention": payload.get("ridge_convention", args_payload.get("ridge_convention", "legacy_unnormalized_gram")),
+        "ridge_dtype": args_payload.get("ridge_dtype"),
+        "data_sha256": payload.get("data_sha256"),
+        "config_name": payload.get("config_name"),
+        "config_hash": payload.get("config_hash"),
+        "standardize_features": args_payload.get("standardize_features"),
+        "rd_nu": args_payload.get("rd_nu"),
+        "rd_alpha": args_payload.get("rd_alpha"),
+        "rd_beta": args_payload.get("rd_beta"),
+        "res_burgers_nu": args_payload.get("res_burgers_nu"),
+        "res_burgers_b": args_payload.get("res_burgers_b"),
+        "ks_b": args_payload.get("ks_b"),
+        "ks_eta": args_payload.get("ks_eta"),
+        "ks_kappa": args_payload.get("ks_kappa"),
+    }
+    if found["alpha"] is None and found.get("T") and found.get("Ttilde"):
+        found["alpha"] = float(found["Ttilde"]) / float(found["T"])
+    for key in ["alpha", "T", "Ttilde", "dt", "K", "obs", "J", "reservoir", "ridge_zeta", "ridge_convention", "data_file"]:
+        row[f"found_{key}"] = found.get(key)
+    row["found_data_sha256"] = payload.get("data_sha256")
+    row["found_config_hash"] = payload.get("config_hash")
+    for key in [
+        "test_absL2h",
+        "val_absL2h",
+        "train_absL2h",
+        "test_relL2_mean",
+        "test_relL2_agg",
+        "val_relL2_mean",
+        "val_relL2_agg",
+    ]:
+        row[key] = payload.get(key)
+    row["has_val_metrics"] = payload.get("val_absL2h") is not None
+    row["has_test_metrics"] = payload.get("test_absL2h") is not None
+    row["has_defect_metrics"] = (run_dir / "time_scaled_defect_metrics.json").exists()
+
+    mismatches = [key for key, exp in expected.items() if key in found and not values_close(exp, found.get(key))]
+    if mismatches:
+        row["status"] = "config_mismatch"
+        row["reason"] = "mismatch: " + ",".join(mismatches)
+    elif not row["has_test_metrics"]:
+        row["status"] = "missing_metric"
+        row["reason"] = "missing test_absL2h"
+    elif args.nval > 0 and not row["has_val_metrics"]:
+        row["status"] = "missing_metric"
+        row["reason"] = "missing val_absL2h"
+    elif args.compute_time_scaled_defect and not row["has_defect_metrics"]:
+        row["status"] = "missing_defect"
+        row["reason"] = "missing time_scaled_defect_metrics.json"
+    else:
+        row["status"] = "ok"
+        row["reason"] = ""
     return row
 
 
@@ -742,20 +1017,32 @@ def run_model_jobs(
         row.update(resolved_times(args, overrides))
         config_path = run_dir / "run_config.json"
 
-        if args.skip_existing and config_path.exists():
-            metrics = load_run_metrics(run_dir)
-            row.update(metrics)
-            row["status"] = "ok"
-            row["return_code"] = 0
-            row["test_absL2h_plot"] = clip_for_log(float(row["test_absL2h"]), eps)
-            row["test_relL2_plot"] = clip_for_log(float(row["test_relL2"]), eps)
-            rows.append(row)
-            print(
-                "[%s] reuse %s -> test_absL2h=%.6e"
-                % (model, row["sweep_id"], row["test_absL2h"]),
-                flush=True,
-            )
-            continue
+        if args.skip_existing or args.check_existing:
+            audit = audit_existing_run(args=args, model=model, overrides=overrides, run_dir=run_dir)
+            row.update(audit)
+            if audit["status"] == "ok":
+                metrics = load_run_metrics(run_dir)
+                row.update(metrics)
+                row["status"] = "ok"
+                row["return_code"] = 0
+                row["selection_metric"] = "val_absL2h" if row.get("val_absL2h") is not None else "test_absL2h_legacy_fallback"
+                row["test_absL2h_plot"] = clip_for_log(float(row["test_absL2h"]), eps)
+                row["test_relL2_plot"] = clip_for_log(float(row["test_relL2"]), eps)
+                rows.append(row)
+                if args.reuse_report == "verbose":
+                    print(
+                        "[%s] reuse %s -> val_absL2h=%s test_absL2h=%.6e"
+                        % (model, row["sweep_id"], row.get("val_absL2h"), row["test_absL2h"]),
+                        flush=True,
+                    )
+                continue
+            if args.check_existing:
+                rows.append(row)
+                if args.reuse_report == "verbose":
+                    print("[%s] audit %s -> %s %s" % (model, row["sweep_id"], row["status"], row["reason"]), flush=True)
+                continue
+            if args.reuse_report == "verbose":
+                print("[%s] not reusable %s -> %s %s" % (model, row["sweep_id"], row["status"], row["reason"]), flush=True)
 
         if args.dry_run:
             cmd = build_run_command(args, model, overrides, run_dir)
@@ -773,6 +1060,10 @@ def run_model_jobs(
                 "cmd": build_run_command(args, model, overrides, run_dir),
             }
         )
+
+    if args.check_existing:
+        rows.sort(key=lambda item: item["sweep_id"])
+        return rows, had_failure
 
     if args.dry_run or not pending_jobs:
         rows.sort(key=lambda item: item["sweep_id"])
@@ -797,6 +1088,11 @@ def run_model_jobs(
             job["proc"] = proc
             job["log_file"] = log_file
             running_jobs.append(job)
+            print(
+                "[start %d/%d] [%s] %s"
+                % (pending_idx, total_jobs, model, job["row"]["sweep_id"]),
+                flush=True,
+            )
 
         still_running: list[dict[str, Any]] = []
         for job in running_jobs:
@@ -859,9 +1155,10 @@ def save_1d_profile_plot(
     eps: float,
 ) -> None:
     groups: dict[Any, list[float]] = {}
+    metric = selection_metric_for_rows(rows)
     for row in rows:
         key = row[parameter.name]
-        groups.setdefault(key, []).append(float(row["test_absL2h"]))
+        groups.setdefault(key, []).append(selection_score(row, metric))
     x_values = sorted(groups.keys(), key=float)
     best_values = [min(groups[key]) for key in x_values]
     mean_values = [float(np.mean(groups[key])) for key in x_values]
@@ -874,7 +1171,7 @@ def save_1d_profile_plot(
     set_axis_scale(ax, "x", parameter, x_values)
     ax.set_yscale("log")
     ax.set_xlabel(parameter.label)
-    ax.set_ylabel("test absL2h")
+    ax.set_ylabel(metric)
     ax.set_title(f"{model}: {parameter.label} profile")
     ax.grid(True, which="both", linestyle="--", alpha=0.35)
     ax.legend()
@@ -894,10 +1191,11 @@ def build_pair_projection(
     matrix = np.full((len(y_values), len(x_values)), np.nan, dtype=np.float64)
     x_to_idx = {value: idx for idx, value in enumerate(x_values)}
     y_to_idx = {value: idx for idx, value in enumerate(y_values)}
+    metric = selection_metric_for_rows(rows)
     for row in rows:
         xi = x_to_idx[row[x_name]]
         yi = y_to_idx[row[y_name]]
-        score = float(row["test_absL2h"])
+        score = selection_score(row, metric)
         current = matrix[yi, xi]
         if np.isnan(current) or score < current:
             matrix[yi, xi] = score
@@ -935,7 +1233,7 @@ def save_pair_heatmap(
     ax.set_ylabel(y_spec.label)
     ax.set_title(f"{model}: min projected error")
     cbar = fig.colorbar(image, ax=ax)
-    cbar.set_label("test absL2h")
+    cbar.set_label(selection_metric_for_rows(rows))
 
     for yi in range(matrix.shape[0]):
         for xi in range(matrix.shape[1]):
@@ -960,15 +1258,16 @@ def save_combined_single_param_plot(
     fig, ax = plt.subplots(figsize=(6.8, 4.4))
     for model, rows in model_rows.items():
         groups: dict[Any, list[float]] = {}
+        metric = selection_metric_for_rows(rows)
         for row in rows:
-            groups.setdefault(row[parameter.name], []).append(float(row["test_absL2h"]))
+            groups.setdefault(row[parameter.name], []).append(selection_score(row, metric))
         x_values = sorted(groups.keys(), key=float)
         y_values = [clip_for_log(min(groups[key]), eps) for key in x_values]
         ax.plot(x_values, y_values, marker="o", linewidth=1.6, label=model)
     set_axis_scale(ax, "x", parameter, [row[parameter.name] for rows in model_rows.values() for row in rows])
     ax.set_yscale("log")
     ax.set_xlabel(parameter.label)
-    ax.set_ylabel("test absL2h")
+    ax.set_ylabel("selection absL2h")
     ax.set_title(f"Model 1/2/3: {parameter.label} profile")
     ax.grid(True, which="both", linestyle="--", alpha=0.35)
     ax.legend()
@@ -983,7 +1282,17 @@ def numeric_values_equal(left: Any, right: Any) -> bool:
 
 
 def best_error_row(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    return min(rows, key=lambda row: float(row["test_absL2h"]))
+    metric = "val_absL2h" if any(row.get("val_absL2h") is not None for row in rows) else "test_absL2h"
+    return min(rows, key=lambda row: float(row[metric]))
+
+
+def selection_metric_for_rows(rows: list[dict[str, Any]]) -> str:
+    return "val_absL2h" if any(row.get("val_absL2h") is not None for row in rows) else "test_absL2h"
+
+
+def selection_score(row: dict[str, Any], metric: str | None = None) -> float:
+    key = metric or ("val_absL2h" if row.get("val_absL2h") is not None else "test_absL2h")
+    return float(row[key])
 
 
 def all_model_profile_series(
@@ -992,8 +1301,9 @@ def all_model_profile_series(
     eps: float,
 ) -> tuple[list[Any], list[float]]:
     groups: dict[Any, list[float]] = {}
+    metric = selection_metric_for_rows(rows)
     for row in rows:
-        groups.setdefault(row[parameter_name], []).append(float(row["test_absL2h"]))
+        groups.setdefault(row[parameter_name], []).append(selection_score(row, metric))
     x_values = sorted(groups.keys(), key=float)
     y_values = [clip_for_log(min(groups[x_value]), eps) for x_value in x_values]
     return x_values, y_values
@@ -1006,13 +1316,14 @@ def all_model_fixed_slice_series(
     eps: float,
 ) -> tuple[list[Any], list[float]]:
     groups: dict[Any, list[float]] = {}
+    metric = selection_metric_for_rows(rows)
     for row in rows:
         if all(
             numeric_values_equal(row[name], value)
             for name, value in fixed_values.items()
             if name != parameter_name
         ):
-            groups.setdefault(row[parameter_name], []).append(float(row["test_absL2h"]))
+            groups.setdefault(row[parameter_name], []).append(selection_score(row, metric))
     x_values = sorted(groups.keys(), key=float)
     y_values = [clip_for_log(min(groups[x_value]), eps) for x_value in x_values]
     return x_values, y_values
@@ -1092,7 +1403,7 @@ def save_all_model_param_comparison_plots(
     model_best_rows = {model: best_error_row(rows) for model, rows in ok_by_model.items()}
     common_best_model, common_best_row = min(
         model_best_rows.items(),
-        key=lambda item: float(item[1]["test_absL2h"]),
+        key=lambda item: selection_score(item[1]),
     )
     common_fixed_values = {name: common_best_row[name] for name in sweep_names}
 
@@ -1100,7 +1411,8 @@ def save_all_model_param_comparison_plots(
         "profile_optimized": {
             "description": (
                 "For each plotted parameter value and model, all other swept parameters "
-                "are optimized by taking the minimum test_absL2h over their grid values."
+                "are optimized by taking the minimum validation metric over their grid values "
+                "when validation metrics are available."
             )
         },
         "slice_model_best_fixed": {
@@ -1120,6 +1432,7 @@ def save_all_model_param_comparison_plots(
             ),
             "source_model": common_best_model,
             "source_test_absL2h": common_best_row["test_absL2h"],
+            "source_val_absL2h": common_best_row.get("val_absL2h"),
             "fixed_values": common_fixed_values,
         },
     }
@@ -1173,11 +1486,13 @@ def save_best_runs(
     best_k: int,
 ) -> None:
     ok_rows = [row for row in rows if row["status"] == "ok"]
-    ok_rows.sort(key=lambda row: float(row["test_absL2h"]))
+    metric = "val_absL2h" if any(row.get("val_absL2h") is not None for row in ok_rows) else "test_absL2h"
+    ok_rows.sort(key=lambda row: float(row[metric]))
     trimmed = ok_rows[:best_k]
     fieldnames = [
         "model",
         "test_absL2h",
+        "val_absL2h",
         "train_absL2h",
         "test_relL2",
         "train_relL2",
@@ -1187,6 +1502,87 @@ def save_best_runs(
     ]
     write_csv(out_path.with_suffix(".csv"), trimmed, dedupe_fieldnames(fieldnames))
     out_path.with_suffix(".json").write_text(json.dumps(trimmed, indent=2), encoding="utf-8")
+
+
+def write_audit_outputs(model_dir: Path, rows: list[dict[str, Any]]) -> tuple[Path, Path]:
+    fieldnames = dedupe_fieldnames(
+        [
+            "model",
+            "sweep_id",
+            "run_dir",
+            "status",
+            "reason",
+            "test_absL2h",
+            "val_absL2h",
+            "train_absL2h",
+            "test_relL2_mean",
+            "test_relL2_agg",
+            "val_relL2_mean",
+            "val_relL2_agg",
+            "expected_alpha",
+            "found_alpha",
+            "expected_T",
+            "found_T",
+            "expected_Ttilde",
+            "found_Ttilde",
+            "expected_dt",
+            "found_dt",
+            "expected_K",
+            "found_K",
+            "expected_obs",
+            "found_obs",
+            "expected_J",
+            "found_J",
+            "expected_reservoir",
+            "found_reservoir",
+            "expected_ridge_zeta",
+            "found_ridge_zeta",
+            "expected_ridge_convention",
+            "found_ridge_convention",
+            "expected_data_file",
+            "found_data_file",
+            "expected_data_sha256",
+            "found_data_sha256",
+            "expected_config_hash",
+            "found_config_hash",
+            "has_run_config",
+            "has_val_metrics",
+            "has_test_metrics",
+            "has_defect_metrics",
+        ]
+    )
+    csv_path = model_dir / "existing_audit.csv"
+    json_path = model_dir / "existing_audit.json"
+    write_csv(csv_path, rows, fieldnames)
+    json_path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+    return csv_path, json_path
+
+
+def print_reuse_summary(model: str, rows: list[dict[str, Any]], csv_path: Path | None = None, json_path: Path | None = None) -> None:
+    counts: dict[str, int] = {}
+    for row in rows:
+        counts[row.get("status", "unknown")] = counts.get(row.get("status", "unknown"), 0) + 1
+    ok_rows = [row for row in rows if row.get("status") == "ok"]
+    missing_new = len([row for row in rows if row.get("status") in {"missing", "pending"}])
+    parts = [
+        f"[{model}] reuse audit summary:",
+        f"reused={counts.get('ok', 0)}",
+        f"missing/new={missing_new}",
+        f"invalid_json={counts.get('invalid_json', 0)}",
+        f"config_mismatch={counts.get('config_mismatch', 0)}",
+        f"missing_metric={counts.get('missing_metric', 0)}",
+        f"missing_defect={counts.get('missing_defect', 0)}",
+    ]
+    if ok_rows:
+        best = best_error_row(ok_rows)
+        parts.append(f"best reused setting={best.get('sweep_id')}")
+        parts.append(f"best reused val_absL2h={best.get('val_absL2h')}")
+        parts.append(f"best reused test_absL2h={best.get('test_absL2h')}")
+    if csv_path is not None:
+        parts.append(f"audit_csv={csv_path}")
+    if json_path is not None:
+        parts.append(f"audit_json={json_path}")
+    print(" ".join(parts), flush=True)
 
 
 def save_visualizations(
@@ -1234,6 +1630,20 @@ def save_visualizations(
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    _apply_config_defaults(parser, args)
+    if not hasattr(args, "_config_applied"):
+        args._config_applied = {}
+    if args.data_seed is None:
+        args.data_seed = args.seed
+    if args.split_seed is None:
+        args.split_seed = args.seed
+    if args.ridge_zeta is None and args.ridge_lambda is None:
+        args.ridge_zeta = 1e-4
+        args.ridge_lambda = 1e-4
+    elif args.ridge_zeta is None:
+        args.ridge_zeta = float(args.ridge_lambda)
+    elif args.ridge_lambda is None:
+        args.ridge_lambda = float(args.ridge_zeta)
     models, sweep_specs = validate_args(args)
 
     out_root = Path(args.out_root)
@@ -1259,6 +1669,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         had_failure = had_failure or model_failed
         model_rows[model] = rows
+        audit_csv = audit_json = None
+        if args.skip_existing or args.check_existing:
+            audit_csv, audit_json = write_audit_outputs(model_dir, rows)
+            if args.reuse_report == "summary":
+                print_reuse_summary(model, rows, audit_csv, audit_json)
 
         fieldnames = [
             "model",
@@ -1267,10 +1682,19 @@ def main(argv: list[str] | None = None) -> int:
             "status",
             "return_code",
             "train_absL2h",
+            "val_absL2h",
             "test_absL2h",
             "test_absL2h_plot",
             "train_relL2",
+            "val_relL2",
             "test_relL2",
+            "train_relL2_mean",
+            "val_relL2_mean",
+            "test_relL2_mean",
+            "train_relL2_agg",
+            "val_relL2_agg",
+            "test_relL2_agg",
+            "selection_metric",
             "test_relL2_plot",
             "T",
             "Ttilde",
@@ -1370,6 +1794,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.dry_run:
         return 0
+    if args.check_existing:
+        bad_status = {"missing", "config_mismatch", "missing_defect", "missing_metric", "invalid_json", "failed_run"}
+        return 2 if any(row.get("status") in bad_status for rows in model_rows.values() for row in rows) else 0
     return 1 if had_failure else 0
 
 

@@ -6,6 +6,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import torch
 
 from .burgers_spectral_1d import simulate_burgers_split_step
+from .spectral_etdrk4_1d import simulate_burgers_etdrk4_trajectory
 
 
 KeyType = Tuple[int, str, str]
@@ -26,6 +27,8 @@ class ReservoirConfig:
     burgers_scheme: str = "semi_implicit"
     burgers_fine_dt: float = 0.0
     burgers_dealias: bool = False
+    heat_nu: float = 1e-2
+    advection_c: float = 1.0
 
 
 class Reservoir1DSolver:
@@ -153,7 +156,7 @@ class Reservoir1DSolver:
             raise ValueError("obs_steps must be >= 1")
 
         if self.config.reservoir == "burgers":
-            if self.config.burgers_scheme not in {"semi_implicit", "split_step"}:
+            if self.config.burgers_scheme not in {"semi_implicit", "split_step", "etdrk4"}:
                 raise ValueError(
                     f"Unsupported burgers_scheme: {self.config.burgers_scheme}"
                 )
@@ -172,6 +175,32 @@ class Reservoir1DSolver:
                     forcing_steps=forcing_steps,
                     dealias=self.config.burgers_dealias,
                 )
+            if self.config.burgers_scheme == "etdrk4":
+                return simulate_burgers_etdrk4_trajectory(
+                    z0,
+                    nu=self.config.res_burgers_nu,
+                    b=self.config.res_burgers_b,
+                    T=float(obs_sorted[-1]) * float(dt),
+                    dt=dt,
+                    obs_steps=obs_sorted,
+                    dealias=self.config.burgers_dealias,
+                )
+
+        if self.config.reservoir in {"static", "heat", "advection"}:
+            s = z0.shape[-1]
+            k = self._wavenumbers(s, z0.device, z0.dtype)
+            z0_hat = torch.fft.rfft(z0, dim=-1)
+            observed = []
+            for step in obs_sorted:
+                t = float(step) * float(dt)
+                if self.config.reservoir == "static":
+                    multiplier = torch.ones_like(k, dtype=z0_hat.dtype)
+                elif self.config.reservoir == "heat":
+                    multiplier = torch.exp(-float(self.config.heat_nu) * k.pow(2) * t).to(z0_hat.dtype)
+                else:
+                    multiplier = torch.exp((-1j * float(self.config.advection_c) * k * t).to(torch.complex128)).to(z0_hat.dtype)
+                observed.append(torch.fft.irfft(z0_hat * multiplier, n=s, dim=-1))
+            return observed
 
         z = z0
         s = z.shape[-1]

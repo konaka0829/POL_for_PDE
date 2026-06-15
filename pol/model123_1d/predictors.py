@@ -44,6 +44,8 @@ class Model123Config:
     input_scale: float = 1.0
     input_shift: float = 0.0
     ridge_lambda: float = 1e-4
+    ridge_zeta: float = 1e-4
+    ridge_convention: str = "normalized_empirical_l2h_unweighted_frobenius"
     ridge_dtype: torch.dtype = torch.float64
     standardize_features: bool = False
     feature_std_eps: float = 1e-6
@@ -64,8 +66,11 @@ class Model123Config:
     burgers_scheme: str = "split_step"
     burgers_fine_dt: float = 1e-4
     burgers_dealias: bool = True
+    heat_nu: float = 1e-2
+    advection_c: float = 1.0
     device: str | torch.device = "cpu"
     dtype: torch.dtype = torch.float32
+    domain_length: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -116,6 +121,8 @@ class ObservedTrajectoryFeature1D:
                 burgers_scheme=config.burgers_scheme,
                 burgers_fine_dt=config.burgers_fine_dt,
                 burgers_dealias=config.burgers_dealias,
+                heat_nu=config.heat_nu,
+                advection_c=config.advection_c,
             )
         )
 
@@ -234,6 +241,9 @@ class Model2Regressor1D:
                 self.config.ridge_lambda,
                 dtype=self.config.ridge_dtype,
                 regularize_bias=False,
+                ridge_zeta=self.config.ridge_zeta,
+                dx=float(self.config.domain_length) / float(self.s),
+                convention=self.config.ridge_convention,
                 eps=self.config.feature_std_eps,
                 progress_fn=progress_fn,
             )
@@ -244,6 +254,9 @@ class Model2Regressor1D:
                 self.config.ridge_lambda,
                 dtype=self.config.ridge_dtype,
                 regularize_bias=False,
+                ridge_zeta=self.config.ridge_zeta,
+                dx=float(self.config.domain_length) / float(self.s),
+                convention=self.config.ridge_convention,
                 progress_fn=progress_fn,
             )
         if progress_label:
@@ -326,6 +339,9 @@ class Model3Regressor1D:
                 self.config.ridge_lambda,
                 dtype=self.config.ridge_dtype,
                 regularize_bias=False,
+                ridge_zeta=self.config.ridge_zeta,
+                dx=float(self.config.domain_length) / float(self.s),
+                convention=self.config.ridge_convention,
                 eps=self.config.feature_std_eps,
                 progress_fn=progress_fn,
             )
@@ -336,6 +352,9 @@ class Model3Regressor1D:
                 self.config.ridge_lambda,
                 dtype=self.config.ridge_dtype,
                 regularize_bias=False,
+                ridge_zeta=self.config.ridge_zeta,
+                dx=float(self.config.domain_length) / float(self.s),
+                convention=self.config.ridge_convention,
                 progress_fn=progress_fn,
             )
         if progress_label:
