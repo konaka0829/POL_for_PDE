@@ -20,6 +20,14 @@ def test_dataset_abs_l2h_error_matches_manual_value():
     assert abs(dataset_abs_l2h_error(pred, target) - expected) < 1e-12
 
 
+def test_abs_l2h_scales_with_domain_length():
+    pred = torch.ones(3, 64, dtype=torch.float64)
+    target = torch.zeros_like(pred)
+    err_l1 = dataset_abs_l2h_error(pred, target, domain_length=1.0)
+    err_l2 = dataset_abs_l2h_error(pred, target, domain_length=2.0)
+    assert abs(err_l2 - math.sqrt(2.0) * err_l1) < 1e-12
+
+
 def test_dataset_rel_l2h_mean_matches_manual_value():
     pred = torch.tensor([[2.0, 1.0], [3.0, 5.0]], dtype=torch.float64)
     target = torch.tensor([[1.0, 1.0], [1.0, 1.0]], dtype=torch.float64)

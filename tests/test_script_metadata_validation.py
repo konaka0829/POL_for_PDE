@@ -7,7 +7,7 @@ from scripts.run_headroom_burgers import main as headroom_main
 from scripts.run_zeta_path import main as zeta_main
 
 
-def _write_dataset(path, *, ic_type="fourier"):
+def _write_dataset(path, *, ic_type="fourier", domain_length=1.0):
     nx = 8
     torch.save(
         {
@@ -23,7 +23,7 @@ def _write_dataset(path, *, ic_type="fourier"):
                 "target_nu": 0.01,
                 "nx": nx,
                 "ic_type": ic_type,
-                "domain_length": 1.0,
+                "domain_length": domain_length,
             },
         },
         path,
@@ -84,3 +84,40 @@ def test_headroom_detects_ic_type_mismatch(tmp_path):
     ]
     with pytest.raises(ValueError, match="ic_type"):
         headroom_main(argv)
+
+
+def test_headroom_records_domain_length_dx(tmp_path):
+    data = tmp_path / "data_l2.pt"
+    _write_dataset(data, domain_length=2.0)
+    out_dir = tmp_path / "headroom_l2"
+    assert (
+        headroom_main(
+            [
+                "--data-file",
+                str(data),
+                "--out-dir",
+                str(out_dir),
+                "--ntrain",
+                "2",
+                "--nval",
+                "1",
+                "--ntest",
+                "1",
+                "--T",
+                "0.1",
+                "--dt",
+                "0.01",
+                "--target-nu",
+                "0.01",
+                "--zeta-grid",
+                "1e-8",
+            ]
+        )
+        == 0
+    )
+    summary = json.loads((out_dir / "headroom_summary.json").read_text(encoding="utf-8"))
+    run_config = json.loads((out_dir / "run_config.json").read_text(encoding="utf-8"))
+    assert summary["domain_length"] == 2.0
+    assert summary["dx"] == 2.0 / summary["effective_nx"]
+    assert run_config["grid"]["domain_length"] == 2.0
+    assert run_config["grid"]["dx"] == 2.0 / run_config["grid"]["effective_nx"]

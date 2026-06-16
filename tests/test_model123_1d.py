@@ -157,6 +157,62 @@ def test_model2_progress_output(capsys):
     assert "[model2 train] ridge solve done" in captured.out
 
 
+def test_model123_cli_records_domain_length_dx_and_legacy_lambda(tmp_path):
+    nx = 8
+    data_file = tmp_path / "split_l2.pt"
+    torch.save(
+        {
+            "u0_train": torch.zeros(2, nx),
+            "y_train": torch.zeros(2, nx),
+            "u0_val": torch.zeros(1, nx),
+            "y_val": torch.zeros(1, nx),
+            "u0_test": torch.zeros(1, nx),
+            "y_test": torch.zeros(1, nx),
+            "metadata": {"T": 0.1, "dt": 0.01, "target_nu": 0.01, "nx": nx, "domain_length": 2.0},
+        },
+        data_file,
+    )
+    out_dir = tmp_path / "cli_l2"
+    cmd = [
+        sys.executable,
+        "model123_burgers_1d.py",
+        "--model",
+        "model2",
+        "--reservoir",
+        "static",
+        "--data-file",
+        str(data_file),
+        "--ntrain",
+        "2",
+        "--nval",
+        "1",
+        "--ntest",
+        "1",
+        "--batch-size",
+        "2",
+        "--T",
+        "0.1",
+        "--dt",
+        "0.01",
+        "--target-nu",
+        "0.01",
+        "--ridge-zeta",
+        "1e-6",
+        "--out-dir",
+        str(out_dir),
+        "--device",
+        "cpu",
+    ]
+    proc = run_cli(cmd, cwd=REPO_ROOT)
+    assert proc.returncode == 0, proc.stdout + "\n" + proc.stderr
+    payload = json.loads((out_dir / "run_config.json").read_text(encoding="utf-8"))
+    assert payload["domain_length"] == 2.0
+    assert payload["grid"]["dx"] == 2.0 / nx
+    assert payload["metrics"]["dx"] == 2.0 / nx
+    assert payload["readout"]["dx"] == 2.0 / nx
+    assert payload["effective_code_lambda_legacy_equivalent"] == pytest.approx(2 * 1e-6 / (2.0 / nx))
+
+
 @pytest.mark.slow
 def test_model123_cli_smoke(tmp_path):
     x, y = make_data(num_samples=8, s=64)

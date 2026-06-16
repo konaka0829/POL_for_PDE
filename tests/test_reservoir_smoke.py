@@ -186,6 +186,40 @@ def test_burgers_scheme_coexistence():
     assert torch.isfinite(torch.stack(states_split, dim=0)).all()
 
 
+def test_reservoir_wavenumbers_scale_with_domain_length():
+    solver_l1 = Reservoir1DSolver(ReservoirConfig(domain_length=1.0))
+    solver_l2 = Reservoir1DSolver(ReservoirConfig(domain_length=2.0))
+    k1 = solver_l1._wavenumbers(16, torch.device("cpu"), torch.float64)
+    k2 = solver_l2._wavenumbers(16, torch.device("cpu"), torch.float64)
+    assert torch.allclose(k2, 0.5 * k1)
+
+
+def test_heat_surrogate_single_mode_uses_domain_length():
+    s = 64
+    domain_length = 2.0
+    nu = 0.1
+    t = 0.2
+    x = torch.arange(s, dtype=torch.float64) * (domain_length / s)
+    z0 = torch.sin(2.0 * torch.pi * x / domain_length).unsqueeze(0)
+    solver = Reservoir1DSolver(ReservoirConfig(reservoir="heat", heat_nu=nu, domain_length=domain_length))
+    out = solver.simulate(z0, dt=t, Tr=t, obs_steps=[1])[0]
+    expected_amp = torch.exp(torch.tensor(-nu * (2.0 * torch.pi / domain_length) ** 2 * t, dtype=torch.float64))
+    assert torch.allclose(out, expected_amp * z0, atol=1e-8, rtol=1e-8)
+
+
+def test_advection_surrogate_single_mode_uses_domain_length():
+    s = 64
+    domain_length = 2.0
+    c = 0.25
+    t = 0.2
+    x = torch.arange(s, dtype=torch.float64) * (domain_length / s)
+    z0 = torch.sin(2.0 * torch.pi * x / domain_length).unsqueeze(0)
+    solver = Reservoir1DSolver(ReservoirConfig(reservoir="advection", advection_c=c, domain_length=domain_length))
+    out = solver.simulate(z0, dt=t, Tr=t, obs_steps=[1])[0]
+    expected = torch.sin(2.0 * torch.pi * (x - c * t) / domain_length).unsqueeze(0)
+    assert torch.allclose(out, expected, atol=1e-8, rtol=1e-8)
+
+
 @pytest.mark.slow
 def test_dataset_generator_smoke(tmp_path):
     out_file = tmp_path / "burgers_small.mat"

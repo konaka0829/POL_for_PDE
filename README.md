@@ -101,8 +101,11 @@ warning and validation result are written to `run_config.json`.
 For spatial subsampling, metadata `nx` means the raw dataset resolution before
 `--sub`. The model uses `effective_nx = dataset_nx / sub` after subsampling.
 `run_config.json` records `grid.dataset_nx`, `grid.raw_nx`,
-`grid.effective_nx`, and `grid.sub`; metadata validation compares `nx` against
-the raw dataset resolution, not the effective model resolution.
+`grid.effective_nx`, `grid.sub`, `grid.domain_length`, and `grid.dx`;
+metadata validation compares `nx` against the raw dataset resolution, not the
+effective model resolution. The spatial convention is
+`dx = domain_length / effective_nx` for discrete L2h quantities and
+`kappa_k = 2*pi*k/domain_length` for Fourier pseudo-spectral derivatives.
 
 Generate a MATLAB file compatible with `model123_burgers_1d.py`:
 
@@ -117,6 +120,8 @@ so `.mat` string metadata is not cast to float. For `.pt` output, the saved
 bundle contains exactly the requested train/validation/test split plus
 normalized metadata when available. Burgers split-step and ETDRK4 solvers use
 `domain_length` in the Fourier wavenumbers; B0/B1 use `domain_length=1.0`.
+The same Fourier convention is used by surrogate reservoir families, including
+heat, advection, Burgers, reaction-diffusion, and KS reservoirs.
 
 ## Running Model123
 
@@ -129,13 +134,18 @@ python model123_burgers_1d.py --model model3 --data-file data/burgers_model123.m
 Runs write `run_config.json` with `main_metric = "abs_l2h"`, `train_absL2h`, `test_absL2h`, `train_relL2`, and `test_relL2`.
 Current runs also include `val_absL2h` when `--nval > 0`,
 `relL2_mean`/`relL2_agg`, split hashes, metadata validation results, config
-hashes, git/runtime metadata, command line, and dtype information. Use
+hashes, git/runtime metadata, command line, and dtype information. Absolute
+L2h metrics, ridge diagnostics, zeta-path objectives, learning-curve metrics,
+and headroom diagnostics all use `dx = domain_length/effective_nx`. Ridge
+metadata records the legacy equivalent parameter as `N*zeta/dx`, not
+`N*zeta*effective_nx` unless `domain_length=1`. Use
 `--data-dtype {preserve,float32,float64}`, `--sim-dtype {float32,float64}`,
 and `--ridge-dtype {float32,float64}` to control data tensors, simulation
 features, and ridge solves separately.
 `--sim-dtype float64` is used by the surrogate feature generation in the main
 runner, zeta-path, and learning-curve scripts; the feature cache key includes
-the simulation dtype, so float32 and float64 cached features do not collide.
+the simulation dtype, `domain_length`, `effective_nx`, `dx`, and `sub`, so
+float32/float64 and L=1/L!=1 cached features do not collide.
 The Model123 runner and feature extraction require `Ttilde`, `Tr`, and any
 explicit `--feature-times` to lie on the `dt` grid. Non-grid values such as
 `--Ttilde 0.055 --dt 0.01` raise `ValueError` instead of silently rounding.
@@ -240,6 +250,10 @@ Defect diagnostics resolve target viscosity in this order:
 `target_nu` or `nu`, then a warning fallback of `0.05`. Both
 `time_scaled_defect_metrics.json` and `run_config.json` record
 `target_nu_source`.
+When target and surrogate coefficients match exactly, integrated defect values
+can be identically zero. Alpha-parameter defect plots fall back to a linear
+y-axis for all-zero/non-positive finite values to avoid log-scale warnings;
+positive finite values keep the previous log-scale behavior.
 
 Both `run_model123_param_sweep.py` and
 `run_model123_alpha_param_defect_study.py` support strict existing-result
@@ -278,7 +292,8 @@ python scripts/run_zeta_path.py \
 ```
 
 The best zeta is selected by `val_absL2h`; cache metadata includes dataset,
-split, surrogate, observation, feature shape, and feature hash information.
+split, surrogate, observation, feature shape, feature hash, `domain_length`,
+`effective_nx`, `dx`, and `sub` information.
 On cache hits the script reads `metadata.json` back into `run_config.json`,
 including feature paths and dtype. zeta-path, learning-curve, and headroom use
 the same dataset loading and metadata validation policy as the main runner.

@@ -123,6 +123,7 @@ class ObservedTrajectoryFeature1D:
                 burgers_dealias=config.burgers_dealias,
                 heat_nu=config.heat_nu,
                 advection_c=config.advection_c,
+                domain_length=config.domain_length,
             )
         )
 

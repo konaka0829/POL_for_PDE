@@ -9,7 +9,7 @@ from .burgers_spectral_1d import simulate_burgers_split_step
 from .spectral_etdrk4_1d import simulate_burgers_etdrk4_trajectory
 
 
-KeyType = Tuple[int, str, str]
+KeyType = Tuple[int, str, str, float]
 
 
 @dataclass
@@ -29,23 +29,26 @@ class ReservoirConfig:
     burgers_dealias: bool = False
     heat_nu: float = 1e-2
     advection_c: float = 1.0
+    domain_length: float = 1.0
 
 
 class Reservoir1DSolver:
     """1D periodic reservoir PDE solver with spectral derivatives."""
 
     def __init__(self, config: ReservoirConfig):
+        if config.domain_length <= 0.0:
+            raise ValueError("domain_length must be positive")
         self.config = config
         self._k_cache: Dict[KeyType, torch.Tensor] = {}
         self._mask_cache: Dict[KeyType, torch.Tensor] = {}
 
     def _cache_key(self, s: int, device: torch.device, dtype: torch.dtype) -> KeyType:
-        return (s, str(device), str(dtype))
+        return (s, str(device), str(dtype), float(self.config.domain_length))
 
     def _wavenumbers(self, s: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         key = self._cache_key(s, device, dtype)
         if key not in self._k_cache:
-            dx = 1.0 / float(s)
+            dx = float(self.config.domain_length) / float(s)
             k = 2.0 * torch.pi * torch.fft.rfftfreq(s, d=dx, device=device)
             self._k_cache[key] = k.to(dtype=dtype)
         return self._k_cache[key]
@@ -174,6 +177,7 @@ class Reservoir1DSolver:
                     forcing=forcing,
                     forcing_steps=forcing_steps,
                     dealias=self.config.burgers_dealias,
+                    domain_length=self.config.domain_length,
                 )
             if self.config.burgers_scheme == "etdrk4":
                 return simulate_burgers_etdrk4_trajectory(
@@ -184,6 +188,7 @@ class Reservoir1DSolver:
                     dt=dt,
                     obs_steps=obs_sorted,
                     dealias=self.config.burgers_dealias,
+                    domain_length=self.config.domain_length,
                 )
 
         if self.config.reservoir in {"static", "heat", "advection"}:

@@ -32,6 +32,7 @@ class ErrorDecompositionConfig:
     seed: int = 0
     batch_size: int = 8
     target_nu: float = 0.05
+    domain_length: float = 1.0
     T: float = 1.0
     Ttilde_values: list[float] | tuple[float, ...] = (1.0,)
     dt: float = 1e-2
@@ -96,6 +97,8 @@ def _validate_config(cfg: ErrorDecompositionConfig) -> None:
         raise ValueError("batch_size must be positive")
     if cfg.target_nu < 0.0:
         raise ValueError("target_nu must be non-negative")
+    if cfg.domain_length <= 0.0:
+        raise ValueError("domain_length must be positive")
     if cfg.T <= 0.0:
         raise ValueError("T must be positive")
     if cfg.dt <= 0.0:
@@ -174,6 +177,7 @@ def _simulate_target_trajectory(u0: torch.Tensor, cfg: ErrorDecompositionConfig)
             forcing=None,
             forcing_steps=None,
             dealias=False,
+            domain_length=cfg.domain_length,
         )
         for idx, state in enumerate(states):
             states_per_step[idx].append(state.detach().cpu())
@@ -191,6 +195,7 @@ def _make_surrogate_solver(cfg: ErrorDecompositionConfig) -> Reservoir1DSolver:
                 burgers_scheme=cfg.burgers_scheme,
                 burgers_fine_dt=cfg.fine_dt,
                 burgers_dealias=cfg.burgers_dealias,
+                domain_length=cfg.domain_length,
             )
         )
     if cfg.reservoir == "reaction_diffusion":
@@ -200,6 +205,7 @@ def _make_surrogate_solver(cfg: ErrorDecompositionConfig) -> Reservoir1DSolver:
                 rd_nu=cfg.rd_nu,
                 rd_alpha=cfg.rd_alpha,
                 rd_beta=cfg.rd_beta,
+                domain_length=cfg.domain_length,
             )
         )
     return Reservoir1DSolver(
@@ -209,6 +215,7 @@ def _make_surrogate_solver(cfg: ErrorDecompositionConfig) -> Reservoir1DSolver:
             ks_eta=cfg.ks_eta,
             ks_kappa=cfg.ks_kappa,
             ks_dealias=cfg.ks_dealias,
+            domain_length=cfg.domain_length,
         )
     )
 
@@ -231,18 +238,18 @@ def _simulate_surrogate_trajectory(u0: torch.Tensor, cfg: ErrorDecompositionConf
     return torch.cat([u0.unsqueeze(0).cpu(), stacked], dim=0)
 
 
-def discrete_l2_h(values: torch.Tensor) -> torch.Tensor:
-    return discrete_l2h_norm(values)
+def discrete_l2_h(values: torch.Tensor, *, domain_length: float = 1.0) -> torch.Tensor:
+    return discrete_l2h_norm(values, domain_length=domain_length)
 
 
-def discrete_inner_h(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    h = 1.0 / float(a.shape[-1])
+def discrete_inner_h(a: torch.Tensor, b: torch.Tensor, *, domain_length: float = 1.0) -> torch.Tensor:
+    h = float(domain_length) / float(a.shape[-1])
     return h * torch.sum(a * b, dim=-1)
 
 
-def spectral_derivatives_1d(z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def spectral_derivatives_1d(z: torch.Tensor, *, domain_length: float = 1.0) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     s = z.shape[-1]
-    k = make_wavenumbers(s, z.device, z.dtype)
+    k = make_wavenumbers(s, z.device, z.dtype, domain_length=domain_length)
     z_hat = torch.fft.rfft(z, dim=-1)
     ux = torch.fft.irfft((1j * k) * z_hat, n=s, dim=-1)
     uxx = torch.fft.irfft(-(k.pow(2)) * z_hat, n=s, dim=-1)
@@ -250,8 +257,8 @@ def spectral_derivatives_1d(z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor
     return ux, uxx, uxxxx
 
 
-def burgers_generator(z: torch.Tensor, *, nu: float) -> torch.Tensor:
-    ux, uxx, _ = spectral_derivatives_1d(z)
+def burgers_generator(z: torch.Tensor, *, nu: float, domain_length: float = 1.0) -> torch.Tensor:
+    ux, uxx, _ = spectral_derivatives_1d(z, domain_length=domain_length)
     return nu * uxx - z * ux
 
 
@@ -262,8 +269,9 @@ def scaled_defect_burgers_reservoir(
     target_nu: float,
     res_burgers_nu: float,
     res_burgers_b: float,
+    domain_length: float = 1.0,
 ) -> torch.Tensor:
-    ux, uxx, _ = spectral_derivatives_1d(z)
+    ux, uxx, _ = spectral_derivatives_1d(z, domain_length=domain_length)
     return (target_nu - alpha * res_burgers_nu) * uxx + (alpha * res_burgers_b - 1.0) * z * ux
 
 
@@ -275,8 +283,9 @@ def scaled_defect_reaction_diffusion_reservoir(
     rd_nu: float,
     rd_alpha: float,
     rd_beta: float,
+    domain_length: float = 1.0,
 ) -> torch.Tensor:
-    ux, uxx, _ = spectral_derivatives_1d(z)
+    ux, uxx, _ = spectral_derivatives_1d(z, domain_length=domain_length)
     return (target_nu - alpha * rd_nu) * uxx - z * ux - alpha * rd_alpha * z + alpha * rd_beta * z.pow(3)
 
 
@@ -288,8 +297,9 @@ def scaled_defect_ks_reservoir(
     ks_b: float,
     ks_eta: float,
     ks_kappa: float,
+    domain_length: float = 1.0,
 ) -> torch.Tensor:
-    ux, uxx, uxxxx = spectral_derivatives_1d(z)
+    ux, uxx, uxxxx = spectral_derivatives_1d(z, domain_length=domain_length)
     return (target_nu + alpha * ks_eta) * uxx + (alpha * ks_b - 1.0) * z * ux + alpha * ks_kappa * uxxxx
 
 
@@ -301,6 +311,7 @@ def scaled_generator_defect(z: torch.Tensor, cfg: ErrorDecompositionConfig, *, a
             target_nu=cfg.target_nu,
             res_burgers_nu=cfg.res_burgers_nu,
             res_burgers_b=cfg.res_burgers_b,
+            domain_length=cfg.domain_length,
         )
     if cfg.reservoir == "reaction_diffusion":
         return scaled_defect_reaction_diffusion_reservoir(
@@ -310,6 +321,7 @@ def scaled_generator_defect(z: torch.Tensor, cfg: ErrorDecompositionConfig, *, a
             rd_nu=cfg.rd_nu,
             rd_alpha=cfg.rd_alpha,
             rd_beta=cfg.rd_beta,
+            domain_length=cfg.domain_length,
         )
     return scaled_defect_ks_reservoir(
         z,
@@ -318,6 +330,7 @@ def scaled_generator_defect(z: torch.Tensor, cfg: ErrorDecompositionConfig, *, a
         ks_b=cfg.ks_b,
         ks_eta=cfg.ks_eta,
         ks_kappa=cfg.ks_kappa,
+        domain_length=cfg.domain_length,
     )
 
 
@@ -327,6 +340,7 @@ def defect_burgers_reservoir(
     target_nu: float,
     res_burgers_nu: float,
     res_burgers_b: float,
+    domain_length: float = 1.0,
 ) -> torch.Tensor:
     return scaled_defect_burgers_reservoir(
         z,
@@ -334,6 +348,7 @@ def defect_burgers_reservoir(
         target_nu=target_nu,
         res_burgers_nu=res_burgers_nu,
         res_burgers_b=res_burgers_b,
+        domain_length=domain_length,
     )
 
 
@@ -344,6 +359,7 @@ def defect_reaction_diffusion_reservoir(
     rd_nu: float,
     rd_alpha: float,
     rd_beta: float,
+    domain_length: float = 1.0,
 ) -> torch.Tensor:
     return scaled_defect_reaction_diffusion_reservoir(
         z,
@@ -352,6 +368,7 @@ def defect_reaction_diffusion_reservoir(
         rd_nu=rd_nu,
         rd_alpha=rd_alpha,
         rd_beta=rd_beta,
+        domain_length=domain_length,
     )
 
 
@@ -362,6 +379,7 @@ def defect_ks_reservoir(
     ks_b: float,
     ks_eta: float,
     ks_kappa: float,
+    domain_length: float = 1.0,
 ) -> torch.Tensor:
     return scaled_defect_ks_reservoir(
         z,
@@ -370,6 +388,7 @@ def defect_ks_reservoir(
         ks_b=ks_b,
         ks_eta=ks_eta,
         ks_kappa=ks_kappa,
+        domain_length=domain_length,
     )
 
 
@@ -468,7 +487,7 @@ def compute_beta(
 
     if cfg.beta_mode in {"analytic_safe", "analytic_safe_poincare"}:
         combined = torch.cat([target_shared, surrogate_shared], dim=1)
-        ux, _, _ = spectral_derivatives_1d(combined.reshape(-1, combined.shape[-1]))
+        ux, _, _ = spectral_derivatives_1d(combined.reshape(-1, combined.shape[-1]), domain_length=cfg.domain_length)
         M_K_hat = float(ux.abs().amax().item())
         beta = 0.5 * M_K_hat
         details["M_K_hat"] = M_K_hat
@@ -478,12 +497,12 @@ def compute_beta(
             if not torch.allclose(target_means, surrogate_means, atol=1e-8, rtol=1e-6):
                 raise ValueError("analytic_safe_poincare requires samplewise means to match")
             beta = beta - cfg.target_nu * (2.0 * math.pi) ** 2
-            details["poincare_shift"] = -cfg.target_nu * (2.0 * math.pi) ** 2
+            details["poincare_shift"] = -cfg.target_nu * (2.0 * math.pi / cfg.domain_length) ** 2
         details["chosen_beta"] = float(beta)
         return float(beta), details
 
     flat = _flatten_state_pool(torch.cat([target_shared, surrogate_shared], dim=1), max_states=cfg.beta_max_states)
-    F = burgers_generator(flat, nu=cfg.target_nu)
+    F = burgers_generator(flat, nu=cfg.target_nu, domain_length=cfg.domain_length)
     pairwise_max = -float("inf")
     pairs_used = 0
     for i in range(flat.shape[0]):
@@ -491,11 +510,11 @@ def compute_beta(
         Fi = F[i : i + 1]
         for j in range(i):
             dz = zi - flat[j : j + 1]
-            denom = float(discrete_inner_h(dz, dz).item())
+            denom = float(discrete_inner_h(dz, dz, domain_length=cfg.domain_length).item())
             if denom <= 1e-14:
                 continue
             dF = Fi - F[j : j + 1]
-            ratio = float(discrete_inner_h(dF, dz).item() / denom)
+            ratio = float(discrete_inner_h(dF, dz, domain_length=cfg.domain_length).item() / denom)
             pairwise_max = max(pairwise_max, ratio)
             pairs_used += 1
     if pairwise_max == -float("inf"):
@@ -684,7 +703,7 @@ def compute_time_scaled_defect_for_dataset(
 
     step_T = int(round(dataset_cfg.T / dataset_cfg.dt))
     defects = scaled_generator_defect(r_alpha, dataset_cfg, alpha=alpha)
-    defect_norms = discrete_l2_h(defects.reshape(-1, defects.shape[-1])).reshape(step_T + 1, -1)
+    defect_norms = discrete_l2_h(defects.reshape(-1, defects.shape[-1]), domain_length=dataset_cfg.domain_length).reshape(step_T + 1, -1)
     weights = make_time_quadrature_weights(step_T, dataset_cfg.dt, dataset_cfg.time_quadrature).to(
         device=defect_norms.device,
         dtype=defect_norms.dtype,
@@ -692,8 +711,8 @@ def compute_time_scaled_defect_for_dataset(
     delta_scale_sq = torch.sum(weights.unsqueeze(1) * defect_norms.pow(2), dim=0)
     delta_scale = torch.sqrt(delta_scale_sq)
 
-    d1 = discrete_l2_h(target_work - surrogate_ttilde)
-    delta_init = discrete_l2_h(u0_work - z0_work)
+    d1 = discrete_l2_h(target_work - surrogate_ttilde, domain_length=dataset_cfg.domain_length)
+    delta_init = discrete_l2_h(u0_work - z0_work, domain_length=dataset_cfg.domain_length)
     cbeta = c_beta_T(beta, dataset_cfg.T)
     exp_beta_t = math.exp(beta * dataset_cfg.T)
     rhs_beta0_pathwise = delta_init + math.sqrt(dataset_cfg.T) * delta_scale
@@ -751,7 +770,7 @@ def _compute_rows_for_ttilde(
     surrogate_ttilde = r_alpha[-1]
 
     defects = scaled_generator_defect(r_alpha, cfg, alpha=alpha)
-    defect_norms = discrete_l2_h(defects.reshape(-1, defects.shape[-1])).reshape(step_T + 1, -1)
+    defect_norms = discrete_l2_h(defects.reshape(-1, defects.shape[-1]), domain_length=cfg.domain_length).reshape(step_T + 1, -1)
     weights = make_time_quadrature_weights(step_T, cfg.dt, cfg.time_quadrature).to(
         device=defect_norms.device,
         dtype=defect_norms.dtype,
@@ -759,7 +778,7 @@ def _compute_rows_for_ttilde(
     delta_scale_sq = torch.sum(weights.unsqueeze(1) * defect_norms.pow(2), dim=0)
     Delta_scale = torch.sqrt(delta_scale_sq)
 
-    D1 = discrete_l2_h(target_T - surrogate_ttilde)
+    D1 = discrete_l2_h(target_T - surrogate_ttilde, domain_length=cfg.domain_length)
     Delta_init = torch.zeros_like(D1)
     cbeta = c_beta_T(beta_value, cfg.T)
     exp_beta_t = math.exp(beta_value * cfg.T)

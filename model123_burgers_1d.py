@@ -386,6 +386,17 @@ def _validate_dataset_metadata(args, metadata, nx_after_sub: int | None = None):
     return result
 
 
+def resolve_domain_length(args, dataset_meta: dict | None = None) -> float:
+    explicit = getattr(args, "expected_domain_length", None)
+    if explicit is not None:
+        return float(explicit)
+    normalized = normalize_dataset_metadata(dataset_meta or {})
+    meta_value = normalized.get("domain_length")
+    if meta_value is not None:
+        return float(meta_value)
+    return 1.0
+
+
 def _cast_data_tensor(tensor: torch.Tensor, data_dtype: str) -> torch.Tensor:
     if data_dtype == "preserve":
         return tensor
@@ -612,7 +623,7 @@ def build_model_config(args):
 
 
 @torch.no_grad()
-def evaluate_model(model, loader, progress_label=None):
+def evaluate_model(model, loader, *, domain_length: float = 1.0, progress_label=None):
     preds = []
     ys = []
     xs = []
@@ -634,9 +645,9 @@ def evaluate_model(model, loader, progress_label=None):
     preds_all = torch.cat(preds)
     ys_all = torch.cat(ys)
     xs_all = torch.cat(xs)
-    abs_l2h = dataset_abs_l2h_rmse(preds_all, ys_all)
-    rel_l2h_mean = dataset_rel_l2h_mean(preds_all, ys_all)
-    rel_l2h_agg = dataset_rel_l2h_aggregate(preds_all, ys_all)
+    abs_l2h = dataset_abs_l2h_rmse(preds_all, ys_all, domain_length=domain_length)
+    rel_l2h_mean = dataset_rel_l2h_mean(preds_all, ys_all, domain_length=domain_length)
+    rel_l2h_agg = dataset_rel_l2h_aggregate(preds_all, ys_all, domain_length=domain_length)
     return abs_l2h, rel_l2h_mean, rel_l2h_agg, preds_all, ys_all, xs_all
 
 
@@ -758,6 +769,7 @@ def compute_and_save_defect_outputs(args, s, x_test_all, y_test_all, per_sample_
         res_burgers_b=args.res_burgers_b,
         burgers_scheme=args.burgers_scheme,
         burgers_dealias=bool(args.burgers_dealias),
+        domain_length=resolve_domain_length(args),
         ks_b=args.ks_b,
         ks_eta=args.ks_eta,
         ks_kappa=args.ks_kappa,
@@ -843,8 +855,11 @@ def main():
 
     stage_start = time.perf_counter()
     x_train, y_train, x_val, y_val, x_test, y_test, split_meta, dataset_meta, metadata_validation = load_data(args)
+    domain_length = resolve_domain_length(args, dataset_meta)
+    args.expected_domain_length = domain_length
     print("[%s] data loaded in %.2fs" % (args.model, time.perf_counter() - stage_start), flush=True)
     s = int(x_train.shape[1])
+    dx = float(domain_length) / float(s)
     train_loader = torch.utils.data.DataLoader(
         torch.utils.data.TensorDataset(x_train, y_train),
         batch_size=args.batch_size,
@@ -887,10 +902,20 @@ def main():
 
     train_eval_label = "%s eval-train" % args.model if args.model in {"model2", "model3"} else None
     test_eval_label = "%s eval-test" % args.model if args.model in {"model2", "model3"} else None
-    train_abs, train_rel_mean, train_rel_agg, _, _, _ = evaluate_model(model, eval_train_loader, progress_label=train_eval_label)
+    train_abs, train_rel_mean, train_rel_agg, _, _, _ = evaluate_model(
+        model,
+        eval_train_loader,
+        domain_length=domain_length,
+        progress_label=train_eval_label,
+    )
     if val_loader is not None:
         val_eval_label = "%s eval-val" % args.model if args.model in {"model2", "model3"} else None
-        val_abs, val_rel_mean, val_rel_agg, _, _, _ = evaluate_model(model, val_loader, progress_label=val_eval_label)
+        val_abs, val_rel_mean, val_rel_agg, _, _, _ = evaluate_model(
+            model,
+            val_loader,
+            domain_length=domain_length,
+            progress_label=val_eval_label,
+        )
     else:
         val_abs = None
         val_rel_mean = None
@@ -898,6 +923,7 @@ def main():
     test_abs, test_rel_mean, test_rel_agg, pred_test, y_test_all, x_test_all = evaluate_model(
         model,
         test_loader,
+        domain_length=domain_length,
         progress_label=test_eval_label,
     )
 
@@ -915,14 +941,17 @@ def main():
         print("val   relL2_mean: %.6f" % val_rel_mean)
     print("test  relL2_mean: %.6f" % test_rel_mean)
 
-    per_sample_abs = per_sample_abs_l2h_error(pred_test, y_test_all)
-    per_sample_rel = per_sample_rel_l2h_error(pred_test, y_test_all)
+    per_sample_abs = per_sample_abs_l2h_error(pred_test, y_test_all, domain_length=domain_length)
+    per_sample_rel = per_sample_rel_l2h_error(pred_test, y_test_all, domain_length=domain_length)
     plot_error_histogram([float(v) for v in per_sample_abs.tolist()], os.path.join(args.out_dir, "test_absL2h_hist"))
     plot_error_histogram([float(v) for v in per_sample_rel.tolist()], os.path.join(args.out_dir, "test_relL2_hist"))
     with open(os.path.join(args.out_dir, "test_error_metrics.json"), "w", encoding="utf-8") as f:
         json.dump(
             {
                 "main_metric": "abs_l2h",
+                "domain_length": domain_length,
+                "effective_nx": int(s),
+                "dx": dx,
                 "test_absL2h": test_abs,
                 "test_relL2": test_rel_mean,
                 "test_relL2_mean": test_rel_mean,
@@ -946,7 +975,7 @@ def main():
             per_sample_rel,
         )
 
-    x_grid = np.linspace(0.0, 1.0, s, endpoint=False)
+    x_grid = np.linspace(0.0, domain_length, s, endpoint=False)
     for idx in [0, min(1, args.ntest - 1), min(2, args.ntest - 1)]:
         plot_1d_prediction(
             x=x_grid,
@@ -979,7 +1008,6 @@ def main():
         print("saved model: %s" % save_path)
 
     with open(os.path.join(args.out_dir, "run_config.json"), "w", encoding="utf-8") as f:
-        domain_length = float(getattr(args, "expected_domain_length", None) or 1.0)
         dataset_nx = split_meta.get("dataset_nx", split_meta.get("raw_nx", int(s) * int(args.sub)))
         effective_nx = split_meta.get("effective_nx", int(s))
         run_payload = {
@@ -1007,10 +1035,19 @@ def main():
                     "ridge_lambda_legacy_input": args.ridge_lambda,
                     "ridge_convention": args.ridge_convention,
                     "ridge_dtype": args.ridge_dtype,
+                    "domain_length": domain_length,
+                    "effective_nx": int(effective_nx),
+                    "dx": dx,
                 },
             },
             "config_overrides": getattr(args, "_config_applied", {}),
             "main_metric": "abs_l2h",
+            "metrics": {
+                "l2h_convention": "dx=sum_weight_with_dx_L_over_effective_nx",
+                "domain_length": domain_length,
+                "effective_nx": int(effective_nx),
+                "dx": dx,
+            },
             "alpha": float(args.Ttilde / args.T),
             "train_absL2h": train_abs,
             "val_absL2h": val_abs,
@@ -1038,6 +1075,9 @@ def main():
                 "ridge_dtype": args.ridge_dtype,
                 "regularize_bias": False,
                 "standardize_features": bool(args.standardize_features),
+                "domain_length": domain_length,
+                "effective_nx": int(effective_nx),
+                "dx": dx,
             },
             "ridge_parameter_name": "zeta",
             "ridge_zeta": float(args.ridge_zeta),
@@ -1054,11 +1094,12 @@ def main():
                 "effective_nx": int(effective_nx),
                 "sub": int(args.sub),
                 "domain_length": domain_length,
+                "dx": dx,
             },
             "nx": int(s),
-            "dx": float(domain_length / s),
+            "dx": dx,
             "num_train_samples": int(args.ntrain),
-            "effective_code_lambda_legacy_equivalent": float(args.ntrain * args.ridge_zeta * s),
+            "effective_code_lambda_legacy_equivalent": float(args.ntrain * args.ridge_zeta / dx),
             "data_file": args.data_file if args.data_mode == "single_split" else args.train_file,
             "data_sha256": file_sha256(args.data_file if args.data_mode == "single_split" else args.train_file),
             "dataset_metadata": normalize_dataset_metadata(dataset_meta),

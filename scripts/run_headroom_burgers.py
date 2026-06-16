@@ -13,7 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from model123_burgers_1d import load_data
+from model123_burgers_1d import load_data, resolve_domain_length
 from pol.metadata import file_sha256, get_command_line, get_git_info, get_runtime_info, normalize_dataset_metadata, to_jsonable
 from pol.model123_1d.readouts import FourierDiagonalReadout, evaluate_readout, target_variance_l2h
 from scripts.run_zeta_path import apply_config_defaults, ensure_metadata_expectation_defaults
@@ -66,6 +66,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.Ttilde <= 0.0:
         args.Ttilde = args.T
     x_train, y_train, x_val, y_val, x_test, y_test, split_meta, dataset_meta, metadata_validation = load_data(args)
+    domain_length = resolve_domain_length(args, dataset_meta)
+    args.expected_domain_length = domain_length
+    effective_nx = int(x_train.shape[1])
+    dx = float(domain_length) / float(effective_nx)
     if x_val.shape[0] <= 0:
         raise ValueError("headroom selection requires --nval > 0")
 
@@ -77,8 +81,8 @@ def main(argv: list[str] | None = None) -> int:
         readout = FourierDiagonalReadout(zeta=zeta).fit(x_train.double(), y_train.double())
         pred_val = readout.predict(x_val.double())
         pred_test = readout.predict(x_test.double())
-        val = evaluate_readout(pred_val, y_val.double())
-        test = evaluate_readout(pred_test, y_test.double())
+        val = evaluate_readout(pred_val, y_val.double(), domain_length=domain_length)
+        test = evaluate_readout(pred_test, y_test.double(), domain_length=domain_length)
         row = {
             "zeta": zeta,
             "val_absL2h": val["absL2h"],
@@ -91,9 +95,14 @@ def main(argv: list[str] | None = None) -> int:
         if best is None or row["val_absL2h"] < best["val_absL2h"]:
             best = row
     best["selected_by_val"] = True
-    sigma2 = target_variance_l2h(y_test.double())
+    sigma2 = target_variance_l2h(y_test.double(), domain_length=domain_length)
     dlin2 = float(best["test_absL2h"]) ** 2
     summary = {
+        "domain_length": domain_length,
+        "effective_nx": effective_nx,
+        "dx": dx,
+        "Dlin2_l2h_convention": "mean squared L2h prediction error with dx=domain_length/effective_nx",
+        "sigma_T2_l2h_convention": "target variance in L2h with dx=domain_length/effective_nx",
         "selection": {
             "selection_metric": "val_absL2h",
             "selected_by": "validation",
@@ -121,8 +130,22 @@ def main(argv: list[str] | None = None) -> int:
         "dataset_metadata": normalize_dataset_metadata(dataset_meta),
         "metadata_validation": metadata_validation,
         "split": split_meta,
+        "grid": {
+            "dataset_nx": int(split_meta.get("dataset_nx", split_meta.get("raw_nx", effective_nx * int(args.sub)))),
+            "raw_nx": int(split_meta.get("raw_nx", split_meta.get("dataset_nx", effective_nx * int(args.sub)))),
+            "effective_nx": effective_nx,
+            "sub": int(args.sub),
+            "domain_length": domain_length,
+            "dx": dx,
+        },
         "selection": summary["selection"],
         "metrics": {**summary, "best_by_val": best},
+        "readout": {
+            "ridge_parameter_name": "zeta",
+            "domain_length": domain_length,
+            "effective_nx": effective_nx,
+            "dx": dx,
+        },
         "dtype": {"data_dtype": args.data_dtype, "sim_dtype": args.sim_dtype, "ridge_dtype": args.ridge_dtype},
     }
     (out_dir / "run_config.json").write_text(json.dumps(to_jsonable(run_config), indent=2), encoding="utf-8")

@@ -22,29 +22,40 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", default="")
     parser.add_argument("--out-dir", "--output-dir", dest="out_dir", default="outputs/solver_checks/etdrk4_smoke")
     parser.add_argument("--nx", type=int, default=64)
+    parser.add_argument("--domain-length", type=float, default=1.0)
     parser.add_argument("--T", type=float, default=0.05)
     parser.add_argument("--nu", type=float, default=0.01)
     args = parser.parse_args(argv)
     if args.config:
         cfg = json.loads(Path(args.config).read_text(encoding="utf-8"))
         args.nx = int(cfg.get("domain", {}).get("nx", args.nx))
+        args.domain_length = float(cfg.get("domain", {}).get("length", args.domain_length))
         args.T = float(cfg.get("target", {}).get("T", args.T))
         args.nu = float(cfg.get("target", {}).get("nu", args.nu))
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    x = torch.linspace(0.0, 1.0, args.nx + 1, dtype=torch.float64)[:-1]
-    u0 = torch.sin(2.0 * torch.pi * x).unsqueeze(0)
-    ref = simulate_burgers_etdrk4(u0, nu=args.nu, T=args.T, dt=args.T / 200.0)
+    x = torch.linspace(0.0, args.domain_length, args.nx + 1, dtype=torch.float64)[:-1]
+    u0 = torch.sin(2.0 * torch.pi * x / args.domain_length).unsqueeze(0)
+    ref = simulate_burgers_etdrk4(u0, nu=args.nu, T=args.T, dt=args.T / 200.0, domain_length=args.domain_length)
     rows = []
     for dt in [args.T / 25.0, args.T / 50.0, args.T / 100.0]:
-        pred = simulate_burgers_etdrk4(u0, nu=args.nu, T=args.T, dt=dt)
-        rows.append({"nx": args.nx, "dt": dt, "error_to_reference": dataset_abs_l2h_rmse(pred, ref)})
+        pred = simulate_burgers_etdrk4(u0, nu=args.nu, T=args.T, dt=dt, domain_length=args.domain_length)
+        rows.append({
+            "nx": args.nx,
+            "domain_length": args.domain_length,
+            "dx": args.domain_length / args.nx,
+            "dt": dt,
+            "error_to_reference": dataset_abs_l2h_rmse(pred, ref, domain_length=args.domain_length),
+        })
     with (out_dir / "convergence_table.csv").open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
     summary = {
         "dealias_mask_shape": list(dealias_mask_2_3(args.nx).shape),
+        "domain_length": args.domain_length,
+        "effective_nx": args.nx,
+        "dx": args.domain_length / args.nx,
         "finite": bool(torch.isfinite(ref).all()),
         "monotonic_improvement": bool(rows[2]["error_to_reference"] <= rows[1]["error_to_reference"] <= rows[0]["error_to_reference"]),
         "rows": rows,

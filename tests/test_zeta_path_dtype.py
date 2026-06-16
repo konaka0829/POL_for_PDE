@@ -5,7 +5,7 @@ import torch
 from scripts.run_zeta_path import main as zeta_main
 
 
-def _write_split_pt(path):
+def _write_split_pt(path, *, domain_length=1.0):
     nx = 8
     payload = {
         "u0_train": torch.zeros(2, nx),
@@ -14,7 +14,7 @@ def _write_split_pt(path):
         "y_val": torch.zeros(1, nx),
         "u0_test": torch.zeros(1, nx),
         "y_test": torch.zeros(1, nx),
-        "metadata": {"T": 0.1, "dt": 0.01, "target_nu": 0.01, "nx": nx, "domain_length": 1.0},
+        "metadata": {"T": 0.1, "dt": 0.01, "target_nu": 0.01, "nx": nx, "domain_length": domain_length},
     }
     torch.save(payload, path)
 
@@ -103,6 +103,45 @@ def test_zeta_path_cache_key_includes_sim_dtype(tmp_path):
     cfg32 = json.loads((tmp_path / "out32" / "run_config.json").read_text(encoding="utf-8"))
     cfg64 = json.loads((tmp_path / "out64" / "run_config.json").read_text(encoding="utf-8"))
     assert cfg32["feature_cache"]["surrogate_hash"] != cfg64["feature_cache"]["surrogate_hash"]
+
+
+def test_zeta_path_domain_length_sets_dx_and_cache_key(tmp_path):
+    data_l1 = tmp_path / "data_l1.pt"
+    data_l2 = tmp_path / "data_l2.pt"
+    _write_split_pt(data_l1, domain_length=1.0)
+    _write_split_pt(data_l2, domain_length=2.0)
+    common = [
+        "--feature-cache-dir",
+        str(tmp_path / "cache"),
+        "--model",
+        "model2",
+        "--reservoir",
+        "static",
+        "--ntrain",
+        "2",
+        "--nval",
+        "1",
+        "--ntest",
+        "1",
+        "--T",
+        "0.1",
+        "--dt",
+        "0.01",
+        "--target-nu",
+        "0.01",
+        "--zeta-grid",
+        "1e-8",
+        "--use-feature-cache",
+    ]
+    zeta_main([*common, "--data-file", str(data_l1), "--output-dir", str(tmp_path / "out_l1")])
+    zeta_main([*common, "--data-file", str(data_l2), "--output-dir", str(tmp_path / "out_l2")])
+    cfg1 = json.loads((tmp_path / "out_l1" / "run_config.json").read_text(encoding="utf-8"))
+    cfg2 = json.loads((tmp_path / "out_l2" / "run_config.json").read_text(encoding="utf-8"))
+    assert cfg2["domain_length"] == 2.0
+    assert cfg2["dx"] == 2.0 / cfg2["effective_nx"]
+    assert cfg2["feature_cache"]["domain_length"] == 2.0
+    assert cfg2["feature_cache"]["dx"] == 2.0 / cfg2["feature_cache"]["effective_nx"]
+    assert cfg1["feature_cache"]["surrogate_hash"] != cfg2["feature_cache"]["surrogate_hash"]
 
 
 def test_zeta_path_subsample_uses_raw_nx_for_validation_and_effective_nx_for_cache(tmp_path):

@@ -246,15 +246,22 @@ def plot_lines(rows: list[dict[str, Any]], x_key: str, fixed_key: str, fixed_val
     if not subset:
         return
     fig, ax = plt.subplots(figsize=(6.8, 4.4))
+    plotted_y: list[float] = []
     for model in sorted({row["model"] for row in subset}):
         model_rows = sorted([row for row in subset if row["model"] == model], key=lambda row: float(row[x_key]))
-        ax.plot([float(row[x_key]) for row in model_rows], [float(row["test_absL2h"]) for row in model_rows], marker="o", label=model)
+        y_values = [float(row["test_absL2h"]) for row in model_rows]
+        plotted_y.extend(y_values)
+        ax.plot([float(row[x_key]) for row in model_rows], y_values, marker="o", label=model)
     ax.set_xlabel(xlabel)
     ax.set_ylabel("test absL2h")
-    ax.set_yscale("log")
+    positive_finite = [value for value in plotted_y if np.isfinite(value) and value > 0.0]
+    y_scale = "log" if positive_finite else "linear_due_to_zero_values"
+    if y_scale == "log":
+        ax.set_yscale("log")
     ax.set_title(title)
     ax.grid(True, which="both", alpha=0.3)
     ax.legend()
+    ax.text(0.01, 0.01, f"scale={y_scale}", transform=ax.transAxes, fontsize=7, alpha=0.55)
     fig.tight_layout()
     save_all(fig, out_path)
 

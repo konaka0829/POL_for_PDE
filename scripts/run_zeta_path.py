@@ -19,7 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from model123_burgers_1d import load_data, ridge_dtype_from_name
+from model123_burgers_1d import load_data, resolve_domain_length, ridge_dtype_from_name
 from pol.cache import file_sha256, stable_hash, to_jsonable
 from pol.metadata import get_command_line, get_git_info, get_runtime_info, normalize_dataset_metadata
 from pol.model123_1d import Model123Config, Model2Regressor1D, Model3Regressor1D
@@ -230,6 +230,8 @@ def collect_features(model, x: torch.Tensor, *, batch_size: int) -> torch.Tensor
 def feature_tensors(args, x_train, x_val, x_test, split_meta) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
     cfg = model_config_from_args(args)
     s = int(x_train.shape[1])
+    domain_length = resolve_domain_length(args)
+    dx = float(domain_length) / float(s)
     model = Model2Regressor1D(s=s, config=cfg) if args.model == "model2" else Model3Regressor1D(s=s, config=cfg)
     dataset_hash = file_sha256(args.data_file)
     split_hash = stable_hash(split_meta)
@@ -251,9 +253,10 @@ def feature_tensors(args, x_train, x_val, x_test, split_meta) -> tuple[dict[str,
         "heat_nu": args.heat_nu,
         "advection_c": args.advection_c,
         "sim_dtype": args.sim_dtype,
-        "domain_length": float(getattr(args, "expected_domain_length", None) or 1.0),
+        "domain_length": domain_length,
         "sub": int(args.sub),
         "effective_nx": s,
+        "dx": dx,
         "elm_seed": args.elm_seed if args.model == "model3" else None,
         "elm_h": args.elm_h if args.model == "model3" else None,
     }
@@ -271,13 +274,21 @@ def feature_tensors(args, x_train, x_val, x_test, split_meta) -> tuple[dict[str,
         observation_config=observation_config,
     )
     cache_dir = feature_cache_dir(args.feature_cache_dir, key)
-    expected_meta = {"dataset_hash": dataset_hash, "split_hash": split_hash, **key}
+    expected_meta = {
+        "dataset_hash": dataset_hash,
+        "split_hash": split_hash,
+        "domain_length": domain_length,
+        "effective_nx": s,
+        "dx": dx,
+        "sub": int(args.sub),
+        **key,
+    }
     if args.use_feature_cache and not args.refresh_feature_cache:
         try:
             tensors, cache_metadata = load_feature_cache(cache_dir, expected_metadata=expected_meta, return_metadata=True)
             if {"train", "val", "test"}.issubset(tensors):
                 return tensors, {**cache_metadata, **expected_meta, "cache_hit": True, "cache_dir": str(cache_dir)}
-        except FileNotFoundError:
+        except (FileNotFoundError, ValueError):
             pass
 
     tensors = {
@@ -302,6 +313,8 @@ def feature_tensors(args, x_train, x_val, x_test, split_meta) -> tuple[dict[str,
         "nx": s,
         "effective_nx": s,
         "sub": int(args.sub),
+        "domain_length": domain_length,
+        "dx": dx,
         "surrogate_config": surrogate_config,
         "observation_config": observation_config,
     }
@@ -310,11 +323,11 @@ def feature_tensors(args, x_train, x_val, x_test, split_meta) -> tuple[dict[str,
     return tensors, metadata
 
 
-def metrics_for(pred: torch.Tensor, target: torch.Tensor) -> dict[str, float]:
+def metrics_for(pred: torch.Tensor, target: torch.Tensor, *, domain_length: float = 1.0) -> dict[str, float]:
     return {
-        "absL2h": dataset_abs_l2h_rmse(pred, target),
-        "relL2_mean": dataset_rel_l2h_mean(pred, target),
-        "relL2_agg": dataset_rel_l2h_aggregate(pred, target),
+        "absL2h": dataset_abs_l2h_rmse(pred, target, domain_length=domain_length),
+        "relL2_mean": dataset_rel_l2h_mean(pred, target, domain_length=domain_length),
+        "relL2_agg": dataset_rel_l2h_aggregate(pred, target, domain_length=domain_length),
     }
 
 
@@ -333,8 +346,8 @@ def standardize_from_train(tensors: dict[str, torch.Tensor], *, eps: float) -> t
     }
 
 
-def objective(pred: torch.Tensor, target: torch.Tensor, W: torch.Tensor, zeta: float) -> float:
-    mse = dataset_abs_l2h_rmse(pred, target) ** 2
+def objective(pred: torch.Tensor, target: torch.Tensor, W: torch.Tensor, zeta: float, *, domain_length: float = 1.0) -> float:
+    mse = dataset_abs_l2h_rmse(pred, target, domain_length=domain_length) ** 2
     return float(mse + float(zeta) * torch.linalg.matrix_norm(W[:-1, :], ord="fro").item() ** 2)
 
 
@@ -344,6 +357,10 @@ def run_zeta_path(args: argparse.Namespace, *, train_limit: int | None = None) -
     if args.nval <= 0:
         raise ValueError("zeta-path requires --nval > 0 so validation, not test, selects zeta")
     x_train, y_train, x_val, y_val, x_test, y_test, split_meta, dataset_meta, metadata_validation = load_data(args)
+    domain_length = resolve_domain_length(args, dataset_meta)
+    args.expected_domain_length = domain_length
+    effective_nx = int(x_train.shape[1])
+    dx = float(domain_length) / float(effective_nx)
     tensors, cache_meta = feature_tensors(args, x_train, x_val, x_test, split_meta)
     standardization_meta = {"enabled": False}
     if bool(args.standardize_features):
@@ -352,7 +369,6 @@ def run_zeta_path(args: argparse.Namespace, *, train_limit: int | None = None) -
     if train_limit is not None:
         train_features = train_features[:train_limit]
         y_train = y_train[:train_limit]
-    dx = 1.0 / float(y_train.shape[1])
     rows = []
     for zeta in parse_zeta_grid(args.zeta_grid):
         state = fit_ridge_from_tensors(
@@ -368,9 +384,9 @@ def run_zeta_path(args: argparse.Namespace, *, train_limit: int | None = None) -
         pred_train = predict_linear(train_features.to(dtype=W.dtype), W).cpu()
         pred_val = predict_linear(tensors["val"].to(dtype=W.dtype), W).cpu()
         pred_test = predict_linear(tensors["test"].to(dtype=W.dtype), W).cpu()
-        m_train = metrics_for(pred_train, y_train)
-        m_val = metrics_for(pred_val, y_val)
-        m_test = metrics_for(pred_test, y_test)
+        m_train = metrics_for(pred_train, y_train, domain_length=domain_length)
+        m_val = metrics_for(pred_val, y_val, domain_length=domain_length)
+        m_test = metrics_for(pred_test, y_test, domain_length=domain_length)
         rows.append(
             {
                 "zeta": zeta,
@@ -387,9 +403,13 @@ def run_zeta_path(args: argparse.Namespace, *, train_limit: int | None = None) -
                 "W_hs_norm_l2h": float(state["W_hs_norm_l2h"].item()),
                 "d_eff": float(state["d_eff"].item()),
                 "cond_zeta": float(state["cond_zeta"].item()),
-                "objective_train": objective(pred_train, y_train, W, zeta),
-                "objective_val": objective(pred_val, y_val, W, zeta),
-                "objective_test": objective(pred_test, y_test, W, zeta),
+                "objective_train": objective(pred_train, y_train, W, zeta, domain_length=domain_length),
+                "objective_val": objective(pred_val, y_val, W, zeta, domain_length=domain_length),
+                "objective_test": objective(pred_test, y_test, W, zeta, domain_length=domain_length),
+                "domain_length": domain_length,
+                "effective_nx": effective_nx,
+                "dx": dx,
+                "effective_code_lambda_legacy_equivalent": float(int(y_train.shape[0]) * float(zeta) / dx),
                 "selected_by_val": False,
             }
         )
@@ -404,6 +424,17 @@ def run_zeta_path(args: argparse.Namespace, *, train_limit: int | None = None) -
         "split": split_meta,
         "dataset_metadata": normalize_dataset_metadata(dataset_meta),
         "metadata_validation": metadata_validation,
+        "domain_length": domain_length,
+        "effective_nx": effective_nx,
+        "dx": dx,
+        "grid": {
+            "dataset_nx": int(split_meta.get("dataset_nx", split_meta.get("raw_nx", effective_nx * int(args.sub)))),
+            "raw_nx": int(split_meta.get("raw_nx", split_meta.get("dataset_nx", effective_nx * int(args.sub)))),
+            "effective_nx": effective_nx,
+            "sub": int(args.sub),
+            "domain_length": domain_length,
+            "dx": dx,
+        },
         "selection": {
             "selection_metric": "val_absL2h",
             "selected_by": "validation",
@@ -431,6 +462,10 @@ def write_outputs(args: argparse.Namespace, rows: list[dict[str, Any]], summary:
         "selection": summary.get("selection"),
         "feature_cache": summary.get("feature_cache"),
         "split": summary.get("split"),
+        "grid": summary.get("grid"),
+        "domain_length": summary.get("domain_length"),
+        "effective_nx": summary.get("effective_nx"),
+        "dx": summary.get("dx"),
         "dataset_metadata": summary.get("dataset_metadata"),
         "metadata_validation": summary.get("metadata_validation"),
         "dtype": {
@@ -440,7 +475,22 @@ def write_outputs(args: argparse.Namespace, rows: list[dict[str, Any]], summary:
             "feature_tensor_dtype": summary.get("feature_cache", {}).get("dtype"),
             "feature_cache_metadata_dtype": summary.get("feature_cache", {}).get("dtype"),
         },
-        "metrics": summary.get("best_by_val"),
+        "metrics": {
+            **(summary.get("best_by_val") or {}),
+            "l2h_convention": "dx=sum_weight_with_dx_L_over_effective_nx",
+            "domain_length": summary.get("domain_length"),
+            "effective_nx": summary.get("effective_nx"),
+            "dx": summary.get("dx"),
+            "best_by_val": summary.get("best_by_val"),
+        },
+        "readout": {
+            "ridge_parameter_name": "zeta",
+            "ridge_convention": args.ridge_convention,
+            "ridge_dtype": args.ridge_dtype,
+            "domain_length": summary.get("domain_length"),
+            "effective_nx": summary.get("effective_nx"),
+            "dx": summary.get("dx"),
+        },
     }
     (out_dir / "run_config.json").write_text(json.dumps(to_jsonable(run_config), indent=2), encoding="utf-8")
     if args.plot:

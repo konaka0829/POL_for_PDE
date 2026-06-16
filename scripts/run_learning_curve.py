@@ -77,6 +77,10 @@ def main(argv: list[str] | None = None) -> int:
         "command_line": get_command_line(),
         "selection": {"selection_metric": "val_absL2h", "selected_by": "validation"},
         "split": last_summary.get("split") if last_summary else None,
+        "grid": last_summary.get("grid") if last_summary else None,
+        "domain_length": last_summary.get("domain_length") if last_summary else None,
+        "effective_nx": last_summary.get("effective_nx") if last_summary else None,
+        "dx": last_summary.get("dx") if last_summary else None,
         "dataset_metadata": last_summary.get("dataset_metadata") if last_summary else None,
         "metadata_validation": last_summary.get("metadata_validation") if last_summary else None,
         "dtype": {
@@ -84,7 +88,13 @@ def main(argv: list[str] | None = None) -> int:
             "sim_dtype": args.sim_dtype,
             "ridge_dtype": args.ridge_dtype,
         },
-        "metrics": {"rows": rows},
+        "metrics": {
+            "l2h_convention": "dx=sum_weight_with_dx_L_over_effective_nx",
+            "domain_length": last_summary.get("domain_length") if last_summary else None,
+            "effective_nx": last_summary.get("effective_nx") if last_summary else None,
+            "dx": last_summary.get("dx") if last_summary else None,
+            "rows": rows,
+        },
     }
     (out_dir / "run_config.json").write_text(json.dumps(to_jsonable(run_config), indent=2), encoding="utf-8")
     return 0
