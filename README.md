@@ -330,11 +330,79 @@ python scripts/run_headroom_burgers.py \
 This also selects zeta by validation error and reports `headroom_H` and
 `linear_explained_variance`.
 
+## E0-E3 Suite Entry Points
+
+E0 smoke suite runs a compact B0 workflow: dataset generation/reuse, static
+Model 2/3 validation-selected zeta paths, Fourier diagonal headroom, and one
+matching-coefficient Model 1 Burgers defect check.
+
+```bash
+python scripts/run_e0_smoke_suite.py \
+  --config configs/B0_smoke.json \
+  --output-dir outputs/e0_smoke \
+  --use-feature-cache
+```
+
+E1 baseline suite compares static, heat, and advection reservoirs under the
+same split and validation-only zeta selection:
+
+```bash
+python scripts/run_baseline_suite.py \
+  --config configs/B0_smoke.json \
+  --data-file outputs/e0_smoke/data/burgers_model123.pt \
+  --models model2,model3 \
+  --reservoirs static,heat,advection \
+  --zeta-grid 1e-8,1e-6,1e-4 \
+  --output-dir outputs/baseline_suite \
+  --use-feature-cache
+```
+
+E2 Burgers calibration suite records effective coefficients
+`effective_nu = alpha*res_burgers_nu` and
+`effective_b = alpha*res_burgers_b`, plus mismatch columns against the target
+Burgers generator:
+
+```bash
+python scripts/run_burgers_calibration_suite.py \
+  --config configs/B0_smoke.json \
+  --data-file outputs/e0_smoke/data/burgers_model123.pt \
+  --models model1,model2,model3 \
+  --alpha-values 0.8,1.0,1.2 \
+  --res-burgers-nu-values 0.005,0.01,0.02 \
+  --res-burgers-b-values 0.8,1.0,1.2 \
+  --zeta-grid 1e-8,1e-6,1e-4 \
+  --output-dir outputs/burgers_calibration \
+  --compute-time-scaled-defect \
+  --burgers-scheme etdrk4 \
+  --burgers-dealias 0
+```
+
+E3 nonlinear surrogate suite first runs Fourier diagonal linear headroom and
+then compares static/heat/advection controls with Burgers/RD/KS reservoirs.
+It reports `D_lin_abs_l2h`, `improvement_over_dlin_abs`,
+`ratio_to_dlin`, and `beats_dlin`. Selection within each model/reservoir group
+uses validation error only; test error is reported after selection.
+
+```bash
+python scripts/run_nonlinear_surrogate_suite.py \
+  --config configs/B0_smoke.json \
+  --data-file outputs/e0_smoke/data/burgers_model123.pt \
+  --models model2,model3 \
+  --reservoirs static,heat,advection,burgers,reaction_diffusion,ks \
+  --alpha-values 0.8,1.0,1.2 \
+  --zeta-grid 1e-8,1e-6,1e-4 \
+  --output-dir outputs/nonlinear_surrogate_suite \
+  --use-feature-cache
+```
+
 ## ETDRK4 Solver Check
 
 `pol/spectral_etdrk4_1d.py` implements Cox--Matthews ETDRK4 for periodic
 Burgers with nonlinear-term dealiasing. The coefficient implementation has
 unit tests for the `L=0` RK4 limit and the `N=0` exact exponential limit.
+Time-scaled defect diagnostics also support `--burgers-scheme etdrk4`; target
+and Burgers surrogate trajectories use the same physical `domain_length`, `dt`,
+dealiasing, dtype/device, and viscosity conventions.
 Run the small convergence smoke check with:
 
 ```bash

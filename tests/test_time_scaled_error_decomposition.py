@@ -236,6 +236,32 @@ def test_dataset_defect_helper_matching_burgers_coefficients_near_zero():
     assert "D1_model1_abs_l2h" in result["rows"][0]
 
 
+def test_error_decomposition_etdrk4_matching_burgers_near_zero():
+    cfg = ErrorDecompositionConfig(
+        num_samples=2,
+        nx=32,
+        seed=4,
+        batch_size=2,
+        target_nu=0.02,
+        T=0.02,
+        Ttilde_values=[0.02],
+        dt=0.01,
+        fine_dt=0.01,
+        reservoir="burgers",
+        res_burgers_nu=0.02,
+        res_burgers_b=1.0,
+        burgers_scheme="etdrk4",
+        burgers_dealias=False,
+        beta_mode="zero",
+        dtype="float64",
+        device="cpu",
+    )
+    result = run_error_decomposition(cfg)
+    row = result["summary_rows"][0]
+    assert row["D1"] < 1e-10
+    assert row["Delta_scale"] < 1e-10
+
+
 def test_analytic_safe_poincare_shift_uses_domain_length_in_beta():
     x = torch.linspace(0.0, 1.0, 32, dtype=torch.float64)[:-1]
     states = torch.stack(

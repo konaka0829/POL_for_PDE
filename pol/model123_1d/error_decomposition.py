@@ -15,6 +15,7 @@ import numpy as np
 import torch
 
 from pol.burgers_spectral_1d import make_wavenumbers, simulate_burgers_split_step
+from pol.spectral_etdrk4_1d import simulate_burgers_etdrk4_trajectory
 from pol.model123_1d.initial_conditions import (
     evaluate_initial_conditions,
     sample_gaussian_random_field_initial_conditions,
@@ -107,8 +108,8 @@ def _validate_config(cfg: ErrorDecompositionConfig) -> None:
         raise ValueError("fine_dt must be positive")
     if cfg.reservoir not in {"burgers", "reaction_diffusion", "ks"}:
         raise ValueError(f"Unsupported reservoir family: {cfg.reservoir}")
-    if cfg.burgers_scheme not in {"semi_implicit", "split_step"}:
-        raise ValueError("burgers_scheme must be semi_implicit or split_step")
+    if cfg.burgers_scheme not in {"semi_implicit", "split_step", "etdrk4"}:
+        raise ValueError("burgers_scheme must be semi_implicit, split_step, or etdrk4")
     if cfg.initial_condition_type not in {"fourier", "grf"}:
         raise ValueError("initial_condition_type must be 'fourier' or 'grf'")
     if cfg.beta_mode not in {"zero", "analytic_safe", "analytic_safe_poincare", "empirical_pairwise", "fixed"}:
@@ -166,19 +167,31 @@ def _simulate_target_trajectory(u0: torch.Tensor, cfg: ErrorDecompositionConfig)
     dtype = _resolve_dtype(cfg.dtype)
     for start in range(0, u0.shape[0], cfg.batch_size):
         batch = u0[start : start + cfg.batch_size].to(device=work_device, dtype=dtype)
-        states = simulate_burgers_split_step(
-            batch,
-            dt=cfg.dt,
-            Tr=cfg.T,
-            obs_steps=obs_steps,
-            nu=cfg.target_nu,
-            fine_dt=cfg.fine_dt,
-            b=1.0,
-            forcing=None,
-            forcing_steps=None,
-            dealias=False,
-            domain_length=cfg.domain_length,
-        )
+        if cfg.burgers_scheme == "etdrk4":
+            states = simulate_burgers_etdrk4_trajectory(
+                batch,
+                nu=cfg.target_nu,
+                b=1.0,
+                T=cfg.T,
+                dt=cfg.dt,
+                obs_steps=obs_steps,
+                dealias=cfg.burgers_dealias,
+                domain_length=cfg.domain_length,
+            )
+        else:
+            states = simulate_burgers_split_step(
+                batch,
+                dt=cfg.dt,
+                Tr=cfg.T,
+                obs_steps=obs_steps,
+                nu=cfg.target_nu,
+                fine_dt=cfg.fine_dt,
+                b=1.0,
+                forcing=None,
+                forcing_steps=None,
+                dealias=cfg.burgers_dealias,
+                domain_length=cfg.domain_length,
+            )
         for idx, state in enumerate(states):
             states_per_step[idx].append(state.detach().cpu())
     stacked = torch.stack([torch.cat(chunks, dim=0) for chunks in states_per_step], dim=0)
