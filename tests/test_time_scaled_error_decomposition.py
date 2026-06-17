@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 from pol.model123_1d.error_decomposition import (
     ErrorDecompositionConfig,
     aggregate_metric_rows,
+    compute_beta,
     compute_time_scaled_defect_for_dataset,
     interpolate_trajectory_at_times,
     run_error_decomposition,
@@ -233,6 +234,46 @@ def test_dataset_defect_helper_matching_burgers_coefficients_near_zero():
     assert result["summary"]["alpha"] == 2.0
     assert result["summary"]["delta_scale_rms_abs_l2h"] < 1e-8
     assert "D1_model1_abs_l2h" in result["rows"][0]
+
+
+def test_analytic_safe_poincare_shift_uses_domain_length_in_beta():
+    x = torch.linspace(0.0, 1.0, 32, dtype=torch.float64)[:-1]
+    states = torch.stack(
+        [
+            torch.sin(2.0 * math.pi * x),
+            torch.cos(2.0 * math.pi * x),
+        ],
+        dim=0,
+    ).unsqueeze(1)
+    for domain_length, expected_shift in [
+        (1.0, -0.05 * (2.0 * math.pi) ** 2),
+        (2.0, -0.05 * math.pi**2),
+    ]:
+        cfg_safe = ErrorDecompositionConfig(target_nu=0.05, beta_mode="analytic_safe", domain_length=domain_length)
+        cfg_poincare = ErrorDecompositionConfig(target_nu=0.05, beta_mode="analytic_safe_poincare", domain_length=domain_length)
+        beta_safe, _ = compute_beta(
+            calibration_target_states=states,
+            calibration_surrogate_states=states,
+            cfg=cfg_safe,
+        )
+        beta_poincare, details = compute_beta(
+            calibration_target_states=states,
+            calibration_surrogate_states=states,
+            cfg=cfg_poincare,
+        )
+        assert details["poincare_shift"] == pytest.approx(expected_shift)
+        assert details["poincare_lambda1"] == pytest.approx((2.0 * math.pi / domain_length) ** 2)
+        assert details["domain_length"] == pytest.approx(domain_length)
+        assert beta_poincare - beta_safe == pytest.approx(expected_shift)
+        assert details["chosen_beta"] == pytest.approx(beta_poincare)
+
+
+def test_analytic_safe_poincare_requires_matching_samplewise_means():
+    target = torch.zeros(2, 1, 16, dtype=torch.float64)
+    surrogate = torch.ones(2, 1, 16, dtype=torch.float64)
+    cfg = ErrorDecompositionConfig(target_nu=0.05, beta_mode="analytic_safe_poincare", domain_length=2.0)
+    with pytest.raises(ValueError, match="samplewise means"):
+        compute_beta(calibration_target_states=target, calibration_surrogate_states=surrogate, cfg=cfg)
 
 
 @pytest.mark.slow

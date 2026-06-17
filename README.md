@@ -106,6 +106,22 @@ metadata validation compares `nx` against the raw dataset resolution, not the
 effective model resolution. The spatial convention is
 `dx = domain_length / effective_nx` for discrete L2h quantities and
 `kappa_k = 2*pi*k/domain_length` for Fourier pseudo-spectral derivatives.
+For `domain_length != 1`, the current GRF and Fourier initial-condition
+samplers are specified on the normalized periodic coordinate `xi = x/L`.
+Equivalently, sampled physical profiles are interpreted as
+`u(x) = u_tilde(x/L)`. PDE solvers and reservoirs use physical Fourier
+wavenumbers `kappa_k = 2*pi*k/domain_length`, but the random IC distribution is
+stored in normalized-coordinate mode via metadata
+`ic_coordinate_convention = normalized_periodic_coordinate_x_over_L`.
+This field is written to `.pt` metadata and `.mat` files; legacy datasets may
+omit it, so missing values remain a metadata warning unless a future workflow
+chooses to make the field mandatory. B1 currently uses `domain_length=1.0`, so
+the normalized-coordinate and physical-domain interpretations coincide there.
+A future physical-domain GRF sampler should use a distinct metadata value and
+define correlations directly with physical wavenumbers
+`kappa_m = 2*pi*m/domain_length`; unlike the current convention, changing `L`
+would then change the physical correlation-length interpretation rather than
+stretching a fixed profile distribution.
 
 Generate a MATLAB file compatible with `model123_burgers_1d.py`:
 
@@ -261,6 +277,7 @@ audits:
 
 ```bash
 python scripts/run_model123_param_sweep.py ... --check-existing
+python scripts/run_model123_alpha_param_defect_study.py ... --check-existing
 python scripts/run_model123_param_sweep.py ... --skip-existing --reuse-report summary
 ```
 
@@ -349,12 +366,22 @@ rhs_beta_legacy_alias_of,
 beta_mode, beta_value, c_beta_T
 ```
 
+For `beta_mode=analytic_safe_poincare`, the Poincare correction uses the first
+nonzero periodic physical wavenumber on `[0,L]`:
+
+```text
+poincare_shift = -target_nu * (2*pi/domain_length)^2
+```
+
 Model123 runs with `--compute-time-scaled-defect` additionally write
 `time_scaled_defect_metrics.json`, `time_scaled_defect_per_sample.csv/json`,
 and `error_vs_defect_scatter.{png,pdf,svg}`. The metrics include
 `corr_error_delta_scale_pearson`, `corr_error_delta_scale_spearman`, and for
 Model 1 `max_abs_difference_model1_D1`, which checks that the Model 1 prediction
 error and `D1_model1_abs_l2h` were computed from the same surrogate trajectory.
+`time_scaled_defect_metrics.json` is self-describing for the L2h convention: it
+records `domain_length`, `effective_nx`, `dx`, and
+`l2h_convention = dx=domain_length/effective_nx`.
 
 ## Tests
 

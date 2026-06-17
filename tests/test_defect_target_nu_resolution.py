@@ -1,9 +1,10 @@
 from argparse import Namespace
+import json
 
 import pytest
 import torch
 
-from model123_burgers_1d import resolve_defect_target_nu
+from model123_burgers_1d import compute_and_save_defect_outputs, resolve_defect_target_nu
 from pol.model123_1d.error_decomposition import scaled_defect_burgers_reservoir
 
 
@@ -71,3 +72,63 @@ def test_matching_burgers_target_and_surrogate_have_zero_scaled_defect():
         res_burgers_b=1.0,
     )
     assert torch.max(torch.abs(defect)).item() < 1e-10
+
+
+def test_time_scaled_defect_metrics_records_domain_metadata(tmp_path):
+    data_file = tmp_path / "data.pt"
+    _write_pt(data_file)
+    out_dir = tmp_path / "out"
+    args = Namespace(
+        out_dir=str(out_dir),
+        ntest=1,
+        batch_size=1,
+        defect_target_nu=0.01,
+        target_nu=None,
+        data_mode="single_split",
+        data_file=str(data_file),
+        train_file=None,
+        test_file=None,
+        expected_domain_length=2.0,
+        T=0.02,
+        Ttilde=0.02,
+        dt=0.02,
+        burgers_fine_dt=0.02,
+        reservoir="burgers",
+        rd_nu=1e-3,
+        rd_alpha=1.0,
+        rd_beta=1.0,
+        res_burgers_nu=0.01,
+        res_burgers_b=1.0,
+        burgers_scheme="split_step",
+        burgers_dealias=0,
+        ks_b=1.0,
+        ks_eta=1.0,
+        ks_kappa=1.0,
+        ks_dealias=False,
+        input_scale=1.0,
+        input_shift=0.0,
+        defect_dtype="float64",
+        device="cpu",
+        defect_beta_mode="zero",
+        defect_beta_fixed=0.0,
+        defect_time_quadrature="trapezoid",
+        model="model1",
+    )
+    out_dir.mkdir()
+    x = torch.zeros(1, 64, dtype=torch.float64)
+    metrics = compute_and_save_defect_outputs(
+        args,
+        64,
+        x,
+        x,
+        torch.zeros(1, dtype=torch.float64),
+        torch.zeros(1, dtype=torch.float64),
+    )
+    assert metrics["domain_length"] == pytest.approx(2.0)
+    assert metrics["effective_nx"] == 64
+    assert metrics["dx"] == pytest.approx(0.03125)
+    assert metrics["l2h_convention"] == "dx=domain_length/effective_nx"
+    saved = json.loads((out_dir / "time_scaled_defect_metrics.json").read_text(encoding="utf-8"))
+    assert saved["domain_length"] == pytest.approx(2.0)
+    row = json.loads((out_dir / "time_scaled_defect_per_sample.json").read_text(encoding="utf-8"))[0]
+    assert row["effective_nx"] == 64

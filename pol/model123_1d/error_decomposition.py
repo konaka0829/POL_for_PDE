@@ -496,8 +496,12 @@ def compute_beta(
             surrogate_means = torch.mean(surrogate_shared, dim=-1)
             if not torch.allclose(target_means, surrogate_means, atol=1e-8, rtol=1e-6):
                 raise ValueError("analytic_safe_poincare requires samplewise means to match")
-            beta = beta - cfg.target_nu * (2.0 * math.pi) ** 2
-            details["poincare_shift"] = -cfg.target_nu * (2.0 * math.pi / cfg.domain_length) ** 2
+            lambda1 = (2.0 * math.pi / cfg.domain_length) ** 2
+            poincare_shift = -cfg.target_nu * lambda1
+            beta = beta + poincare_shift
+            details["poincare_shift"] = poincare_shift
+            details["poincare_lambda1"] = lambda1
+            details["domain_length"] = cfg.domain_length
         details["chosen_beta"] = float(beta)
         return float(beta), details
 

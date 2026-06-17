@@ -192,6 +192,7 @@ def main(argv: list[str] | None = None) -> int:
                 "burgers_scheme": args.solver,
                 "dealias": bool(args.dealias),
                 "ic_type": args.ic_type,
+                "ic_coordinate_convention": "normalized_periodic_coordinate_x_over_L",
                 "grf_gamma": float(args.grf_gamma),
                 "grf_tau": float(args.grf_tau),
                 "grf_sigma": float(args.grf_sigma),

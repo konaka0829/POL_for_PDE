@@ -175,6 +175,7 @@ def save_dataset_bundle(bundle: DatasetBundle, out_file: str | Path) -> None:
         "target_equation": "burgers",
         "time_integrator": bundle.config.solver,
         "burgers_scheme": bundle.config.solver,
+        "ic_coordinate_convention": "normalized_periodic_coordinate_x_over_L",
     }
     payload = {
         "config": metadata,

@@ -147,5 +147,7 @@ def test_generator_domain_length_is_saved_in_pt_and_mat_metadata(tmp_path):
 
     pt_payload = torch.load(pt_path, map_location="cpu", weights_only=False)
     assert pt_payload["metadata"]["domain_length"] == pytest.approx(2.0)
+    assert pt_payload["metadata"]["ic_coordinate_convention"] == "normalized_periodic_coordinate_x_over_L"
     mat_payload = scipy.io.loadmat(mat_path)
     assert float(mat_payload["domain_length"][0, 0]) == pytest.approx(2.0)
+    assert str(mat_payload["ic_coordinate_convention"][0]) == "normalized_periodic_coordinate_x_over_L"

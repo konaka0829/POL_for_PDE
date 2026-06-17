@@ -58,6 +58,19 @@ def write_csv(path: Path, rows: Iterable[dict[str, Any]], fieldnames: list[str])
             writer.writerow({key: row.get(key) for key in fieldnames})
 
 
+def write_audit_summary_outputs(out_root: Path, rows: list[dict[str, Any]]) -> tuple[Path, Path]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        status = row.get("status", "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    summary_rows = [{"status": status, "count": count} for status, count in sorted(counts.items())]
+    csv_path = out_root / "existing_audit_summary.csv"
+    json_path = out_root / "existing_audit_summary.json"
+    write_csv(csv_path, summary_rows, ["status", "count"])
+    json_path.write_text(json.dumps({"counts": counts, "rows": summary_rows}, indent=2), encoding="utf-8")
+    return csv_path, json_path
+
+
 def save_all(fig: plt.Figure, path_no_ext: Path) -> None:
     path_no_ext.parent.mkdir(parents=True, exist_ok=True)
     for ext in ("png", "pdf", "svg"):
@@ -445,10 +458,16 @@ def main(argv: list[str] | None = None) -> int:
                 overrides = {parameter.name: parameter_value, "alpha": alpha}
                 command_args = argparse.Namespace(**vars(args))
                 command_args.compute_time_scaled_defect = bool(compute_defect)
-                audit = audit_existing_run(args=command_args, model=model, overrides=overrides, run_dir=run_dir)
-                if compute_defect and audit["status"] == "ok" and not (run_dir / "time_scaled_defect_metrics.json").exists():
-                    audit["status"] = "missing_defect"
-                    audit["reason"] = "missing time_scaled_defect_metrics.json"
+                try:
+                    audit = audit_existing_run(args=command_args, model=model, overrides=overrides, run_dir=run_dir)
+                    if compute_defect and audit["status"] == "ok" and not (run_dir / "time_scaled_defect_metrics.json").exists():
+                        audit["status"] = "missing_defect"
+                        audit["reason"] = "missing time_scaled_defect_metrics.json"
+                except Exception as exc:
+                    if args.check_existing:
+                        audit = {"status": "audit_error", "reason": str(exc)}
+                    else:
+                        raise
                 if args.check_existing:
                     return_code = 0
                     status = audit["status"]
@@ -493,19 +512,36 @@ def main(argv: list[str] | None = None) -> int:
                     "return_code": cell_results[model][1],
                 }
                 if args.check_existing or args.skip_existing:
-                    row.update(audit_existing_run(
-                        args=argparse.Namespace(**{**vars(args), "compute_time_scaled_defect": bool(model == defect_owner_model)}),
-                        model=model,
-                        overrides={parameter.name: parameter_value, "alpha": alpha},
-                        run_dir=run_dir,
-                    ))
+                    try:
+                        row.update(
+                            audit_existing_run(
+                                args=argparse.Namespace(**{**vars(args), "compute_time_scaled_defect": bool(model == defect_owner_model)}),
+                                model=model,
+                                overrides={parameter.name: parameter_value, "alpha": alpha},
+                                run_dir=run_dir,
+                            )
+                        )
+                    except Exception as exc:
+                        if args.check_existing:
+                            row.update({"status": "audit_error", "reason": str(exc)})
+                        else:
+                            raise
                     row["parameter_name"] = parameter.name
                     row["parameter_value"] = parameter_value
                     row["alpha"] = alpha
+                if args.check_existing:
+                    summary_rows.append(row)
+                    continue
                 if row["status"] == "ok" and (run_dir / "run_config.json").exists():
                     row.update(load_run_summary(run_dir))
                     defect_source = find_defect_source(owner_dir, run_dir)
                     if defect_source is not None:
+                        defect_metrics = load_json(defect_source / "time_scaled_defect_metrics.json")
+                        if isinstance(defect_metrics, dict):
+                            row["defect_domain_length"] = defect_metrics.get("domain_length")
+                            row["defect_dx"] = defect_metrics.get("dx")
+                            row["defect_effective_nx"] = defect_metrics.get("effective_nx")
+                            row["defect_l2h_convention"] = defect_metrics.get("l2h_convention")
                         defect_rows = load_json(defect_source / "time_scaled_defect_per_sample.json")
                         error_abs, error_rel = load_error_vectors(run_dir)
                         joined = []
@@ -524,6 +560,9 @@ def main(argv: list[str] | None = None) -> int:
                                 "D1_model1_abs_l2h": float(defect_row["D1_model1_abs_l2h"]),
                                 "delta_scale_pathwise_abs_l2h": float(defect_row["delta_scale_pathwise_abs_l2h"]),
                                 "Delta_scale_abs_l2h": float(defect_row["Delta_scale_abs_l2h"]),
+                                "defect_domain_length": defect_row.get("domain_length"),
+                                "defect_dx": defect_row.get("dx"),
+                                "defect_effective_nx": defect_row.get("effective_nx"),
                             }
                             joined.append(joined_row)
                         per_sample_rows.extend(joined)
@@ -555,6 +594,10 @@ def main(argv: list[str] | None = None) -> int:
         "reason",
         "has_run_config",
         "has_defect_metrics",
+        "defect_domain_length",
+        "defect_dx",
+        "defect_effective_nx",
+        "defect_l2h_convention",
     ]
     dynamic_audit_fields = sorted({key for row in summary_rows for key in row if key.startswith("expected_") or key.startswith("found_")})
     summary_fields = dedupe_fieldnames(summary_fields + dynamic_audit_fields)
@@ -572,13 +615,23 @@ def main(argv: list[str] | None = None) -> int:
         "D1_model1_abs_l2h",
         "delta_scale_pathwise_abs_l2h",
         "Delta_scale_abs_l2h",
+        "defect_domain_length",
+        "defect_dx",
+        "defect_effective_nx",
     ]
-    write_csv(out_root / "summary.csv", summary_rows, dedupe_fieldnames(summary_fields))
-    (out_root / "summary.json").write_text(json.dumps({"config": vars(args), "rows": summary_rows}, indent=2), encoding="utf-8")
-    write_csv(out_root / "existing_audit.csv", summary_rows, dedupe_fieldnames(summary_fields))
-    (out_root / "existing_audit.json").write_text(json.dumps(summary_rows, indent=2), encoding="utf-8")
-    write_csv(out_root / "per_sample_metrics.csv", per_sample_rows, dedupe_fieldnames(per_sample_fields))
-    (out_root / "per_sample_metrics.json").write_text(json.dumps(per_sample_rows, indent=2), encoding="utf-8")
+    if args.check_existing:
+        try:
+            write_csv(out_root / "existing_audit.csv", summary_rows, dedupe_fieldnames(summary_fields))
+            (out_root / "existing_audit.json").write_text(json.dumps(summary_rows, indent=2), encoding="utf-8")
+            write_audit_summary_outputs(out_root, summary_rows)
+        except Exception as exc:
+            print(f"[alpha-param] audit error: {exc}", file=sys.stderr, flush=True)
+            return 3
+    else:
+        write_csv(out_root / "summary.csv", summary_rows, dedupe_fieldnames(summary_fields))
+        (out_root / "summary.json").write_text(json.dumps({"config": vars(args), "rows": summary_rows}, indent=2), encoding="utf-8")
+        write_csv(out_root / "per_sample_metrics.csv", per_sample_rows, dedupe_fieldnames(per_sample_fields))
+        (out_root / "per_sample_metrics.json").write_text(json.dumps(per_sample_rows, indent=2), encoding="utf-8")
     if args.reuse_report == "summary" and (args.skip_existing or args.check_existing):
         counts: dict[str, int] = {}
         for row in summary_rows:
@@ -589,6 +642,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         return 0
     if args.check_existing:
+        if any(row["status"] == "audit_error" for row in summary_rows):
+            return 3
         return 2 if any(row["status"] != "ok" for row in summary_rows) else 0
     return 1 if had_failure else 0
 

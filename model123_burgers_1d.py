@@ -752,9 +752,12 @@ def _plot_error_vs_defect(rows, out_path_no_ext):
 def compute_and_save_defect_outputs(args, s, x_test_all, y_test_all, per_sample_abs, per_sample_rel):
     target_nu_resolution = resolve_defect_target_nu(args)
     target_nu = float(target_nu_resolution["target_nu"])
+    effective_nx = int(s)
+    domain_length = resolve_domain_length(args)
+    dx = float(domain_length) / float(effective_nx)
     defect_cfg = ErrorDecompositionConfig(
         num_samples=args.ntest,
-        nx=s,
+        nx=effective_nx,
         batch_size=args.batch_size,
         target_nu=target_nu,
         T=args.T,
@@ -769,7 +772,7 @@ def compute_and_save_defect_outputs(args, s, x_test_all, y_test_all, per_sample_
         res_burgers_b=args.res_burgers_b,
         burgers_scheme=args.burgers_scheme,
         burgers_dealias=bool(args.burgers_dealias),
-        domain_length=resolve_domain_length(args),
+        domain_length=domain_length,
         ks_b=args.ks_b,
         ks_eta=args.ks_eta,
         ks_kappa=args.ks_kappa,
@@ -808,6 +811,9 @@ def compute_and_save_defect_outputs(args, s, x_test_all, y_test_all, per_sample_
                 "beta_value": float(defect_row["beta_value"]),
                 "beta_empirical": float(defect_row["beta_empirical"]),
                 "c_beta_T": float(defect_row["c_beta_T"]),
+                "domain_length": domain_length,
+                "effective_nx": effective_nx,
+                "dx": dx,
             }
         )
 
@@ -819,6 +825,10 @@ def compute_and_save_defect_outputs(args, s, x_test_all, y_test_all, per_sample_
         "target_nu_source": target_nu_resolution["target_nu_source"],
         "target_nu_warning": target_nu_resolution.get("target_nu_warning"),
         "model": args.model,
+        "domain_length": domain_length,
+        "effective_nx": effective_nx,
+        "dx": dx,
+        "l2h_convention": "dx=domain_length/effective_nx",
         "corr_error_delta_scale_pearson": pearson_corr_or_none(error_values, delta_values),
         "corr_error_delta_scale_spearman": spearman_corr_or_none(error_values, delta_values),
         "applies_directly_to_model1_bound": bool(args.model == "model1"),

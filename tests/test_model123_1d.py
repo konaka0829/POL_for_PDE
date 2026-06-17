@@ -168,7 +168,14 @@ def test_model123_cli_records_domain_length_dx_and_legacy_lambda(tmp_path):
             "y_val": torch.zeros(1, nx),
             "u0_test": torch.zeros(1, nx),
             "y_test": torch.zeros(1, nx),
-            "metadata": {"T": 0.1, "dt": 0.01, "target_nu": 0.01, "nx": nx, "domain_length": 2.0},
+            "metadata": {
+                "T": 0.1,
+                "dt": 0.01,
+                "target_nu": 0.01,
+                "nx": nx,
+                "domain_length": 2.0,
+                "ic_coordinate_convention": "normalized_periodic_coordinate_x_over_L",
+            },
         },
         data_file,
     )
@@ -210,6 +217,7 @@ def test_model123_cli_records_domain_length_dx_and_legacy_lambda(tmp_path):
     assert payload["grid"]["dx"] == 2.0 / nx
     assert payload["metrics"]["dx"] == 2.0 / nx
     assert payload["readout"]["dx"] == 2.0 / nx
+    assert payload["dataset_metadata"]["ic_coordinate_convention"] == "normalized_periodic_coordinate_x_over_L"
     assert payload["effective_code_lambda_legacy_equivalent"] == pytest.approx(2 * 1e-6 / (2.0 / nx))
 
 

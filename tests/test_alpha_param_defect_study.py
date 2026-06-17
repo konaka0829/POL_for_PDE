@@ -1,4 +1,5 @@
 import importlib
+import json
 import warnings
 
 import pytest
@@ -79,3 +80,117 @@ def test_alpha_param_defect_study_positive_values_use_log_scale(tmp_path):
         out_path=tmp_path / "positive_plot",
     )
     assert (tmp_path / "positive_plot.png").exists()
+
+
+def test_alpha_param_check_existing_writes_only_audit_outputs(tmp_path, monkeypatch):
+    module = importlib.import_module("scripts.run_model123_alpha_param_defect_study")
+    out_root = tmp_path / "alpha"
+    out_root.mkdir()
+    protected = [
+        out_root / "summary.csv",
+        out_root / "summary.json",
+        out_root / "per_sample_metrics.csv",
+        out_root / "per_sample_metrics.json",
+        out_root / "plots" / "existing.png",
+    ]
+    for path in protected:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"original {path.name}", encoding="utf-8")
+    before = {path: path.read_text(encoding="utf-8") for path in protected}
+
+    def fake_audit_existing_run(*, args, model, overrides, run_dir):
+        return {
+            "status": "ok",
+            "reason": "",
+            "has_run_config": True,
+            "has_defect_metrics": True,
+            "run_dir": str(run_dir),
+        }
+
+    def fail_run_command(*args, **kwargs):
+        raise AssertionError("--check-existing must not launch jobs")
+
+    monkeypatch.setattr(module, "audit_existing_run", fake_audit_existing_run)
+    monkeypatch.setattr(module, "run_command", fail_run_command)
+
+    rc = module.main(
+        [
+            "--data-file",
+            str(tmp_path / "dummy.pt"),
+            "--out-root",
+            str(out_root),
+            "--models",
+            "model1",
+            "--reservoir",
+            "burgers",
+            "--parameter",
+            "res_burgers_nu",
+            "--parameter-values",
+            "0.01",
+            "--alpha-values",
+            "1.0",
+            "--check-existing",
+        ]
+    )
+    assert rc == 0
+    assert {path: path.read_text(encoding="utf-8") for path in protected} == before
+    assert (out_root / "existing_audit.csv").exists()
+    assert (out_root / "existing_audit.json").exists()
+    assert (out_root / "existing_audit_summary.csv").exists()
+    assert (out_root / "existing_audit_summary.json").exists()
+    assert not (out_root / "runs").exists()
+    summary = json.loads((out_root / "existing_audit_summary.json").read_text(encoding="utf-8"))
+    assert summary["counts"] == {"ok": 1}
+
+
+def test_alpha_param_check_existing_mismatch_preserves_normal_summary(tmp_path, monkeypatch):
+    module = importlib.import_module("scripts.run_model123_alpha_param_defect_study")
+    out_root = tmp_path / "alpha"
+    summary_csv = out_root / "summary.csv"
+    summary_json = out_root / "summary.json"
+    per_sample_csv = out_root / "per_sample_metrics.csv"
+    per_sample_json = out_root / "per_sample_metrics.json"
+    for path in [summary_csv, summary_json, per_sample_csv, per_sample_json]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"normal {path.name}", encoding="utf-8")
+    before = {path: path.read_text(encoding="utf-8") for path in [summary_csv, summary_json, per_sample_csv, per_sample_json]}
+
+    monkeypatch.setattr(
+        module,
+        "audit_existing_run",
+        lambda **kwargs: {
+            "status": "config_mismatch",
+            "reason": "mismatch: ridge_zeta",
+            "has_run_config": True,
+            "has_defect_metrics": True,
+        },
+    )
+    monkeypatch.setattr(module, "run_command", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("job launched")))
+
+    rc = module.main(
+        [
+            "--data-file",
+            str(tmp_path / "dummy.pt"),
+            "--out-root",
+            str(out_root),
+            "--models",
+            "model1",
+            "--reservoir",
+            "burgers",
+            "--parameter",
+            "res_burgers_nu",
+            "--parameter-values",
+            "0.02",
+            "--alpha-values",
+            "1.0",
+            "--ridge-zeta",
+            "1e-5",
+            "--check-existing",
+        ]
+    )
+    assert rc == 2
+    assert {path: path.read_text(encoding="utf-8") for path in before} == before
+    audit = json.loads((out_root / "existing_audit.json").read_text(encoding="utf-8"))
+    assert audit[0]["status"] == "config_mismatch"
+    audit_summary = json.loads((out_root / "existing_audit_summary.json").read_text(encoding="utf-8"))
+    assert audit_summary["counts"] == {"config_mismatch": 1}
