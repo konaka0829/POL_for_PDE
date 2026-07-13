@@ -19,4 +19,4 @@ dependencies = [
 test = ["pytest>=7.0"]
 
 [tool.setuptools]
-packages = ["pol", "pol.model123_1d"]
+packages = ["pol", "pol.model123_1d", "pol.paper1"]

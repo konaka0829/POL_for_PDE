@@ -1,0 +1,36 @@
+{
+  "data": {
+    "device": "cpu",
+    "dtype": "float64",
+    "grf_gamma": 2.0,
+    "grf_mean": 0.0,
+    "grf_sigma": 25.0,
+    "grf_tau": 5.0,
+    "ic_type": "grf",
+    "n_test": 200,
+    "n_train": 1000,
+    "n_val": 200,
+    "preprocessing": "l2_scaling_only",
+    "seed": 0,
+    "total_samples": 1400
+  },
+  "domain": {
+    "length": 1.0
+  },
+  "spatial": {
+    "observation_dim": 256,
+    "surrogate_internal_nx": 4096,
+    "target_data_nx": 4096,
+    "target_master_nx": 4096,
+    "target_output_dim": 257
+  },
+  "target": {
+    "T": 1.0,
+    "dealias": true,
+    "dt": 0.001,
+    "equation": "viscous_burgers",
+    "fine_dt": 0.0001,
+    "nu": 0.01,
+    "solver": "split_step"
+  }
+}
