@@ -105,9 +105,8 @@ def sample_gaussian_random_field_initial_conditions(
     if nx % 2 == 0:
         nyquist_idx = coeff_shape[1] - 1
         nyquist_sign = -1.0 if (nx // 2) % 2 else 1.0
-        real_part[:, nyquist_idx] = nyquist_sign * torch.sqrt(2.0 * eigvals[nyquist_idx]) * torch.randn(
-            num_samples, generator=gen, dtype=dtype, device=device
-        )
+        nyquist_noise = torch.randn(num_samples, generator=gen, dtype=dtype, device="cpu").to(device=device)
+        real_part[:, nyquist_idx] = nyquist_sign * torch.sqrt(2.0 * eigvals[nyquist_idx]) * nyquist_noise
         interior_end = nyquist_idx
     else:
         interior_end = coeff_shape[1]
@@ -120,8 +119,8 @@ def sample_gaussian_random_field_initial_conditions(
             -torch.ones(interior_end - 1, device=device, dtype=dtype),
         )
         std = torch.sqrt(eigvals[1:interior_end] / 2.0).unsqueeze(0)
-        real_noise = torch.randn((num_samples, n_interior), generator=gen, dtype=dtype, device=device)
-        imag_noise = torch.randn((num_samples, n_interior), generator=gen, dtype=dtype, device=device)
+        real_noise = torch.randn((num_samples, n_interior), generator=gen, dtype=dtype, device="cpu").to(device=device)
+        imag_noise = torch.randn((num_samples, n_interior), generator=gen, dtype=dtype, device="cpu").to(device=device)
         real_part[:, 1:interior_end] = signs.unsqueeze(0) * std * real_noise
         imag_part[:, 1:interior_end] = signs.unsqueeze(0) * std * imag_noise
 

@@ -34,8 +34,11 @@ from scripts.suite_common import (
     row_from_zeta_run,
     row_from_model123_run,
     run_recorded_command,
+    run_suite_jobs,
     safe_tag,
     save_all_formats,
+    SuiteJob,
+    SuiteJobResult,
     to_jsonable,
     write_csv,
     write_json,
@@ -178,7 +181,6 @@ def main(argv: list[str] | None = None) -> int:
     runs_dir = out_dir / "runs"
     out_dir.mkdir(parents=True, exist_ok=True)
     commands: list[dict[str, Any]] = []
-    rows: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
 
     headroom_dir = out_dir / "headroom"
@@ -220,6 +222,9 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         failures.append({"phase": "E3", "stage": "headroom", "status": "fail", "reason": str(exc)})
 
+    jobs: list[SuiteJob] = []
+    seen_dirs: set[Path] = set()
+    index = 0
     for model in models:
         for reservoir in reservoirs:
             for params in reservoir_grid(reservoir, args):
@@ -227,6 +232,9 @@ def main(argv: list[str] | None = None) -> int:
                     tag_parts = [model, reservoir, f"alpha_{safe_tag(alpha)}"] + [f"{k}_{safe_tag(v)}" for k, v in sorted(params.items())]
                     child_dir = runs_dir / "__".join(tag_parts)
                     selected_dir = child_dir / "selected_run"
+                    if child_dir in seen_dirs:
+                        raise ValueError(f"duplicate suite output directory: {child_dir}")
+                    seen_dirs.add(child_dir)
                     row = {
                         "phase": "E3",
                         "model": model,
@@ -236,72 +244,95 @@ def main(argv: list[str] | None = None) -> int:
                         "output_dir": str(child_dir),
                         **params,
                     }
-                    try:
-                        if not args.dry_run and headroom.get("D_lin_abs_l2h") is None:
-                            raise ValueError("D_lin_abs_l2h unavailable; headroom failed")
-                        cmd = zeta_command(args, model=model, reservoir=reservoir, Ttilde=Ttilde, params=params, out_dir=child_dir)
-                        run_recorded_command(
-                            name="zeta_path",
-                            command=cmd,
-                            cwd=REPO_ROOT,
-                            commands=commands,
-                            dry_run=args.dry_run,
-                            log_path=child_dir / "suite_command.log",
-                        )
-                        if args.dry_run:
-                            if args.compute_time_scaled_defect and reservoir in DEFECT_RESERVOIRS:
-                                cmd = model123_command(
-                                    args,
-                                    model=model,
-                                    reservoir=reservoir,
-                                    Ttilde=Ttilde,
-                                    params=params,
-                                    out_dir=selected_dir,
-                                    zeta=None,
-                                    compute_defect=True,
-                                )
-                                run_recorded_command(
-                                    name="model123_selected_defect",
-                                    command=cmd,
-                                    cwd=REPO_ROOT,
-                                    commands=commands,
-                                    dry_run=True,
-                                    log_path=selected_dir / "suite_command.log",
-                                )
-                            elif args.compute_time_scaled_defect:
-                                row["defect_status"] = "not_applicable"
-                            row.update({"status": "dry_run"})
-                        else:
-                            row.update(row_from_zeta_run(child_dir))
-                            if args.compute_time_scaled_defect and reservoir in DEFECT_RESERVOIRS:
-                                selected_zeta = row.get("zeta_selected")
-                                cmd = model123_command(
-                                    args,
-                                    model=model,
-                                    reservoir=reservoir,
-                                    Ttilde=Ttilde,
-                                    params=params,
-                                    out_dir=selected_dir,
-                                    zeta=float(selected_zeta) if selected_zeta is not None else None,
-                                    compute_defect=True,
-                                )
-                                run_recorded_command(
-                                    name="model123_selected_defect",
-                                    command=cmd,
-                                    cwd=REPO_ROOT,
-                                    commands=commands,
-                                    dry_run=False,
-                                    log_path=selected_dir / "suite_command.log",
-                                )
-                                row.update(row_from_model123_run(selected_dir))
-                            elif args.compute_time_scaled_defect:
-                                row["defect_status"] = "not_applicable"
-                            add_dlin_columns(row, headroom)
-                            row.update({"status": "ok"})
-                    except Exception as exc:
-                        row.update({"status": "fail", "reason": str(exc)})
-                        failures.append(row)
-                    rows.append(row)
+                    label = f"{model}/{reservoir}/alpha={alpha}"
+
+                    def run_job(
+                        index=index,
+                        row=row,
+                        model=model,
+                        reservoir=reservoir,
+                        params=params,
+                        Ttilde=Ttilde,
+                        child_dir=child_dir,
+                        selected_dir=selected_dir,
+                    ) -> SuiteJobResult:
+                        commands_local: list[dict[str, Any]] = []
+                        failures_local: list[dict[str, Any]] = []
+                        row = dict(row)
+                        try:
+                            if not args.dry_run and headroom.get("D_lin_abs_l2h") is None:
+                                raise ValueError("D_lin_abs_l2h unavailable; headroom failed")
+                            cmd = zeta_command(args, model=model, reservoir=reservoir, Ttilde=Ttilde, params=params, out_dir=child_dir)
+                            run_recorded_command(
+                                name="zeta_path",
+                                command=cmd,
+                                cwd=REPO_ROOT,
+                                commands=commands_local,
+                                dry_run=args.dry_run,
+                                log_path=child_dir / "suite_command.log",
+                            )
+                            if args.dry_run:
+                                if args.compute_time_scaled_defect and reservoir in DEFECT_RESERVOIRS:
+                                    cmd = model123_command(
+                                        args,
+                                        model=model,
+                                        reservoir=reservoir,
+                                        Ttilde=Ttilde,
+                                        params=params,
+                                        out_dir=selected_dir,
+                                        zeta=None,
+                                        compute_defect=True,
+                                    )
+                                    run_recorded_command(
+                                        name="model123_selected_defect",
+                                        command=cmd,
+                                        cwd=REPO_ROOT,
+                                        commands=commands_local,
+                                        dry_run=True,
+                                        log_path=selected_dir / "suite_command.log",
+                                    )
+                                elif args.compute_time_scaled_defect:
+                                    row["defect_status"] = "not_applicable"
+                                row.update({"status": "dry_run"})
+                            else:
+                                row.update(row_from_zeta_run(child_dir))
+                                if args.compute_time_scaled_defect and reservoir in DEFECT_RESERVOIRS:
+                                    selected_zeta = row.get("zeta_selected")
+                                    cmd = model123_command(
+                                        args,
+                                        model=model,
+                                        reservoir=reservoir,
+                                        Ttilde=Ttilde,
+                                        params=params,
+                                        out_dir=selected_dir,
+                                        zeta=float(selected_zeta) if selected_zeta is not None else None,
+                                        compute_defect=True,
+                                    )
+                                    run_recorded_command(
+                                        name="model123_selected_defect",
+                                        command=cmd,
+                                        cwd=REPO_ROOT,
+                                        commands=commands_local,
+                                        dry_run=False,
+                                        log_path=selected_dir / "suite_command.log",
+                                    )
+                                    row.update(row_from_model123_run(selected_dir))
+                                elif args.compute_time_scaled_defect:
+                                    row["defect_status"] = "not_applicable"
+                                add_dlin_columns(row, headroom)
+                                row.update({"status": "ok"})
+                        except Exception as exc:
+                            row.update({"status": "fail", "reason": str(exc)})
+                            failures_local.append(dict(row))
+                        return SuiteJobResult(index=index, row=row, commands=commands_local, failures=failures_local)
+
+                    jobs.append(SuiteJob(index=index, label=label, run=run_job))
+                    index += 1
+
+    results = run_suite_jobs(jobs=jobs, max_workers=args.max_workers, progress_label="E3")
+    rows = [result.row for result in results]
+    commands.extend(command for result in results for command in result.commands)
+    failures.extend(failure for result in results for failure in result.failures)
 
     ok_rows = [row for row in rows if row.get("status") == "ok"]
     best_by_group = [] if args.dry_run else best_by_validation(ok_rows, ["model", "reservoir"])

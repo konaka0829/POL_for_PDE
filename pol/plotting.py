@@ -123,6 +123,188 @@ def plot_1d_prediction(
     return paths
 
 
+def _default_x_for_y(x: Optional[ArrayLike], y: np.ndarray) -> np.ndarray:
+    if x is None:
+        return np.linspace(0.0, 1.0, num=y.shape[0], endpoint=False)
+    x_np = _to_numpy(x).reshape(-1)
+    if x_np.shape[0] != y.shape[0]:
+        raise ValueError(f"x/y length mismatch: x has {x_np.shape[0]} points, y has {y.shape[0]}")
+    return x_np
+
+
+def plot_single_waveform(
+    x: Optional[ArrayLike],
+    y: ArrayLike,
+    out_path_no_ext: str,
+    *,
+    label: Optional[str] = None,
+    title: str = "",
+    xlabel: str = "x",
+    ylabel: str = "u",
+    ylim: Optional[tuple[float, float]] = None,
+    linewidth: float = 2.0,
+) -> Tuple[str, str, str]:
+    y_np = _to_numpy(y).reshape(-1)
+    x_np = _default_x_for_y(x, y_np)
+    fig, ax = plt.subplots(figsize=(5.2, 3.0))
+    ax.plot(x_np, y_np, label=label, linewidth=linewidth, color=COLOR_INPUT)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+    if title:
+        ax.set_title(title)
+    if label:
+        ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.25)
+    fig.tight_layout()
+    paths = save_figure_all_formats(fig, out_path_no_ext)
+    plt.close(fig)
+    return paths
+
+
+def plot_waveform_overlay(
+    x: Optional[ArrayLike],
+    curves: Sequence[dict],
+    out_path_no_ext: str,
+    *,
+    title: str = "",
+    xlabel: str = "x",
+    ylabel: str = "u",
+    ylim: Optional[tuple[float, float]] = None,
+) -> Tuple[str, str, str]:
+    if not curves:
+        raise ValueError("curves must be non-empty")
+    first = _to_numpy(curves[0]["y"]).reshape(-1)
+    x_np = _default_x_for_y(x, first)
+    colors = [COLOR_GT, COLOR_PRED, COLOR_INPUT]
+    fig, ax = plt.subplots(figsize=(5.2, 3.0))
+    for idx, curve in enumerate(curves):
+        y_np = _to_numpy(curve["y"]).reshape(-1)
+        if y_np.shape != first.shape:
+            raise ValueError(f"curve {idx} has shape {y_np.shape}, expected {first.shape}")
+        kwargs = {
+            "label": curve.get("label"),
+            "linestyle": curve.get("linestyle", "-"),
+            "linewidth": curve.get("linewidth", 2.0),
+            "alpha": curve.get("alpha", 1.0),
+            "color": curve.get("color", colors[idx % len(colors)]),
+        }
+        ax.plot(x_np, y_np, **kwargs)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+    if title:
+        ax.set_title(title)
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.25)
+    fig.tight_layout()
+    paths = save_figure_all_formats(fig, out_path_no_ext)
+    plt.close(fig)
+    return paths
+
+
+def plot_feature_vector(
+    values: ArrayLike,
+    out_path_no_ext: str,
+    *,
+    title: str = "",
+    xlabel: str = "feature index",
+    ylabel: str = "value",
+    max_points: int = 512,
+) -> Tuple[str, str, str]:
+    vec = _to_numpy(values).reshape(-1)
+    if max_points <= 0:
+        raise ValueError("max_points must be positive")
+    truncated = vec.shape[0] > max_points
+    plot_vec = vec[:max_points]
+    fig, ax = plt.subplots(figsize=(5.4, 3.0))
+    ax.plot(np.arange(plot_vec.shape[0]), plot_vec, linewidth=1.2, color=COLOR_RESERVOIR_EVOLUTION)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    shown_title = title
+    if truncated:
+        suffix = f"first {max_points} of {vec.shape[0]} features"
+        shown_title = f"{title} ({suffix})" if title else suffix
+    if shown_title:
+        ax.set_title(shown_title)
+    ax.grid(True, alpha=0.25)
+    fig.tight_layout()
+    paths = save_figure_all_formats(fig, out_path_no_ext)
+    plt.close(fig)
+    return paths
+
+
+def plot_spacetime(
+    x: ArrayLike,
+    t: ArrayLike,
+    u_xt: ArrayLike,
+    out_path_no_ext: str,
+    *,
+    title: str = "",
+    xlabel: str = "x",
+    ylabel: str = "t",
+    cbar_label: str = "u",
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    cmap: str = "viridis",
+    symmetric_colorlim: bool = False,
+) -> Tuple[str, str, str]:
+    x_np = _to_numpy(x).reshape(-1)
+    t_np = _to_numpy(t).reshape(-1)
+    u_np = _to_numpy(u_xt)
+    if u_np.ndim == 3 and u_np.shape[0] == 1:
+        u_np = u_np[0]
+    if u_np.ndim != 2:
+        raise ValueError(f"u_xt must have shape (Nt, Nx) or (1, Nt, Nx), got {tuple(u_np.shape)}")
+    if u_np.shape != (t_np.shape[0], x_np.shape[0]):
+        raise ValueError(
+            "u_xt shape mismatch: got %s, expected (%d, %d)"
+            % (tuple(u_np.shape), t_np.shape[0], x_np.shape[0])
+        )
+    if symmetric_colorlim:
+        finite = u_np[np.isfinite(u_np)]
+        if finite.size:
+            lim = float(np.max(np.abs(finite)))
+            vmin = -lim if vmin is None else vmin
+            vmax = lim if vmax is None else vmax
+    if x_np.shape[0] > 1:
+        dx = float(np.median(np.diff(x_np)))
+        x0 = float(x_np[0] - 0.5 * dx)
+        x1 = float(x_np[-1] + 0.5 * dx)
+    else:
+        x0, x1 = float(x_np[0]) - 0.5, float(x_np[0]) + 0.5
+    if t_np.shape[0] > 1:
+        dt = float(np.median(np.diff(t_np)))
+        t0 = float(t_np[0] - 0.5 * dt)
+        t1 = float(t_np[-1] + 0.5 * dt)
+    else:
+        t0, t1 = float(t_np[0]) - 0.5, float(t_np[0]) + 0.5
+    fig, ax = plt.subplots(figsize=(5.2, 3.4))
+    im = ax.imshow(
+        u_np,
+        origin="lower",
+        aspect="auto",
+        extent=(x0, x1, t0, t1),
+        vmin=vmin,
+        vmax=vmax,
+        cmap=cmap,
+        interpolation="nearest",
+        rasterized=True,
+    )
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    if title:
+        ax.set_title(title)
+    cbar = fig.colorbar(im, ax=ax, pad=0.02)
+    cbar.set_label(cbar_label)
+    fig.tight_layout()
+    paths = save_figure_all_formats(fig, out_path_no_ext)
+    plt.close(fig)
+    return paths
+
+
 def plot_1d_reservoir_evolution(
     x: Optional[ArrayLike],
     states: Sequence[ArrayLike],
@@ -160,4 +342,3 @@ def plot_1d_reservoir_evolution(
     paths = save_figure_all_formats(fig, out_path_no_ext)
     plt.close(fig)
     return paths
-

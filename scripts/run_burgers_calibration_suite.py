@@ -28,8 +28,11 @@ from scripts.suite_common import (
     row_from_model123_run,
     row_from_zeta_run,
     run_recorded_command,
+    run_suite_jobs,
     safe_tag,
     save_all_formats,
+    SuiteJob,
+    SuiteJobResult,
     to_jsonable,
     write_csv,
     write_json,
@@ -119,9 +122,9 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = Path(args.output_dir)
     runs_dir = out_dir / "runs"
     out_dir.mkdir(parents=True, exist_ok=True)
-    rows: list[dict[str, Any]] = []
-    failures: list[dict[str, Any]] = []
-    commands: list[dict[str, Any]] = []
+    jobs: list[SuiteJob] = []
+    seen_dirs: set[Path] = set()
+    index = 0
 
     for model in models:
         for res_nu in parse_floats(args.res_burgers_nu_values):
@@ -132,6 +135,10 @@ def main(argv: list[str] | None = None) -> int:
                     tag = "__".join([model, f"alpha_{safe_tag(alpha)}", f"nu_{safe_tag(res_nu)}", f"b_{safe_tag(res_b)}"])
                     zeta_dir = runs_dir / tag / "zeta_path"
                     run_dir = runs_dir / tag / "selected_run"
+                    suite_dir = runs_dir / tag
+                    if suite_dir in seen_dirs:
+                        raise ValueError(f"duplicate suite output directory: {suite_dir}")
+                    seen_dirs.add(suite_dir)
                     row = {
                         "phase": "E2",
                         "model": model,
@@ -145,50 +152,72 @@ def main(argv: list[str] | None = None) -> int:
                         "burgers_dealias": int(args.burgers_dealias),
                         **coeffs,
                     }
-                    try:
-                        selected_zeta = None
-                        if model in {"model2", "model3"}:
-                            cmd = zeta_command(args, model=model, reservoir="burgers", Ttilde=Ttilde, params=params, out_dir=zeta_dir)
-                            run_recorded_command(
-                                name="zeta_path",
-                                command=cmd,
-                                cwd=REPO_ROOT,
-                                commands=commands,
-                                dry_run=args.dry_run,
-                                log_path=zeta_dir / "suite_command.log",
-                            )
-                            if not args.dry_run:
-                                zeta_row = row_from_zeta_run(zeta_dir)
-                                selected_zeta = zeta_row.get("zeta_selected")
-                                row.update(zeta_row)
-                        if model == "model1" or args.compute_time_scaled_defect:
-                            cmd = model123_command(
-                                args,
-                                model=model,
-                                reservoir="burgers",
-                                Ttilde=Ttilde,
-                                params=params,
-                                out_dir=run_dir,
-                                zeta=selected_zeta,
-                                compute_defect=args.compute_time_scaled_defect,
-                            )
-                            run_recorded_command(
-                                name="model123_selected",
-                                command=cmd,
-                                cwd=REPO_ROOT,
-                                commands=commands,
-                                dry_run=args.dry_run,
-                                log_path=run_dir / "suite_command.log",
-                            )
-                            if not args.dry_run:
-                                row.update(row_from_model123_run(run_dir))
-                                if model == "model1":
-                                    row["zeta_selected"] = None
-                        row["status"] = "dry_run" if args.dry_run else "ok"
-                    except Exception as exc:
-                        row.update({"status": "fail", "reason": str(exc)})
-                        failures.append(row)
-                    rows.append(row)
+                    label = f"{model}/burgers/alpha={alpha}/nu={res_nu}/b={res_b}"
+
+                    def run_job(
+                        index=index,
+                        row=row,
+                        model=model,
+                        params=params,
+                        Ttilde=Ttilde,
+                        zeta_dir=zeta_dir,
+                        run_dir=run_dir,
+                    ) -> SuiteJobResult:
+                        commands_local: list[dict[str, Any]] = []
+                        failures_local: list[dict[str, Any]] = []
+                        row = dict(row)
+                        try:
+                            selected_zeta = None
+                            if model in {"model2", "model3"}:
+                                cmd = zeta_command(args, model=model, reservoir="burgers", Ttilde=Ttilde, params=params, out_dir=zeta_dir)
+                                run_recorded_command(
+                                    name="zeta_path",
+                                    command=cmd,
+                                    cwd=REPO_ROOT,
+                                    commands=commands_local,
+                                    dry_run=args.dry_run,
+                                    log_path=zeta_dir / "suite_command.log",
+                                )
+                                if not args.dry_run:
+                                    zeta_row = row_from_zeta_run(zeta_dir)
+                                    selected_zeta = zeta_row.get("zeta_selected")
+                                    row.update(zeta_row)
+                            if model == "model1" or args.compute_time_scaled_defect:
+                                cmd = model123_command(
+                                    args,
+                                    model=model,
+                                    reservoir="burgers",
+                                    Ttilde=Ttilde,
+                                    params=params,
+                                    out_dir=run_dir,
+                                    zeta=selected_zeta,
+                                    compute_defect=args.compute_time_scaled_defect,
+                                )
+                                run_recorded_command(
+                                    name="model123_selected",
+                                    command=cmd,
+                                    cwd=REPO_ROOT,
+                                    commands=commands_local,
+                                    dry_run=args.dry_run,
+                                    log_path=run_dir / "suite_command.log",
+                                )
+                                if not args.dry_run:
+                                    row.update(row_from_model123_run(run_dir))
+                                    if model == "model1":
+                                        row["zeta_selected"] = None
+                            row["status"] = "dry_run" if args.dry_run else "ok"
+                        except Exception as exc:
+                            row.update({"status": "fail", "reason": str(exc)})
+                            failures_local.append(dict(row))
+                        return SuiteJobResult(index=index, row=row, commands=commands_local, failures=failures_local)
+
+                    jobs.append(SuiteJob(index=index, label=label, run=run_job))
+                    index += 1
+
+    results = run_suite_jobs(jobs=jobs, max_workers=args.max_workers, progress_label="E2")
+    rows = [result.row for result in results]
+    commands = [command for result in results for command in result.commands]
+    failures = [failure for result in results for failure in result.failures]
 
     ok_rows = [row for row in rows if row.get("status") == "ok"]
     best_rows = [] if args.dry_run else best_by_validation(ok_rows, ["model"])

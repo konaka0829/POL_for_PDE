@@ -343,6 +343,11 @@ python scripts/run_e0_smoke_suite.py \
   --use-feature-cache
 ```
 
+For E1/E2/E3 suites, use `--max-workers N` to run independent suite rows
+concurrently. Each worker launches a child Python process; the suite clamps
+BLAS/Torch thread environment variables to 1 to avoid CPU oversubscription.
+Avoid duplicate grid entries that would write to the same output directory.
+
 E1 baseline suite compares static, heat, and advection reservoirs under the
 same split and validation-only zeta selection:
 

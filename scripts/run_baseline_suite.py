@@ -23,7 +23,10 @@ from scripts.suite_common import (
     row_from_zeta_run,
     run_recorded_command,
     safe_tag,
+    SuiteJob,
+    SuiteJobResult,
     to_jsonable,
+    run_suite_jobs,
     write_csv,
     write_json,
     zeta_command,
@@ -106,9 +109,9 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = Path(args.output_dir)
     runs_dir = out_dir / "runs"
     out_dir.mkdir(parents=True, exist_ok=True)
-    rows: list[dict[str, Any]] = []
-    failures: list[dict[str, Any]] = []
-    commands: list[dict[str, Any]] = []
+    jobs: list[SuiteJob] = []
+    seen_dirs: set[Path] = set()
+    index = 0
 
     for model in models:
         for reservoir in reservoirs:
@@ -116,26 +119,43 @@ def main(argv: list[str] | None = None) -> int:
                 for alpha, Ttilde in pairs:
                     tag_parts = [model, reservoir, f"alpha_{safe_tag(alpha)}"] + [f"{k}_{safe_tag(v)}" for k, v in sorted(params.items())]
                     child_dir = runs_dir / "__".join(tag_parts)
+                    if child_dir in seen_dirs:
+                        raise ValueError(f"duplicate suite output directory: {child_dir}")
+                    seen_dirs.add(child_dir)
                     row = _row_base(args=args, model=model, reservoir=reservoir, alpha=alpha, Ttilde=Ttilde, params=params, child_dir=child_dir)
                     cmd = zeta_command(args, model=model, reservoir=reservoir, Ttilde=Ttilde, params=params, out_dir=child_dir)
-                    try:
-                        run_recorded_command(
-                            name="zeta_path",
-                            command=cmd,
-                            cwd=REPO_ROOT,
-                            commands=commands,
-                            dry_run=args.dry_run,
-                            log_path=child_dir / "suite_command.log",
-                        )
-                        if args.dry_run:
-                            row.update({"status": "dry_run"})
-                        else:
-                            row.update(row_from_zeta_run(child_dir))
-                            row.update({"status": "ok"})
-                    except Exception as exc:
-                        row.update({"status": "fail", "reason": str(exc)})
-                        failures.append(row)
-                    rows.append(row)
+                    label = f"{model}/{reservoir}/alpha={alpha}"
+
+                    def run_job(index=index, row=row, cmd=cmd, child_dir=child_dir) -> SuiteJobResult:
+                        commands_local: list[dict[str, Any]] = []
+                        failures_local: list[dict[str, Any]] = []
+                        row = dict(row)
+                        try:
+                            run_recorded_command(
+                                name="zeta_path",
+                                command=cmd,
+                                cwd=REPO_ROOT,
+                                commands=commands_local,
+                                dry_run=args.dry_run,
+                                log_path=child_dir / "suite_command.log",
+                            )
+                            if args.dry_run:
+                                row.update({"status": "dry_run"})
+                            else:
+                                row.update(row_from_zeta_run(child_dir))
+                                row.update({"status": "ok"})
+                        except Exception as exc:
+                            row.update({"status": "fail", "reason": str(exc)})
+                            failures_local.append(dict(row))
+                        return SuiteJobResult(index=index, row=row, commands=commands_local, failures=failures_local)
+
+                    jobs.append(SuiteJob(index=index, label=label, run=run_job))
+                    index += 1
+
+    results = run_suite_jobs(jobs=jobs, max_workers=args.max_workers, progress_label="E1")
+    rows = [result.row for result in results]
+    commands = [command for result in results for command in result.commands]
+    failures = [failure for result in results for failure in result.failures]
 
     best_rows = [] if args.dry_run else best_by_validation([row for row in rows if row.get("status") == "ok"], ["model", "reservoir"])
     preferred = [

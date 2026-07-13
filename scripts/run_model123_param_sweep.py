@@ -58,14 +58,14 @@ PARAMETERS: dict[str, SweepParameter] = {
         name="alpha",
         cli_flag="",
         kind="float",
-        label="alpha = Ttilde/T",
+        label=r"$\tilde{T}$",
         positive=True,
     ),
     "Ttilde": SweepParameter(
         name="Ttilde",
         cli_flag="--Ttilde",
         kind="float",
-        label="Ttilde",
+        label=r"$\tilde{T}$",
         positive=True,
     ),
     "dt": SweepParameter(
@@ -94,7 +94,7 @@ PARAMETERS: dict[str, SweepParameter] = {
         name="rd_nu",
         cli_flag="--rd-nu",
         kind="float",
-        label="rd_nu",
+        label=r"$\tilde{\nu}$",
         positive=True,
         prefer_log_axis=True,
         reservoirs=("reaction_diffusion",),
@@ -117,7 +117,7 @@ PARAMETERS: dict[str, SweepParameter] = {
         name="res_burgers_nu",
         cli_flag="--res-burgers-nu",
         kind="float",
-        label="res_burgers_nu",
+        label=r"$\tilde{\nu}$",
         positive=True,
         prefer_log_axis=True,
         reservoirs=("burgers",),
@@ -158,7 +158,7 @@ PARAMETERS: dict[str, SweepParameter] = {
         name="heat_nu",
         cli_flag="--heat-nu",
         kind="float",
-        label="heat_nu",
+        label=r"$\tilde{\nu}$",
         positive=True,
         prefer_log_axis=True,
         reservoirs=("heat",),
@@ -1506,7 +1506,13 @@ def save_all_model_param_vs_error_plot(
 
 def param_vs_error_xlabel(parameter: SweepParameter) -> str:
     if parameter.name == "alpha":
-        return r"$\alpha$"
+        return r"$\tilde{T}$"
+    if parameter.name == "rd_nu":
+        return r"$\tilde{\nu}$"
+    if parameter.name == "rd_alpha":
+        return r"$\alpha_{\mathrm{RD}}$"
+    if parameter.name == "rd_beta":
+        return r"$\beta_{\mathrm{RD}}$"
     if parameter.name == "res_burgers_nu":
         return r"$\tilde{\nu}$"
     return parameter.label

@@ -5,9 +5,10 @@ import json
 import os
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import matplotlib
 
@@ -126,6 +127,56 @@ class CommandRecord:
     return_code: int | None
     status: str
     log_path: str | None = None
+
+
+@dataclass(frozen=True)
+class SuiteJob:
+    index: int
+    label: str
+    run: Callable[[], "SuiteJobResult"]
+
+
+@dataclass
+class SuiteJobResult:
+    index: int
+    row: dict[str, Any]
+    commands: list[dict[str, Any]]
+    failures: list[dict[str, Any]]
+
+
+def validate_max_workers(max_workers: int) -> int:
+    value = int(max_workers)
+    if value <= 0:
+        raise ValueError("--max-workers must be positive")
+    return value
+
+
+def run_suite_jobs(*, jobs: list[SuiteJob], max_workers: int, progress_label: str) -> list[SuiteJobResult]:
+    if not jobs:
+        validate_max_workers(max_workers)
+        return []
+    workers = min(validate_max_workers(max_workers), len(jobs))
+    if workers == 1:
+        return [job.run() for job in jobs]
+
+    print(f"[{progress_label}] Launching {workers} worker(s) for {len(jobs)} job(s)", flush=True)
+    results_by_index: dict[int, SuiteJobResult] = {}
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_job = {executor.submit(job.run): job for job in jobs}
+        completed = 0
+        for future in as_completed(future_to_job):
+            job = future_to_job[future]
+            completed += 1
+            try:
+                result = future.result()
+            except Exception as exc:
+                row = {"status": "fail", "reason": str(exc), "job_label": job.label}
+                result = SuiteJobResult(index=job.index, row=row, commands=[], failures=[row])
+            results_by_index[job.index] = result
+            status = result.row.get("status")
+            print(f"[{progress_label} {completed}/{len(jobs)}] {job.label} -> {status}", flush=True)
+
+    return [results_by_index[job.index] for job in sorted(jobs, key=lambda item: item.index)]
 
 
 def run_recorded_command(

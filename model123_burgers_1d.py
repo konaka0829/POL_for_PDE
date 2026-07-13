@@ -151,6 +151,11 @@ def parse_args():
         default="",
         help="Optional save path. If omitted, writes out-dir/model.pt",
     )
+    parser.add_argument(
+        "--save-predictions",
+        action="store_true",
+        help="Save test predictions and per-sample metrics to out-dir/predictions.pt and sample_metrics.csv.",
+    )
     args = parser.parse_args()
     _apply_config_defaults(parser, args)
     if not hasattr(args, "_config_applied"):
@@ -733,6 +738,51 @@ def _write_dict_rows_csv(path, rows):
         writer.writerows(rows)
 
 
+def save_prediction_outputs(
+    args,
+    *,
+    resolved_cfg,
+    split_meta,
+    dataset_meta,
+    domain_length,
+    s,
+    dx,
+    x_grid,
+    x_test_all,
+    y_test_all,
+    pred_test,
+    per_sample_abs,
+    per_sample_rel,
+):
+    payload = {
+        "args": to_jsonable(vars(args)),
+        "model": args.model,
+        "reservoir": args.reservoir,
+        "model_config": to_jsonable(asdict(resolved_cfg)),
+        "split": to_jsonable(split_meta),
+        "dataset_metadata": to_jsonable(normalize_dataset_metadata(dataset_meta)),
+        "domain_length": float(domain_length),
+        "effective_nx": int(s),
+        "dx": float(dx),
+        "x_grid": torch.as_tensor(x_grid),
+        "x_test": x_test_all.detach().cpu(),
+        "y_test": y_test_all.detach().cpu(),
+        "pred_test": pred_test.detach().cpu(),
+        "per_sample_absL2h": per_sample_abs.detach().cpu(),
+        "per_sample_relL2": per_sample_rel.detach().cpu(),
+    }
+    torch.save(payload, os.path.join(args.out_dir, "predictions.pt"))
+    rows = [
+        {
+            "sample_index": int(idx),
+            "absL2h": float(per_sample_abs[idx]),
+            "relL2": float(per_sample_rel[idx]),
+        }
+        for idx in range(int(per_sample_abs.numel()))
+    ]
+    _write_dict_rows_csv(os.path.join(args.out_dir, "sample_metrics.csv"), rows)
+
+
 def _plot_error_vs_defect(rows, out_path_no_ext):
     fig, ax = plt.subplots(figsize=(6.2, 4.4))
     ax.scatter(
@@ -996,6 +1046,23 @@ def main():
         )
 
     x_grid = np.linspace(0.0, domain_length, s, endpoint=False)
+    if args.save_predictions:
+        save_prediction_outputs(
+            args,
+            resolved_cfg=resolved_cfg,
+            split_meta=split_meta,
+            dataset_meta=dataset_meta,
+            domain_length=domain_length,
+            s=s,
+            dx=dx,
+            x_grid=x_grid,
+            x_test_all=x_test_all,
+            y_test_all=y_test_all,
+            pred_test=pred_test,
+            per_sample_abs=per_sample_abs,
+            per_sample_rel=per_sample_rel,
+        )
+        print("saved predictions: %s" % os.path.join(args.out_dir, "predictions.pt"))
     for idx in [0, min(1, args.ntest - 1), min(2, args.ntest - 1)]:
         plot_1d_prediction(
             x=x_grid,

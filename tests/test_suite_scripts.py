@@ -9,7 +9,7 @@ import torch
 from scripts.run_baseline_suite import main as baseline_main
 from scripts.run_burgers_calibration_suite import coefficient_columns, main as calibration_main
 from scripts.run_e0_smoke_suite import main as e0_main
-from scripts.run_nonlinear_surrogate_suite import add_dlin_columns, spectral_error_rows
+from scripts.run_nonlinear_surrogate_suite import add_dlin_columns, main as nonlinear_main, spectral_error_rows
 from scripts.suite_common import best_by_validation
 
 
@@ -104,6 +104,49 @@ def test_baseline_suite_dry_run_cartesian_product(tmp_path):
     assert len(commands) == 6
 
 
+def test_baseline_suite_dry_run_max_workers_preserves_order(tmp_path):
+    out_dir = tmp_path / "baseline_parallel"
+    rc = baseline_main(
+        [
+            "--config",
+            "configs/B0_smoke.json",
+            "--data-file",
+            str(tmp_path / "dummy.pt"),
+            "--output-dir",
+            str(out_dir),
+            "--models",
+            "model2,model3",
+            "--reservoirs",
+            "static,heat",
+            "--alpha-values",
+            "1.0",
+            "--dry-run",
+            "--max-workers",
+            "2",
+            "--python",
+            sys.executable,
+        ]
+    )
+    assert rc == 0
+    rows = _read_csv(out_dir / "baseline_summary.csv")
+    commands = json.loads((out_dir / "commands.json").read_text(encoding="utf-8"))
+    assert len(rows) == 4
+    assert len(commands) == 4
+    assert all(row["status"] == "dry_run" for row in rows)
+    assert [(row["model"], row["reservoir"]) for row in rows] == [
+        ("model2", "static"),
+        ("model2", "heat"),
+        ("model3", "static"),
+        ("model3", "heat"),
+    ]
+    assert [record["command"][record["command"].index("--model") + 1] for record in commands] == [
+        "model2",
+        "model2",
+        "model3",
+        "model3",
+    ]
+
+
 @pytest.mark.slow
 def test_baseline_suite_tiny_actual_run(tmp_path):
     data = tmp_path / "data.pt"
@@ -173,6 +216,101 @@ def test_burgers_calibration_dry_run_grid_and_schema(tmp_path):
     assert len(rows) == 4
     for key in ["effective_nu", "effective_b", "mismatch_nu", "mismatch_b", "scaled_mismatch_norm"]:
         assert key in rows[0]
+
+
+def test_burgers_calibration_dry_run_max_workers_records_dependent_commands(tmp_path):
+    out_dir = tmp_path / "calibration_parallel"
+    rc = calibration_main(
+        [
+            "--config",
+            "configs/B0_smoke.json",
+            "--data-file",
+            str(tmp_path / "dummy.pt"),
+            "--output-dir",
+            str(out_dir),
+            "--models",
+            "model1,model2",
+            "--alpha-values",
+            "1.0",
+            "--res-burgers-nu-values",
+            "0.01",
+            "--res-burgers-b-values",
+            "1.0",
+            "--compute-time-scaled-defect",
+            "--dry-run",
+            "--max-workers",
+            "2",
+            "--python",
+            sys.executable,
+        ]
+    )
+    assert rc == 0
+    rows = _read_csv(out_dir / "calibration_summary.csv")
+    commands = json.loads((out_dir / "commands.json").read_text(encoding="utf-8"))
+    assert len(rows) == 2
+    assert [row["model"] for row in rows] == ["model1", "model2"]
+    assert len(commands) == 3
+    assert [record["name"] for record in commands] == ["model123_selected", "zeta_path", "model123_selected"]
+
+
+def test_nonlinear_suite_dry_run_max_workers_keeps_headroom_first(tmp_path):
+    out_dir = tmp_path / "nonlinear_parallel"
+    rc = nonlinear_main(
+        [
+            "--config",
+            "configs/B0_smoke.json",
+            "--data-file",
+            str(tmp_path / "dummy.pt"),
+            "--output-dir",
+            str(out_dir),
+            "--models",
+            "model2",
+            "--reservoirs",
+            "static,reaction_diffusion",
+            "--alpha-values",
+            "1.0",
+            "--compute-time-scaled-defect",
+            "--dry-run",
+            "--max-workers",
+            "2",
+            "--python",
+            sys.executable,
+        ]
+    )
+    assert rc == 0
+    rows = _read_csv(out_dir / "nonlinear_summary.csv")
+    json_rows = json.loads((out_dir / "nonlinear_summary.json").read_text(encoding="utf-8"))["rows"]
+    commands = json.loads((out_dir / "commands.json").read_text(encoding="utf-8"))
+    assert len(rows) == 2
+    assert [row["reservoir"] for row in rows] == ["static", "reaction_diffusion"]
+    assert json_rows[0]["defect_status"] == "not_applicable"
+    assert len(commands) == 4
+    assert [record["name"] for record in commands] == [
+        "headroom",
+        "zeta_path",
+        "zeta_path",
+        "model123_selected_defect",
+    ]
+
+
+@pytest.mark.parametrize("main_func", [baseline_main, calibration_main, nonlinear_main])
+def test_suite_max_workers_must_be_positive(tmp_path, main_func):
+    with pytest.raises(ValueError, match="max-workers"):
+        main_func(
+            [
+                "--config",
+                "configs/B0_smoke.json",
+                "--data-file",
+                str(tmp_path / "dummy.pt"),
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--dry-run",
+                "--max-workers",
+                "0",
+                "--python",
+                sys.executable,
+            ]
+        )
 
 
 def test_best_by_validation_ignores_test_for_selection():
