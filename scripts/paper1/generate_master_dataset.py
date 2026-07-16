@@ -17,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from pol.paper1.config import load_config_json
 from pol.paper1.datasets import build_master_dataset, save_master_dataset
+from pol.paper1.e0 import load_master_initial_conditions
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -25,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--no-target", action="store_true", help="save only master initial conditions")
+    parser.add_argument("--master-initial-conditions", help="validated E0 master_initial_conditions.pt archive")
     return parser
 
 
@@ -73,7 +75,8 @@ def main(argv: list[str] | None = None) -> int:
         _preflight_output_dir(out, overwrite=args.overwrite)
     except FileExistsError as exc:
         parser.error(str(exc))
-    dataset = build_master_dataset(config, generate_target=not args.no_target)
+    master = None if args.master_initial_conditions is None else load_master_initial_conditions(args.master_initial_conditions, config)
+    dataset = build_master_dataset(config, generate_target=not args.no_target, master_initial_conditions=master)
     runtime = {
         "command": [sys.executable, str(Path(__file__).relative_to(REPO_ROOT)), *sys.argv[1:]],
         "git_commit": _git_commit(),
@@ -82,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
         "device": config.data.device,
         "dtype": config.data.dtype,
         "runtime_seconds": time.perf_counter() - start,
+        "master_initial_conditions_archive": args.master_initial_conditions,
     }
     dataset.metadata["runtime"] = runtime
     save_master_dataset(dataset, out, overwrite=args.overwrite)

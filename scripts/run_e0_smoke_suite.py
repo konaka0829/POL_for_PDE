@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+"""Legacy pre-paper suite; this is not the current Paper 1 E0 acceptance test.
+
+Use ``scripts/paper1/run_e0.py`` for the current E0 definition.
+"""
 from __future__ import annotations
 
 import argparse

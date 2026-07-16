@@ -1,0 +1,14 @@
+{
+  "domain": {"length": 1.0},
+  "data": {"total_samples": 1400, "n_train": 1000, "n_val": 200, "n_test": 200, "seed": 0, "dtype": "float64", "device": "cpu", "ic_type": "grf", "grf_gamma": 2.0, "grf_tau": 5.0, "grf_sigma": 25.0, "grf_mean": 0.0, "preprocessing": "l2_scaling_only"},
+  "target": {"equation": "viscous_burgers", "nu": 0.01, "T": 1.0, "dt": 0.001, "fine_dt": 0.0001, "solver": "split_step", "dealias": true},
+  "spatial": {"reference_nx": 4096, "target_data_nx": 4096, "surrogate_internal_nx": 4096, "observation_dim": 4096, "target_output_dim": 257},
+  "e0": {
+    "profile": "main", "calibration_sample_ids": [0, 1, 2, 3], "reference_nx_candidates": [1024, 2048, 4096],
+    "time_candidates": [{"dt": 0.001, "fine_dt": 0.0002}, {"dt": 0.001, "fine_dt": 0.0001}, {"dt": 0.001, "fine_dt": 0.00005}],
+    "q_reference_check": 257,
+    "reference_tolerances": {"mean_relative_l2": 0.0001, "max_relative_l2": 0.0005, "low_mode_relative_l2": 0.00001},
+    "algebraic_tolerances": {"float64_atol": 1e-10, "float64_rtol": 1e-10, "float32_atol": 1e-5, "float32_rtol": 1e-5},
+    "model1_identity": {"target_data_nx": 4096, "surrogate_internal_nx": 4096, "observation_dim": 4096, "target_output_dim": 257}
+  }
+}

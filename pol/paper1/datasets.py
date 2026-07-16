@@ -8,12 +8,10 @@ from typing import Any
 
 import torch
 
-from pol.burgers_spectral_1d import simulate_burgers_split_step
-from pol.spectral_etdrk4_1d import simulate_burgers_etdrk4
-
 from .config import Paper1Config, canonical_config_json, config_from_dict, save_config_json
-from .initial_conditions import build_master_grf_initial_conditions
+from .initial_conditions import MasterInitialConditions, build_master_grf_initial_conditions, initial_conditions_at_resolution
 from .schemas import SCHEMA_VERSION, dataset_schema_metadata, stable_hash_json
+from .solvers import solve_burgers_final_state
 
 
 @dataclass
@@ -62,30 +60,11 @@ def _split_indices(config: Paper1Config) -> tuple[torch.Tensor, torch.Tensor, to
 
 
 def _simulate_target_master_batch(config: Paper1Config, u0: torch.Tensor) -> torch.Tensor:
-    obs_step = int(round(config.target.T / config.target.dt))
-    if abs(obs_step * config.target.dt - config.target.T) > 1e-10:
-        raise ValueError("target.T must be aligned with target.dt")
-    if config.target.solver in {"etdrk4", "fourier_pseudospectral_etdrk4"}:
-        return simulate_burgers_etdrk4(
-            u0,
-            nu=config.target.nu,
-            T=config.target.T,
-            dt=config.target.dt,
-            dealias=config.target.dealias,
-            domain_length=config.domain.length,
-        ).detach()
-    if config.target.solver in {"split_step", "semi_implicit"}:
-        return simulate_burgers_split_step(
-            u0,
-            dt=config.target.dt,
-            Tr=config.target.T,
-            obs_steps=[obs_step],
-            nu=config.target.nu,
-            fine_dt=config.target.fine_dt,
-            dealias=config.target.dealias,
-            domain_length=config.domain.length,
-        )[-1].detach()
-    raise ValueError(f"unsupported target solver: {config.target.solver}")
+    return solve_burgers_final_state(
+        u0, nu=config.target.nu, T=config.target.T, dt=config.target.dt,
+        fine_dt=config.target.fine_dt, solver=config.target.solver,
+        dealias=config.target.dealias, domain_length=config.domain.length,
+    ).values
 
 
 def _simulate_target_master(config: Paper1Config, u0: torch.Tensor, *, batch_size: int = 20) -> torch.Tensor:
@@ -131,9 +110,19 @@ def build_master_dataset(
     config: Paper1Config,
     *,
     generate_target: bool = True,
+    master_initial_conditions: MasterInitialConditions | None = None,
 ) -> Paper1MasterDataset:
     config.validate()
-    master = build_master_grf_initial_conditions(config)
+    master = build_master_grf_initial_conditions(config) if master_initial_conditions is None else master_initial_conditions
+    if master.sample_ids.numel() != config.data.total_samples or not torch.equal(master.sample_ids.cpu(), torch.arange(config.data.total_samples)):
+        raise ValueError("master initial-condition sample IDs/count do not match config")
+    if master.domain_length != config.domain.length or master.seed != config.data.seed:
+        raise ValueError("master initial-condition domain length or seed does not match config")
+    if master.master_nx < config.spatial.reference_nx:
+        raise ValueError("master initial-condition maximum nx is smaller than reference_nx")
+    if master.master_nx != config.spatial.reference_nx:
+        values = initial_conditions_at_resolution(master, config.spatial.reference_nx)
+        master = MasterInitialConditions(master.sample_ids, values, torch.fft.rfft(values, dim=-1, norm="forward"), config.spatial.reference_nx, master.domain_length, master.seed)
     train, val, test, split_meta = _split_indices(config)
     y = _simulate_target_master(config, master.values_master) if generate_target else None
     tensor_hashes = {
@@ -214,8 +203,8 @@ def _verify_loaded(payload: dict[str, Any], manifest: dict[str, Any]) -> None:
     n = cfg.data.total_samples
     if payload["sample_ids"].numel() != n or payload["u0_master"].shape[0] != n:
         raise ValueError("sample count mismatch")
-    expected_u0_shape = (n, cfg.spatial.target_master_nx)
-    expected_hat_shape = (n, cfg.spatial.target_master_nx // 2 + 1)
+    expected_u0_shape = (n, cfg.spatial.reference_nx)
+    expected_hat_shape = (n, cfg.spatial.reference_nx // 2 + 1)
     if tuple(payload["u0_master"].shape) != expected_u0_shape:
         raise ValueError("u0_master shape mismatch")
     if tuple(payload["u0_hat_master"].shape) != expected_hat_shape:

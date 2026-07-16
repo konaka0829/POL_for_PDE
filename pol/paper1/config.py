@@ -51,11 +51,58 @@ class TargetPDEConfig:
 
 @dataclass(frozen=True)
 class SpatialConfig:
-    target_master_nx: int
+    reference_nx: int
     target_data_nx: int
     surrogate_internal_nx: int
     observation_dim: int
     target_output_dim: int
+
+    @property
+    def target_master_nx(self) -> int:
+        """Legacy read-only alias for :attr:`reference_nx`."""
+        return self.reference_nx
+
+
+@dataclass(frozen=True)
+class E0TimeCandidateConfig:
+    dt: float
+    fine_dt: float | None = None
+
+
+@dataclass(frozen=True)
+class E0ReferenceTolerancesConfig:
+    mean_relative_l2: float
+    max_relative_l2: float
+    low_mode_relative_l2: float
+
+
+@dataclass(frozen=True)
+class E0AlgebraicTolerancesConfig:
+    float64_atol: float = 1e-10
+    float64_rtol: float = 1e-10
+    float32_atol: float = 1e-5
+    float32_rtol: float = 1e-5
+
+
+@dataclass(frozen=True)
+class E0Model1IdentityConfig:
+    target_data_nx: int
+    surrogate_internal_nx: int
+    observation_dim: int
+    target_output_dim: int
+
+
+@dataclass(frozen=True)
+class E0Config:
+    calibration_sample_ids: tuple[int, ...]
+    reference_nx_candidates: tuple[int, ...]
+    time_candidates: tuple[E0TimeCandidateConfig, ...]
+    q_reference_check: int
+    reference_tolerances: E0ReferenceTolerancesConfig
+    algebraic_tolerances: E0AlgebraicTolerancesConfig
+    model1_identity: E0Model1IdentityConfig
+    profile: str = "smoke"
+    selection_policy: str = "coarsest_passing_with_finest_pair_required"
 
 
 @dataclass(frozen=True)
@@ -64,6 +111,7 @@ class Paper1Config:
     data: DataConfig
     target: TargetPDEConfig
     spatial: SpatialConfig
+    e0: E0Config | None = None
 
     def validate(self) -> "Paper1Config":
         if self.domain.length <= 0.0:
@@ -99,11 +147,11 @@ class Paper1Config:
             raise ValueError(f"unsupported target.solver: {self.target.solver}")
 
         dims = self.spatial
-        for name in ("target_master_nx", "target_data_nx", "surrogate_internal_nx", "observation_dim", "target_output_dim"):
+        for name in ("reference_nx", "target_data_nx", "surrogate_internal_nx", "observation_dim", "target_output_dim"):
             if getattr(dims, name) <= 0:
                 raise ValueError(f"spatial.{name} must be positive")
-        if dims.target_data_nx > dims.target_master_nx:
-            raise ValueError("spatial.target_data_nx must be <= spatial.target_master_nx")
+        if dims.target_data_nx > dims.reference_nx:
+            raise ValueError("spatial.target_data_nx must be <= spatial.reference_nx")
         if dims.observation_dim > dims.surrogate_internal_nx:
             raise ValueError("spatial.observation_dim must be <= spatial.surrogate_internal_nx")
         q = dims.target_output_dim
@@ -112,23 +160,93 @@ class Paper1Config:
         kmax = (q - 1) // 2
         if kmax >= dims.target_data_nx / 2:
             raise ValueError("spatial.target_output_dim Fourier band is not representable on target_data_nx")
+        if self.e0 is not None:
+            e0 = self.e0
+            if not e0.calibration_sample_ids:
+                raise ValueError("e0.calibration_sample_ids must be non-empty")
+            if len(set(e0.calibration_sample_ids)) != len(e0.calibration_sample_ids):
+                raise ValueError("e0.calibration_sample_ids must not contain duplicates")
+            if any(i < 0 or i >= self.data.total_samples for i in e0.calibration_sample_ids):
+                raise ValueError("e0.calibration_sample_ids contains an invalid sample ID")
+            if len(e0.reference_nx_candidates) < 2:
+                raise ValueError("e0.reference_nx_candidates must contain at least two values")
+            if tuple(sorted(set(e0.reference_nx_candidates))) != e0.reference_nx_candidates:
+                raise ValueError("e0.reference_nx_candidates must be strictly increasing and unique")
+            if e0.reference_nx_candidates[-1] != dims.reference_nx:
+                raise ValueError("largest e0.reference_nx_candidates value must equal spatial.reference_nx")
+            if len(e0.time_candidates) < 2:
+                raise ValueError("e0.time_candidates must contain at least two values")
+            for i, candidate in enumerate(e0.time_candidates):
+                if candidate.dt <= 0 or (candidate.fine_dt is not None and candidate.fine_dt <= 0):
+                    raise ValueError(f"e0.time_candidates[{i}] steps must be positive")
+            if any(v <= 0 for v in vars(e0.reference_tolerances).values()):
+                raise ValueError("e0.reference_tolerances values must be positive")
+            if any(v < 0 for v in vars(e0.algebraic_tolerances).values()):
+                raise ValueError("e0.algebraic_tolerances values must be nonnegative")
+            qk = (e0.q_reference_check - 1) // 2
+            if e0.q_reference_check <= 0 or e0.q_reference_check % 2 == 0 or qk >= min(e0.reference_nx_candidates) / 2:
+                raise ValueError("e0.q_reference_check Fourier band is not representable below Nyquist")
+            identity = e0.model1_identity
+            if identity.observation_dim != identity.surrogate_internal_nx:
+                raise ValueError("e0.model1_identity requires observation_dim = surrogate_internal_nx")
+            if identity.target_data_nx > dims.reference_nx:
+                raise ValueError("e0.model1_identity.target_data_nx exceeds reference_nx")
+            iqk = (identity.target_output_dim - 1) // 2
+            if identity.target_output_dim <= 0 or identity.target_output_dim % 2 == 0 or iqk >= min(identity.target_data_nx, identity.observation_dim) / 2:
+                raise ValueError("e0.model1_identity.target_output_dim is not representable below Nyquist")
         return self
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-def _filter_dataclass(cls, values: dict[str, Any]):
+def _strict_dataclass(cls, values: dict[str, Any], *, path: str):
     names = {f.name for f in fields(cls)}
-    return cls(**{k: v for k, v in values.items() if k in names})
+    unknown = sorted(set(values) - names)
+    if unknown:
+        raise ValueError(f"unknown config key: {path}.{unknown[0]}" if path else f"unknown config key: {unknown[0]}")
+    return cls(**values)
 
 
 def config_from_dict(raw: dict[str, Any]) -> Paper1Config:
+    top_names = {"domain", "data", "target", "spatial", "e0"}
+    unknown_top = sorted(set(raw) - top_names)
+    if unknown_top:
+        raise ValueError(f"unknown config key: {unknown_top[0]}")
+    spatial_raw = dict(raw.get("spatial", {}))
+    legacy = spatial_raw.pop("target_master_nx", None)
+    canonical = spatial_raw.get("reference_nx")
+    if canonical is not None and legacy is not None and canonical != legacy:
+        raise ValueError("spatial.reference_nx conflicts with legacy spatial.target_master_nx")
+    if canonical is None and legacy is not None:
+        spatial_raw["reference_nx"] = legacy
+    e0_raw = raw.get("e0")
+    e0 = None
+    if e0_raw is not None:
+        e0_values = dict(e0_raw)
+        allowed = {f.name for f in fields(E0Config)}
+        unknown = sorted(set(e0_values) - allowed)
+        if unknown:
+            raise ValueError(f"unknown config key: e0.{unknown[0]}")
+        times_raw = e0_values.get("time_candidates", [])
+        e0_values["time_candidates"] = tuple(
+            _strict_dataclass(E0TimeCandidateConfig, dict(v), path=f"e0.time_candidates[{i}]") for i, v in enumerate(times_raw)
+        )
+        e0_values["calibration_sample_ids"] = tuple(e0_values.get("calibration_sample_ids", []))
+        e0_values["reference_nx_candidates"] = tuple(e0_values.get("reference_nx_candidates", []))
+        for key, cls in (
+            ("reference_tolerances", E0ReferenceTolerancesConfig),
+            ("algebraic_tolerances", E0AlgebraicTolerancesConfig),
+            ("model1_identity", E0Model1IdentityConfig),
+        ):
+            e0_values[key] = _strict_dataclass(cls, dict(e0_values.get(key, {})), path=f"e0.{key}")
+        e0 = _strict_dataclass(E0Config, e0_values, path="e0")
     cfg = Paper1Config(
-        domain=_filter_dataclass(DomainConfig, raw.get("domain", {})),
-        data=_filter_dataclass(DataConfig, raw.get("data", {})),
-        target=_filter_dataclass(TargetPDEConfig, raw.get("target", {})),
-        spatial=_filter_dataclass(SpatialConfig, raw.get("spatial", {})),
+        domain=_strict_dataclass(DomainConfig, dict(raw.get("domain", {})), path="domain"),
+        data=_strict_dataclass(DataConfig, dict(raw.get("data", {})), path="data"),
+        target=_strict_dataclass(TargetPDEConfig, dict(raw.get("target", {})), path="target"),
+        spatial=_strict_dataclass(SpatialConfig, spatial_raw, path="spatial"),
+        e0=e0,
     )
     return cfg.validate()
 

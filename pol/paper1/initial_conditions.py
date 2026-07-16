@@ -36,7 +36,7 @@ def build_master_grf_initial_conditions(config: Paper1Config) -> MasterInitialCo
     device = _resolve_device(config.data.device)
     values = sample_gaussian_random_field_initial_conditions(
         config.data.total_samples,
-        config.spatial.target_master_nx,
+        config.spatial.reference_nx,
         seed=config.data.seed,
         gamma=config.data.grf_gamma,
         tau=config.data.grf_tau,
@@ -50,7 +50,7 @@ def build_master_grf_initial_conditions(config: Paper1Config) -> MasterInitialCo
         sample_ids=torch.arange(config.data.total_samples, dtype=torch.long, device=device),
         values_master=values,
         fourier_master=fourier,
-        master_nx=config.spatial.target_master_nx,
+        master_nx=config.spatial.reference_nx,
         domain_length=config.domain.length,
         seed=config.data.seed,
     )

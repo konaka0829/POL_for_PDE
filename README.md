@@ -67,6 +67,50 @@ or:
 python -m pip install -r requirements.txt
 ```
 
+## Paper 1 E0 acceptance gate
+
+The current Paper 1 E0 is a fail-fast validation of Fourier conventions,
+reference convergence, the finite-input interface, and the fixed Model 1
+decoder. Run the short wiring check with:
+
+```bash
+python scripts/paper1/run_e0.py \
+  --config configs/paper1_e0_smoke.json \
+  --output-dir outputs/paper1_e0_smoke \
+  --overwrite
+```
+
+Run the scientific calibration separately with
+`configs/paper1_e0_main.json`. The smoke tolerances only validate wiring and
+are not the production accuracy criterion. Exit status zero means every
+required check passed; status one means at least one acceptance check failed.
+An existing output is rejected before computation unless `--overwrite` is
+given.
+
+The output contains `e0_summary.json`, convergence CSV/JSON,
+`resampling_checks.json`, `input_interface_checks.json`,
+`model1_identity.json`, the hash-validated `master_initial_conditions.pt` and
+`master_manifest.json`, the resolved config, and environment metadata.
+
+Reuse exactly the same master fields for production data generation with:
+
+```bash
+python scripts/paper1/generate_master_dataset.py \
+  --config configs/paper1_main.json \
+  --master-initial-conditions outputs/paper1_e0_main/master_initial_conditions.pt \
+  --output-dir outputs/paper1_master \
+  --overwrite
+```
+
+The generator validates sample IDs/count, domain, seed, GRF parameters,
+dtype, maximum resolution, schema, and tensor hash before use. If the selected
+production `reference_nx` is smaller than the archive resolution, it derives
+the field by spectral low-pass resampling rather than regenerating the GRF.
+
+`scripts/run_e0_smoke_suite.py` is a legacy suite for static Model 2/3 ridge,
+headroom, and generator-defect experiments. It does not implement or validate
+the current Paper 1 E0.
+
 ## Data Generation
 
 Generate a smoke `.pt` dataset from the checked-in B0 config:
