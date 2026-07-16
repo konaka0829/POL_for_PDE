@@ -9,6 +9,7 @@
     "q_reference_check": 17,
     "reference_tolerances": {"mean_relative_l2": 0.05, "max_relative_l2": 0.1, "low_mode_relative_l2": 0.05},
     "algebraic_tolerances": {"float64_atol": 1e-10, "float64_rtol": 1e-10, "float32_atol": 1e-5, "float32_rtol": 1e-5},
-    "model1_identity": {"target_data_nx": 32, "surrogate_internal_nx": 64, "observation_dim": 64, "target_output_dim": 17}
+    "model1_identity": {"target_data_nx": 32, "surrogate_internal_nx": 64, "observation_dim": 64, "target_output_dim": 17},
+    "reduced_j": {"observation_dim": 16, "target_output_dim": 9}
   }
 }

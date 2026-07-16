@@ -1,4 +1,5 @@
 import copy
+from dataclasses import replace
 import pytest
 
 from pol.paper1.config import config_from_dict, load_config_json
@@ -40,3 +41,19 @@ def test_invalid_ids_candidates_q_and_identity():
     value = raw(); value["e0"]["model1_identity"]["observation_dim"] = 32; cases.append(value)
     for value in cases:
         with pytest.raises(ValueError): config_from_dict(value)
+
+
+def test_time_candidate_order_duplicate_policy_and_alignment_validation():
+    value = raw(); value["e0"]["time_candidates"] = list(reversed(value["e0"]["time_candidates"]))
+    with pytest.raises(ValueError, match="strictly decreasing"): config_from_dict(value)
+    value = raw(); value["e0"]["time_candidates"] = [{"dt": .01, "fine_dt": .006}, {"dt": .01, "fine_dt": .0051}]
+    with pytest.raises(ValueError, match="duplicates"): config_from_dict(value)
+    value = raw(); value["e0"]["selection_policy"] = "unknown"
+    with pytest.raises(ValueError, match="unsupported"): config_from_dict(value)
+    value = raw(); value["e0"]["time_candidates"][0]["dt"] = .007
+    with pytest.raises(ValueError, match="aligned"): config_from_dict(value)
+
+
+def test_invalid_reduced_j_validation():
+    value = raw(); value["e0"]["reduced_j"]["observation_dim"] = 64
+    with pytest.raises(ValueError, match="reduced_j"): config_from_dict(value)

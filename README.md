@@ -90,13 +90,17 @@ given.
 The output contains `e0_summary.json`, convergence CSV/JSON,
 `resampling_checks.json`, `input_interface_checks.json`,
 `model1_identity.json`, the hash-validated `master_initial_conditions.pt` and
-`master_manifest.json`, the resolved config, and environment metadata.
+`master_manifest.json`, the resolved config, and environment metadata. A
+passing E0 also writes `accepted_production_config.json`, containing only the
+joint-validated reference resolution and time-integration settings; a failed
+E0 never writes this file. The convergence artifact records spatial,
+temporal, and selected-pair joint checks plus per-run solver-cache statistics.
 
 Reuse exactly the same master fields for production data generation with:
 
 ```bash
 python scripts/paper1/generate_master_dataset.py \
-  --config configs/paper1_main.json \
+  --config outputs/paper1_e0_main/accepted_production_config.json \
   --master-initial-conditions outputs/paper1_e0_main/master_initial_conditions.pt \
   --output-dir outputs/paper1_master \
   --overwrite

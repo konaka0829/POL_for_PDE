@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from dataclasses import replace
 import hashlib
 import json
 import os
@@ -20,13 +21,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from pol.paper1.config import load_config_json, save_config_json
-from pol.paper1.e0 import run_algebraic_checks, run_interface_checks, run_model1_checks, run_reference_convergence, save_master_initial_conditions
-from pol.paper1.grids import spectral_resample_periodic
+from pol.paper1.e0 import E0_SCHEMA_VERSION, E0SolverCache, build_required_checks, run_algebraic_checks, run_interface_checks, run_model1_checks, run_reference_convergence, save_master_initial_conditions
 from pol.paper1.initial_conditions import build_master_grf_initial_conditions
-from pol.paper1.solvers import solve_burgers_final_state
 
 
-ARTIFACTS = ("e0_summary.json", "reference_convergence.csv", "reference_convergence.json", "resampling_checks.json", "input_interface_checks.json", "model1_identity.json", "master_initial_conditions.pt", "master_manifest.json", "resolved_config.json", "environment.json")
+ARTIFACTS = ("e0_summary.json", "reference_convergence.csv", "reference_convergence.json", "resampling_checks.json", "input_interface_checks.json", "model1_identity.json", "master_initial_conditions.pt", "master_manifest.json", "resolved_config.json", "environment.json", "accepted_production_config.json")
 
 
 def _json_safe(value: Any) -> Any:
@@ -60,6 +59,9 @@ def _preflight(out: Path, overwrite: bool) -> None:
     existing = [name for name in ARTIFACTS if (out / name).exists()]
     if existing and not overwrite:
         raise FileExistsError(f"{out} already contains E0 artifacts ({', '.join(existing)}); pass --overwrite")
+    if overwrite:
+        for name in existing:
+            (out / name).unlink()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -85,44 +87,51 @@ def main(argv: list[str] | None = None) -> int:
     start = time.perf_counter()
     command = [sys.executable, str(Path(__file__).relative_to(REPO_ROOT)), *sys.argv[1:]]
     config_hash = hashlib.sha256(config_path.read_bytes()).hexdigest()
-    summary: dict[str, Any] = {"schema_version": "paper1-e0-v1", "status": "fail", "required_checks": {}, "selected_reference": {"reference_nx": None, "solver": None, "requested_dt": None, "requested_fine_dt": None, "effective_inner_step": None}, "num_failures": 0, "failure_reasons": []}
+    summary: dict[str, Any] = {"schema_version": E0_SCHEMA_VERSION, "status": "fail", "required_checks": {}, "selected_reference": {"reference_nx": None, "solver": None, "requested_dt": None, "requested_fine_dt": None, "effective_inner_step": None, "joint_status": None}, "accepted_production_config": None, "num_failures": 0, "failure_reasons": []}
     master_manifest: dict[str, Any] = {}
+    cache = E0SolverCache()
     try:
         master = build_master_grf_initial_conditions(config)
         master_manifest = save_master_initial_conditions(master, out / "master_initial_conditions.pt", out / "master_manifest.json", config)
         resampling, projector = run_algebraic_checks(config)
         resampling["fourier_projector"] = projector
         _write_json(out / "resampling_checks.json", resampling)
-        convergence = run_reference_convergence(config, master)
+        convergence = run_reference_convergence(config, master, cache=cache)
+        reference_state = convergence.pop("_reference_state")
         _write_json(out / "reference_convergence.json", convergence)
         with (out / "reference_convergence.csv").open("w", newline="", encoding="utf-8") as f:
-            fields = ["kind", "candidate_nx", "solver", "requested_dt", "requested_fine_dt", "outer_steps", "substeps_per_outer", "effective_inner_step", "relative_l2_mean", "relative_l2_median", "relative_l2_max", "absolute_l2_mean", "low_mode_relative_l2_mean", "master_hash", "sample_ids"]
+            fields = ["kind", "candidate_nx", "eligible_for_production", "status", "solver", "requested_dt", "requested_fine_dt", "outer_steps", "substeps_per_outer", "effective_inner_step", "relative_l2_mean", "relative_l2_median", "relative_l2_max", "absolute_l2_mean", "low_mode_relative_l2_mean", "master_hash", "sample_ids"]
             w = csv.DictWriter(f, fieldnames=fields); w.writeheader()
             for row in convergence["rows"]:
-                w.writerow({"kind": row["kind"], "candidate_nx": row["candidate_nx"], "solver": row["solver"], "requested_dt": row["requested_dt"], "requested_fine_dt": row["requested_fine_dt"], "outer_steps": row["outer_steps"], "substeps_per_outer": row["substeps_per_outer"], "effective_inner_step": row["effective_inner_step"], "relative_l2_mean": row["relative_l2"]["mean"], "relative_l2_median": row["relative_l2"]["median"], "relative_l2_max": row["relative_l2"]["max"], "absolute_l2_mean": row["absolute_l2"]["mean"], "low_mode_relative_l2_mean": row["low_mode_relative_l2"]["mean"], "master_hash": row["master_hash"], "sample_ids": json.dumps(row["sample_ids"])})
+                w.writerow({"kind": row["kind"], "candidate_nx": row["candidate_nx"], "eligible_for_production": row.get("eligible_for_production", ""), "status": row.get("status", ""), "solver": row["solver"], "requested_dt": row["requested_dt"], "requested_fine_dt": row["requested_fine_dt"], "outer_steps": row["outer_steps"], "substeps_per_outer": row["substeps_per_outer"], "effective_inner_step": row["effective_inner_step"], "relative_l2_mean": row["relative_l2"]["mean"], "relative_l2_median": row["relative_l2"]["median"], "relative_l2_max": row["relative_l2"]["max"], "absolute_l2_mean": row["absolute_l2"]["mean"], "low_mode_relative_l2_mean": row["low_mode_relative_l2"]["mean"], "master_hash": row["master_hash"], "sample_ids": json.dumps(row["sample_ids"])})
         chosen_time = convergence.get("selected_temporal")
         chosen_space = convergence.get("selected_spatial")
-        finest = config.e0.reference_nx_candidates[-1]
-        u0 = spectral_resample_periodic(master.values_master[:2], finest, domain_length=config.domain.length)
-        ref_result = solve_burgers_final_state(u0, nu=config.target.nu, T=config.target.T, dt=config.e0.time_candidates[-1].dt, fine_dt=config.e0.time_candidates[-1].fine_dt, solver=config.target.solver, dealias=config.target.dealias, domain_length=config.domain.length)
-        interfaces = run_interface_checks(config, master, ref_result.values)
+        interfaces = run_interface_checks(config, master, reference_state)
         _write_json(out / "input_interface_checks.json", interfaces)
-        model1 = run_model1_checks(config, master)
+        model1 = run_model1_checks(config, master, cache=cache)
         _write_json(out / "model1_identity.json", model1)
-        required = {"resampling": resampling["status"], "fourier_projector": projector["status"], "reference_spatial_convergence": convergence["spatial_status"], "reference_temporal_convergence": convergence["temporal_status"], "finite_data_interface": interfaces["finite_data_interface"]["status"], "no_high_frequency_leak": interfaces["no_high_frequency_leak"]["status"], "model1_full_observation_identity": model1["full_observation"]["status"], "model1_bandlimited_reduced_j": model1["bandlimited_reduced_j"]["status"]}
+        required = build_required_checks(resampling, projector, convergence, interfaces, model1)
         summary["required_checks"] = required
         failures = [name for name, status in required.items() if status != "pass"]
         summary["failure_reasons"] = [f"required check failed: {name}" for name in failures]
         summary["num_failures"] = len(failures)
         summary["status"] = "pass" if not failures else "fail"
-        if chosen_space and chosen_time:
-            summary["selected_reference"] = {"reference_nx": chosen_space["candidate_nx"], "solver": chosen_time["solver"], "requested_dt": chosen_time["requested_dt"], "requested_fine_dt": chosen_time["requested_fine_dt"], "effective_inner_step": chosen_time["effective_inner_step"]}
+        if not failures and chosen_space and chosen_time and convergence["joint_status"] == "pass":
+            summary["selected_reference"] = {"reference_nx": chosen_space["candidate_nx"], "solver": chosen_time["solver"], "requested_dt": chosen_time["requested_dt"], "requested_fine_dt": chosen_time["requested_fine_dt"], "effective_inner_step": chosen_time["effective_inner_step"], "joint_status": "pass"}
+            accepted = replace(
+                config, e0=None,
+                spatial=replace(config.spatial, reference_nx=int(chosen_space["candidate_nx"])),
+                target=replace(config.target, solver=str(chosen_time["solver"]), dt=float(chosen_time["requested_dt"]), fine_dt=chosen_time["requested_fine_dt"]),
+            )
+            accepted.validate()
+            save_config_json(accepted, out / "accepted_production_config.json")
+            summary["accepted_production_config"] = "accepted_production_config.json"
     except Exception as exc:
         summary["failure_reasons"].append(f"{type(exc).__name__}: {exc}")
         summary["num_failures"] = len(summary["failure_reasons"])
     finally:
         save_config_json(config, out / "resolved_config.json")
-        environment = {"full_command": command, "cwd": os.getcwd(), "git_commit": _git(["rev-parse", "HEAD"]), "git_dirty_status": _git(["status", "--porcelain"]), "python_version": platform.python_version(), "torch_version": torch.__version__, "platform": platform.platform(), "device": config.data.device, "dtype": config.data.dtype, "cuda_available": torch.cuda.is_available(), "config_path": str(config_path), "config_hash": config_hash, "master_archive_hash": master_manifest.get("tensor_hash"), "runtime_seconds": time.perf_counter() - start}
+        environment = {"full_command": command, "cwd": os.getcwd(), "git_commit": _git(["rev-parse", "HEAD"]), "git_dirty_status": _git(["status", "--porcelain"]), "python_version": platform.python_version(), "torch_version": torch.__version__, "platform": platform.platform(), "device": config.data.device, "dtype": config.data.dtype, "cuda_available": torch.cuda.is_available(), "config_path": str(config_path), "config_hash": config_hash, "master_archive_hash": master_manifest.get("tensor_hash"), "solver_cache": cache.stats(), "runtime_seconds": time.perf_counter() - start}
         _write_json(out / "environment.json", environment)
         _write_json(out / "e0_summary.json", summary)
     print(json.dumps(_json_safe(summary), sort_keys=True, allow_nan=False))

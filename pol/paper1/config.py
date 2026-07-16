@@ -7,6 +7,8 @@ from typing import Any
 
 import torch
 
+from .solvers import effective_inner_step, normalize_burgers_solver_name
+
 
 _DTYPES = {"float32": torch.float32, "float64": torch.float64}
 _DEVICES = {"cpu", "cuda", "auto"}
@@ -44,7 +46,7 @@ class TargetPDEConfig:
     nu: float = 1e-2
     T: float = 1.0
     dt: float = 1e-3
-    fine_dt: float = 1e-4
+    fine_dt: float | None = 1e-4
     solver: str = "split_step"
     dealias: bool = True
 
@@ -93,6 +95,12 @@ class E0Model1IdentityConfig:
 
 
 @dataclass(frozen=True)
+class E0ReducedJConfig:
+    observation_dim: int
+    target_output_dim: int
+
+
+@dataclass(frozen=True)
 class E0Config:
     calibration_sample_ids: tuple[int, ...]
     reference_nx_candidates: tuple[int, ...]
@@ -101,6 +109,7 @@ class E0Config:
     reference_tolerances: E0ReferenceTolerancesConfig
     algebraic_tolerances: E0AlgebraicTolerancesConfig
     model1_identity: E0Model1IdentityConfig
+    reduced_j: E0ReducedJConfig
     profile: str = "smoke"
     selection_policy: str = "coarsest_passing_with_finest_pair_required"
 
@@ -141,10 +150,15 @@ class Paper1Config:
             raise ValueError("target.equation must be viscous_burgers/burgers")
         if self.target.nu <= 0.0:
             raise ValueError("target.nu must be positive")
-        if self.target.T <= 0.0 or self.target.dt <= 0.0 or self.target.fine_dt <= 0.0:
-            raise ValueError("target.T, target.dt, and target.fine_dt must be positive")
+        if self.target.T <= 0.0 or self.target.dt <= 0.0:
+            raise ValueError("target.T and target.dt must be positive")
         if self.target.solver not in _SOLVERS:
             raise ValueError(f"unsupported target.solver: {self.target.solver}")
+        normalized_solver = normalize_burgers_solver_name(self.target.solver)
+        if normalized_solver == "split_step" and (self.target.fine_dt is None or self.target.fine_dt <= 0):
+            raise ValueError("split-step target requires positive target.fine_dt")
+        if normalized_solver == "etdrk4" and self.target.fine_dt is not None and self.target.fine_dt <= 0:
+            raise ValueError("target.fine_dt must be positive when provided")
 
         dims = self.spatial
         for name in ("reference_nx", "target_data_nx", "surrogate_internal_nx", "observation_dim", "target_output_dim"):
@@ -176,9 +190,18 @@ class Paper1Config:
                 raise ValueError("largest e0.reference_nx_candidates value must equal spatial.reference_nx")
             if len(e0.time_candidates) < 2:
                 raise ValueError("e0.time_candidates must contain at least two values")
+            if e0.selection_policy != "coarsest_passing_with_finest_pair_required":
+                raise ValueError(f"unsupported e0.selection_policy: {e0.selection_policy}")
+            effective_steps: list[float] = []
             for i, candidate in enumerate(e0.time_candidates):
                 if candidate.dt <= 0 or (candidate.fine_dt is not None and candidate.fine_dt <= 0):
                     raise ValueError(f"e0.time_candidates[{i}] steps must be positive")
+                outer = round(self.target.T / candidate.dt)
+                if abs(outer * candidate.dt - self.target.T) > 1e-10 * max(1.0, abs(self.target.T)):
+                    raise ValueError(f"e0.time_candidates[{i}].dt is not aligned with target.T")
+                effective_steps.append(effective_inner_step(solver=self.target.solver, dt=candidate.dt, fine_dt=candidate.fine_dt))
+            if any(not effective_steps[i] > effective_steps[i + 1] for i in range(len(effective_steps) - 1)):
+                raise ValueError("e0.time_candidates effective inner steps must be strictly decreasing without duplicates")
             if any(v <= 0 for v in vars(e0.reference_tolerances).values()):
                 raise ValueError("e0.reference_tolerances values must be positive")
             if any(v < 0 for v in vars(e0.algebraic_tolerances).values()):
@@ -194,6 +217,15 @@ class Paper1Config:
             iqk = (identity.target_output_dim - 1) // 2
             if identity.target_output_dim <= 0 or identity.target_output_dim % 2 == 0 or iqk >= min(identity.target_data_nx, identity.observation_dim) / 2:
                 raise ValueError("e0.model1_identity.target_output_dim is not representable below Nyquist")
+            reduced = e0.reduced_j
+            if not (1 < reduced.observation_dim < identity.surrogate_internal_nx):
+                raise ValueError("e0.reduced_j.observation_dim must satisfy 1 < J < surrogate_internal_nx")
+            rk = (reduced.target_output_dim - 1) // 2
+            if reduced.target_output_dim <= 0 or reduced.target_output_dim % 2 == 0 or rk >= reduced.observation_dim / 2:
+                raise ValueError("e0.reduced_j.target_output_dim is not representable below observation Nyquist")
+            alias_k = reduced.observation_dim + max(1, rk)
+            if alias_k >= identity.surrogate_internal_nx / 2:
+                raise ValueError("e0.reduced_j leaves no representable high mode for aliasing counterexample")
         return self
 
     def to_dict(self) -> dict[str, Any]:
@@ -238,6 +270,7 @@ def config_from_dict(raw: dict[str, Any]) -> Paper1Config:
             ("reference_tolerances", E0ReferenceTolerancesConfig),
             ("algebraic_tolerances", E0AlgebraicTolerancesConfig),
             ("model1_identity", E0Model1IdentityConfig),
+            ("reduced_j", E0ReducedJConfig),
         ):
             e0_values[key] = _strict_dataclass(cls, dict(e0_values.get(key, {})), path=f"e0.{key}")
         e0 = _strict_dataclass(E0Config, e0_values, path="e0")

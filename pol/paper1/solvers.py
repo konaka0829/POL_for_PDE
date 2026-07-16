@@ -9,6 +9,33 @@ from pol.burgers_spectral_1d import simulate_burgers_split_step
 from pol.spectral_etdrk4_1d import simulate_burgers_etdrk4
 
 
+def normalize_burgers_solver_name(solver: str) -> str:
+    """Return the canonical E0 Burgers solver name."""
+    if solver in {"etdrk4", "fourier_pseudospectral_etdrk4"}:
+        return "etdrk4"
+    if solver in {"split_step", "semi_implicit"}:
+        return "split_step"
+    raise ValueError(f"unsupported Burgers solver: {solver}")
+
+
+def burgers_step_metadata(*, solver: str, dt: float, fine_dt: float | None) -> tuple[float, int]:
+    """Return ``(effective_inner_step, substeps_per_outer)``."""
+    if dt <= 0:
+        raise ValueError("dt must be positive")
+    normalized = normalize_burgers_solver_name(solver)
+    if normalized == "etdrk4":
+        return float(dt), 1
+    if fine_dt is None or fine_dt <= 0:
+        raise ValueError("split_step requires positive fine_dt")
+    substeps = max(1, int(math.ceil(dt / fine_dt)))
+    return float(dt) / substeps, substeps
+
+
+def effective_inner_step(*, solver: str, dt: float, fine_dt: float | None) -> float:
+    """Return the actual numerical step used by the selected solver."""
+    return burgers_step_metadata(solver=solver, dt=dt, fine_dt=fine_dt)[0]
+
+
 @dataclass(frozen=True)
 class BurgersSolverMetadata:
     solver: str
@@ -59,17 +86,14 @@ def solve_burgers_final_state(
     outer_steps = int(round(T / dt))
     if abs(outer_steps * dt - T) > 1e-10 * max(1.0, abs(T)):
         raise ValueError(f"T={T} must be aligned with dt={dt}")
-    normalized = "etdrk4" if solver in {"etdrk4", "fourier_pseudospectral_etdrk4"} else "split_step" if solver in {"split_step", "semi_implicit"} else solver
+    normalized = normalize_burgers_solver_name(solver)
+    effective, substeps = burgers_step_metadata(solver=solver, dt=dt, fine_dt=fine_dt)
     if normalized == "etdrk4":
-        substeps = 1
-        effective = dt
         values = simulate_burgers_etdrk4(u0, nu=nu, T=T, dt=dt, dealias=dealias, domain_length=domain_length)
         requested_fine = None if fine_dt is None else float(fine_dt)
     elif normalized == "split_step":
         if fine_dt is None or fine_dt <= 0:
             raise ValueError("split_step requires positive fine_dt")
-        substeps = max(1, int(math.ceil(dt / fine_dt)))
-        effective = dt / float(substeps)
         values = simulate_burgers_split_step(
             u0, dt=dt, Tr=T, obs_steps=[outer_steps], nu=nu,
             fine_dt=fine_dt, dealias=dealias, domain_length=domain_length,
