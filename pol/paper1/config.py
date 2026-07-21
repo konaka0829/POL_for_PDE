@@ -115,12 +115,44 @@ class E0Config:
 
 
 @dataclass(frozen=True)
+class E1SurrogateCaseConfig:
+    name: str
+    nu: float
+    T: float
+
+
+@dataclass(frozen=True)
+class E1AlgebraicTolerancesConfig:
+    float64_atol: float = 1e-10
+    float64_rtol: float = 1e-10
+    float32_atol: float = 1e-5
+    float32_rtol: float = 1e-5
+
+
+@dataclass(frozen=True)
+class E1Config:
+    surrogate_cases: tuple[E1SurrogateCaseConfig, ...]
+    output_dims: tuple[int, ...]
+    ridge_zetas: tuple[float, ...]
+    noise_levels: tuple[float, ...]
+    noise_repeats: int
+    noise_seed: int
+    selection_metric: str
+    ridge_tie_tolerance: float
+    identifiable_variance_floor: float
+    require_full_observation: bool
+    algebraic_tolerances: E1AlgebraicTolerancesConfig
+    profile: str = "smoke"
+
+
+@dataclass(frozen=True)
 class Paper1Config:
     domain: DomainConfig
     data: DataConfig
     target: TargetPDEConfig
     spatial: SpatialConfig
     e0: E0Config | None = None
+    e1: E1Config | None = None
 
     def validate(self) -> "Paper1Config":
         if self.domain.length <= 0.0:
@@ -146,8 +178,8 @@ class Paper1Config:
         if "z" in self.data.preprocessing.lower() and "score" in self.data.preprocessing.lower():
             raise ValueError("component-wise z-score preprocessing is not enabled for Phase 1")
 
-        if self.target.equation not in {"burgers", "viscous_burgers"}:
-            raise ValueError("target.equation must be viscous_burgers/burgers")
+        if self.target.equation not in {"burgers", "viscous_burgers", "heat"}:
+            raise ValueError("target.equation must be viscous_burgers/burgers/heat")
         if self.target.nu <= 0.0:
             raise ValueError("target.nu must be positive")
         if self.target.T <= 0.0 or self.target.dt <= 0.0:
@@ -226,6 +258,58 @@ class Paper1Config:
             alias_k = reduced.observation_dim + max(1, rk)
             if alias_k >= identity.surrogate_internal_nx / 2:
                 raise ValueError("e0.reduced_j leaves no representable high mode for aliasing counterexample")
+        if self.e1 is not None:
+            e1 = self.e1
+            if self.target.equation != "heat":
+                raise ValueError("E1 requires target.equation='heat'")
+            if self.data.n_val <= 0 or self.data.n_test <= 0:
+                raise ValueError("E1 requires positive validation and test split sizes")
+            if not e1.surrogate_cases:
+                raise ValueError("e1.surrogate_cases must be non-empty")
+            regimes = set()
+            names = set()
+            for i, case in enumerate(e1.surrogate_cases):
+                if not case.name or case.name in names:
+                    raise ValueError(f"e1.surrogate_cases[{i}].name must be non-empty and unique")
+                names.add(case.name)
+                if case.nu <= 0 or case.T <= 0:
+                    raise ValueError(f"e1.surrogate_cases[{i}].nu and T must be positive")
+                delta = self.target.nu * self.target.T - case.nu * case.T
+                if abs(delta) <= 1e-14 * max(1.0, abs(self.target.nu * self.target.T), abs(case.nu * case.T)):
+                    raise ValueError(f"e1.surrogate_cases[{i}] is an exact-match case")
+                regime = "stable" if delta > 0 else "unstable"
+                regimes.add(regime)
+                lower = case.name.lower()
+                if ("stable" in lower and "unstable" not in lower and regime != "stable") or ("unstable" in lower and regime != "unstable"):
+                    raise ValueError(f"e1.surrogate_cases[{i}].name contradicts its numerical regime")
+            if regimes != {"stable", "unstable"}:
+                raise ValueError("e1.surrogate_cases must include both stable and unstable regimes")
+            if not e1.output_dims or tuple(sorted(set(e1.output_dims))) != e1.output_dims:
+                raise ValueError("e1.output_dims must be strictly increasing and unique")
+            if any(q <= 0 or q % 2 == 0 for q in e1.output_dims):
+                raise ValueError("e1.output_dims values must be positive odd integers")
+            if e1.output_dims[-1] != dims.target_output_dim:
+                raise ValueError("max(e1.output_dims) must equal spatial.target_output_dim")
+            for q in e1.output_dims:
+                validate_k = (q - 1) // 2
+                if validate_k >= min(dims.target_data_nx, dims.observation_dim) / 2:
+                    raise ValueError(f"e1.output_dims value {q} is not representable")
+            if self.data.n_train <= max(e1.output_dims):
+                raise ValueError("E1 requires data.n_train > max(e1.output_dims)")
+            if not e1.ridge_zetas or 0.0 not in e1.ridge_zetas or any(z < 0 for z in e1.ridge_zetas):
+                raise ValueError("e1.ridge_zetas must be nonnegative and include 0.0")
+            if any(d < 0 for d in e1.noise_levels) or 0.0 not in e1.noise_levels:
+                raise ValueError("e1.noise_levels must be nonnegative and include 0.0")
+            if e1.noise_repeats <= 0 or e1.ridge_tie_tolerance < 0 or e1.identifiable_variance_floor < 0:
+                raise ValueError("invalid E1 repeat/tolerance setting")
+            if e1.selection_metric != "validation_coefficient_mse":
+                raise ValueError("e1.selection_metric must be validation_coefficient_mse")
+            if e1.require_full_observation and dims.observation_dim != dims.surrogate_internal_nx:
+                raise ValueError("E1 full observation requires observation_dim = surrogate_internal_nx")
+            if not e1.require_full_observation and dims.observation_dim < dims.target_data_nx:
+                raise ValueError("E1 reduced observation requires observation_dim >= target_data_nx")
+            if any(v < 0 for v in vars(e1.algebraic_tolerances).values()):
+                raise ValueError("e1.algebraic_tolerances values must be nonnegative")
         return self
 
     def to_dict(self) -> dict[str, Any]:
@@ -241,7 +325,7 @@ def _strict_dataclass(cls, values: dict[str, Any], *, path: str):
 
 
 def config_from_dict(raw: dict[str, Any]) -> Paper1Config:
-    top_names = {"domain", "data", "target", "spatial", "e0"}
+    top_names = {"domain", "data", "target", "spatial", "e0", "e1"}
     unknown_top = sorted(set(raw) - top_names)
     if unknown_top:
         raise ValueError(f"unknown config key: {unknown_top[0]}")
@@ -274,12 +358,27 @@ def config_from_dict(raw: dict[str, Any]) -> Paper1Config:
         ):
             e0_values[key] = _strict_dataclass(cls, dict(e0_values.get(key, {})), path=f"e0.{key}")
         e0 = _strict_dataclass(E0Config, e0_values, path="e0")
+    e1_raw = raw.get("e1")
+    e1 = None
+    if e1_raw is not None:
+        e1_values = dict(e1_raw)
+        allowed = {f.name for f in fields(E1Config)}
+        unknown = sorted(set(e1_values) - allowed)
+        if unknown:
+            raise ValueError(f"unknown config key: e1.{unknown[0]}")
+        cases = e1_values.get("surrogate_cases", [])
+        e1_values["surrogate_cases"] = tuple(_strict_dataclass(E1SurrogateCaseConfig, dict(v), path=f"e1.surrogate_cases[{i}]") for i, v in enumerate(cases))
+        for key in ("output_dims", "ridge_zetas", "noise_levels"):
+            e1_values[key] = tuple(e1_values.get(key, []))
+        e1_values["algebraic_tolerances"] = _strict_dataclass(E1AlgebraicTolerancesConfig, dict(e1_values.get("algebraic_tolerances", {})), path="e1.algebraic_tolerances")
+        e1 = _strict_dataclass(E1Config, e1_values, path="e1")
     cfg = Paper1Config(
         domain=_strict_dataclass(DomainConfig, dict(raw.get("domain", {})), path="domain"),
         data=_strict_dataclass(DataConfig, dict(raw.get("data", {})), path="data"),
         target=_strict_dataclass(TargetPDEConfig, dict(raw.get("target", {})), path="target"),
         spatial=_strict_dataclass(SpatialConfig, spatial_raw, path="spatial"),
         e0=e0,
+        e1=e1,
     )
     return cfg.validate()
 

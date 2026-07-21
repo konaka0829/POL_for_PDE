@@ -115,6 +115,19 @@ the field by spectral low-pass resampling rather than regenerating the GRF.
 headroom, and generator-defect experiments. It does not implement or validate
 the current Paper 1 E0.
 
+## Paper 1 E1 heat calibration
+
+Run the prerequisite E0 and the short heat-to-heat calibration with:
+
+```bash
+python scripts/paper1/run_e0.py --config configs/paper1_e0_for_e1_smoke.json --output-dir outputs/paper1_e0_for_e1_smoke --overwrite
+python scripts/paper1/run_e1.py --config configs/paper1_e1_smoke.json --e0-dir outputs/paper1_e0_for_e1_smoke --output-dir outputs/paper1_e1_smoke --overwrite --torch-threads 1
+```
+
+E1 records validation-only ridge selection, stable/unstable multiplier and
+readout diagnostics, identifiability, noise repeats, prerequisite hashes,
+machine-readable checks, plots, and a SHA-256 artifact manifest.
+
 ## Data Generation
 
 Generate a smoke `.pt` dataset from the checked-in B0 config:
