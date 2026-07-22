@@ -27,7 +27,8 @@ class Paper1MasterDataset:
     metadata: dict[str, object]
 
 
-def _tensor_hash(tensor: torch.Tensor) -> str:
+def tensor_hash(tensor: torch.Tensor) -> str:
+    """Canonical SHA-256 for a tensor, including dtype and shape."""
     t = tensor.detach().cpu().contiguous()
     h = hashlib.sha256()
     h.update(str(t.dtype).encode("ascii"))
@@ -37,6 +38,10 @@ def _tensor_hash(tensor: torch.Tensor) -> str:
     else:
         h.update(t.numpy().tobytes())
     return h.hexdigest()
+
+
+# Backward-compatible private alias.
+_tensor_hash = tensor_hash
 
 
 def _split_indices(config: Paper1Config) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, object]]:

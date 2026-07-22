@@ -20,20 +20,22 @@ class MasterInitialConditions:
     seed: int
 
 
-def _resolve_device(name: str) -> torch.device:
+def resolve_device(name: str) -> torch.device:
     if name == "cuda":
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA requested but unavailable")
         return torch.device("cuda")
     if name == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return torch.device("cpu")
+    if name == "cpu":
+        return torch.device("cpu")
+    raise ValueError(f"unsupported device: {name}")
 
 
 def build_master_grf_initial_conditions(config: Paper1Config) -> MasterInitialConditions:
     config.validate()
     dtype = config.data.torch_dtype()
-    device = _resolve_device(config.data.device)
+    device = resolve_device(config.data.device)
     values = sample_gaussian_random_field_initial_conditions(
         config.data.total_samples,
         config.spatial.reference_nx,

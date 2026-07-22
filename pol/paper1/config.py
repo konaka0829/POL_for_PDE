@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, fields, is_dataclass
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,7 @@ from .solvers import effective_inner_step, normalize_burgers_solver_name
 
 _DTYPES = {"float32": torch.float32, "float64": torch.float64}
 _DEVICES = {"cpu", "cuda", "auto"}
-_SOLVERS = {"split_step", "semi_implicit", "etdrk4", "fourier_pseudospectral_etdrk4"}
+_SOLVERS = {"split_step", "semi_implicit", "etdrk4", "fourier_pseudospectral_etdrk4", "spectral_exact"}
 
 
 @dataclass(frozen=True)
@@ -45,7 +46,7 @@ class TargetPDEConfig:
     equation: str = "viscous_burgers"
     nu: float = 1e-2
     T: float = 1.0
-    dt: float = 1e-3
+    dt: float | None = 1e-3
     fine_dt: float | None = 1e-4
     solver: str = "split_step"
     dealias: bool = True
@@ -143,6 +144,11 @@ class E1Config:
     require_full_observation: bool
     algebraic_tolerances: E1AlgebraicTolerancesConfig
     profile: str = "smoke"
+    max_abs_log_multiplier: float = 50.0
+    min_surrogate_mode_attenuation: float = 1e-12
+    min_identifiable_nonconstant_fraction: float = 0.0
+    max_identifiable_diagonal_relative_error: float = 0.25
+    max_identifiable_off_diagonal_relative_norm: float = 0.25
 
 
 @dataclass(frozen=True)
@@ -182,11 +188,18 @@ class Paper1Config:
             raise ValueError("target.equation must be viscous_burgers/burgers/heat")
         if self.target.nu <= 0.0:
             raise ValueError("target.nu must be positive")
-        if self.target.T <= 0.0 or self.target.dt <= 0.0:
-            raise ValueError("target.T and target.dt must be positive")
+        if self.target.T <= 0.0:
+            raise ValueError("target.T must be positive")
         if self.target.solver not in _SOLVERS:
             raise ValueError(f"unsupported target.solver: {self.target.solver}")
-        normalized_solver = normalize_burgers_solver_name(self.target.solver)
+        if self.target.equation == "heat":
+            if self.target.solver != "spectral_exact":
+                raise ValueError("heat target requires target.solver='spectral_exact'")
+            if self.target.dt is not None or self.target.fine_dt is not None or self.target.dealias:
+                raise ValueError("spectral_exact heat requires null dt/fine_dt and dealias=false")
+        elif self.target.dt is None or self.target.dt <= 0:
+            raise ValueError("Burgers target requires positive target.dt")
+        normalized_solver = self.target.solver if self.target.solver == "spectral_exact" else normalize_burgers_solver_name(self.target.solver)
         if normalized_solver == "split_step" and (self.target.fine_dt is None or self.target.fine_dt <= 0):
             raise ValueError("split-step target requires positive target.fine_dt")
         if normalized_solver == "etdrk4" and self.target.fine_dt is not None and self.target.fine_dt <= 0:
@@ -310,6 +323,25 @@ class Paper1Config:
                 raise ValueError("E1 reduced observation requires observation_dim >= target_data_nx")
             if any(v < 0 for v in vars(e1.algebraic_tolerances).values()):
                 raise ValueError("e1.algebraic_tolerances values must be nonnegative")
+            if e1.max_abs_log_multiplier <= 0 or not 0 < e1.min_surrogate_mode_attenuation <= 1:
+                raise ValueError("invalid E1 feasibility safety settings")
+            if not 0 <= e1.min_identifiable_nonconstant_fraction <= 1:
+                raise ValueError("invalid e1.min_identifiable_nonconstant_fraction")
+            kmax = (max(e1.output_dims) - 1) // 2
+            kappa2 = (2.0 * math.pi * kmax / self.domain.length) ** 2
+            for i, case in enumerate(e1.surrogate_cases):
+                log_m = -(self.target.nu * self.target.T - case.nu * case.T) * kappa2
+                log_a = -case.nu * case.T * kappa2
+                if not math.isfinite(log_m) or abs(log_m) > e1.max_abs_log_multiplier:
+                    raise ValueError(f"e1.surrogate_cases[{i}] multiplier feasibility preflight failed")
+                if not math.isfinite(log_a):
+                    raise ValueError(f"e1.surrogate_cases[{i}] surrogate attenuation is non-finite")
+                if log_a < math.log(e1.min_surrogate_mode_attenuation):
+                    raise ValueError(f"e1.surrogate_cases[{i}] surrogate attenuation feasibility preflight failed")
+            if e1.max_identifiable_diagonal_relative_error < 0:
+                raise ValueError("e1.max_identifiable_diagonal_relative_error must be nonnegative")
+            if e1.max_identifiable_off_diagonal_relative_norm < 0:
+                raise ValueError("e1.max_identifiable_off_diagonal_relative_norm must be nonnegative")
         return self
 
     def to_dict(self) -> dict[str, Any]:

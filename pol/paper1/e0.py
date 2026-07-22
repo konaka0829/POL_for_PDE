@@ -9,7 +9,7 @@ from typing import Any
 import torch
 
 from .config import Paper1Config
-from .datasets import _tensor_hash
+from .datasets import tensor_hash as _tensor_hash
 from .grids import periodic_grid, spectral_resample_periodic
 from .initial_conditions import MasterInitialConditions, build_master_grf_initial_conditions
 from .interfaces import build_surrogate_initial_state, derive_finite_resolution_data

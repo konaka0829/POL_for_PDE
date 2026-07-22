@@ -1,6 +1,17 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import argparse, csv, hashlib, json, math, os, platform, subprocess, sys, time, traceback
+import argparse
+import csv
+import hashlib
+import json
+import math
+import os
+import platform
+import shutil
+import subprocess
+import sys
+import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 import torch, numpy as np
@@ -19,6 +30,49 @@ def write_csv(p,rows):
     if not rows: raise ValueError(f"no rows for {p.name}")
     with p.open("w",newline="",encoding="utf-8") as f:
         w=csv.DictWriter(f,fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
+
+
+def artifact_records(output_dir: Path) -> list[dict[str, object]]:
+    records = []
+    for path in sorted(output_dir.iterdir()):
+        if not path.is_file() or path.name == "artifact_manifest.json":
+            continue
+        data = path.read_bytes()
+        records.append({
+            "relative_path": path.name,
+            "byte_size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "artifact_type": path.suffix.lstrip(".") or "file",
+        })
+    return records
+
+
+def verify_artifact_records(output_dir: Path, records: list[dict[str, object]]) -> None:
+    paths = [str(record["relative_path"]) for record in records]
+    if len(paths) != len(set(paths)):
+        raise ValueError("artifact manifest contains duplicate paths")
+    actual = {
+        path.name for path in output_dir.iterdir()
+        if path.is_file() and path.name != "artifact_manifest.json"
+    }
+    if set(paths) != actual:
+        raise ValueError("artifact manifest does not exactly cover output files")
+    for record in records:
+        path = output_dir / str(record["relative_path"])
+        if not path.is_file():
+            raise ValueError(f"artifact is missing: {path.name}")
+        data = path.read_bytes()
+        if len(data) != record["byte_size"]:
+            raise ValueError(f"artifact byte size mismatch: {path.name}")
+        if hashlib.sha256(data).hexdigest() != record["sha256"]:
+            raise ValueError(f"artifact SHA-256 mismatch: {path.name}")
+
+
+def write_and_verify_manifest(output_dir: Path) -> None:
+    records = artifact_records(output_dir)
+    write_json(output_dir / "artifact_manifest.json", records)
+    loaded = json.loads((output_dir / "artifact_manifest.json").read_text(encoding="utf-8"))
+    verify_artifact_records(output_dir, loaded)
 def git(args):
     r=subprocess.run(["git",*args],cwd=ROOT,capture_output=True,text=True); return r.stdout.strip() if r.returncode==0 else "unknown"
 def check(status,value=None,threshold=None,message=""): return {"status":status,"value":value,"threshold":threshold,"message":message}
@@ -27,13 +81,12 @@ def parser():
 def main(argv=None):
     p=parser(); args=p.parse_args(argv)
     if args.torch_threads<=0: p.error("--torch-threads must be a positive integer")
-    out=Path(args.output_dir); existing=[x for x in REQUIRED if (out/x).exists()]
-    if existing and not args.overwrite: p.error(f"{out} already contains E1 artifacts; pass --overwrite")
-    if args.overwrite:
-        for x in existing:
-            (out/x).unlink()
-        for x in ("multiplier_stable.png","multiplier_unstable.png","bandwidth_error.png","readout_operator_norm.png","noise_sensitivity.png"):
-            if (out/x).exists(): (out/x).unlink()
+    out=Path(args.output_dir)
+    if out.exists() and any(out.iterdir()) and not args.overwrite: p.error(f"{out} is nonempty; pass --overwrite")
+    if args.overwrite and out.exists():
+        resolved=out.resolve(); forbidden={Path("/").resolve(),Path.home().resolve(),ROOT.resolve(),ROOT.parent.resolve()}
+        if resolved in forbidden: p.error(f"unsafe output directory: {resolved}")
+        shutil.rmtree(out)
     out.mkdir(parents=True,exist_ok=True); torch.set_num_threads(args.torch_threads)
     started=datetime.now(timezone.utc).isoformat(); failures=[]; summary={"schema_version":E1_SCHEMA_VERSION,"status":"fail","required_checks":{}}
     env={"python_version":platform.python_version(),"pytorch_version":torch.__version__,"numpy_version":np.__version__,"platform":platform.platform(),"torch_thread_count":torch.get_num_threads(),"git_commit_id":git(["rev-parse","HEAD"]),"git_dirty_status":git(["status","--porcelain"]),"command":[sys.executable,*sys.argv],"started_at":started}
@@ -52,17 +105,19 @@ def main(argv=None):
             except Exception as exc: failures.append({"stage":"plots","error":f"{type(exc).__name__}: {exc}"}); plot_manifest["status"]="fail"; plot_manifest["reason"]=str(exc)
         write_json(out/"plot_manifest.json",plot_manifest)
         tol=effective.e1.algebraic_tolerances.float32_atol if effective.data.dtype=="float32" else effective.e1.algebraic_tolerances.float64_atol
+        regimes = {row["regime"] for row in result["selected_results"]}
+        deltas = [abs(row["delta_nuT"]) for row in result["selected_results"]]
         checks={
-          "e0_prerequisite_passed":check("pass",True,None,"passing E0 artifacts and hashes validated"),
-          "both_regimes_present":check("pass",True,None,"numerically classified stable and unstable cases present"),
-          "no_exact_match_case":check("pass",True,None,"config validation rejects equality"),
-          "finite_input_path_verified":check("pass",True,None,"downstream function receives only n_tar values"),
+          "e0_prerequisite_passed":check("pass" if prereq.get("status")=="pass" else "fail",prereq.get("status"),"pass","schema/status/internal consistency verified; file hashes recorded"),
+          "both_regimes_present":check("pass" if regimes=={"stable","unstable"} else "fail",sorted(regimes),["stable","unstable"],"classified from measured delta_nuT"),
+          "no_exact_match_case":check("pass" if deltas and min(deltas)>tol else "fail",min(deltas) if deltas else None,tol,"measured delta_nuT separation"),
+          "finite_input_path_verified":check("pass" if result["checks"]["finite_input_path_verified"] else "fail",result["data_manifest"]["finite_input_path_runtime_check"],None,"finite-only API and synthetic high-frequency check"),
           "target_coefficients_agree_with_reference":check("pass" if result["checks"]["target_coefficients_agree_with_reference"] else "fail",result["data_manifest"]["reference_to_target_max_coefficient_error"],tol,"n_tar and reference retained coefficients"),
-          "heat_solver_algebraic_checks_passed":check("pass",True,None,"covered by unit tests and exact multiplier implementation"),
-          "real_fourier_order_verified":check("pass",True,None,"constant,cos,sin convention"),
-          "ridge_uses_validation_only":check("pass",True,None,effective.e1.selection_metric),
+          "heat_solver_algebraic_checks_passed":check("pass" if result["checks"]["heat_solver_algebraic_error"]<=tol else "fail",result["checks"]["heat_solver_algebraic_error"],tol,"constant/cosine/sine exact heat check"),
+          "real_fourier_order_verified":check("pass" if result["checks"]["real_fourier_coordinate_error"]<=tol else "fail",result["checks"]["real_fourier_coordinate_error"],tol,"measured D @ S identity"),
+          "ridge_uses_validation_only":check("pass" if all("test" not in k.lower() for row in result["ridge_selection"] for k in row) else "fail",effective.e1.selection_metric,None,"candidate rows contain train/validation only"),
           "no_zscore_standardization":check("pass",True,None,effective.data.preprocessing),
-          "ideal_readout_coordinate_check_passed":check("pass",True,None,"W_ideal=M D and A_eff=W S"),
+          "ideal_readout_coordinate_check_passed":check("pass" if result["checks"]["ideal_readout_coordinate_error"]<=tol else "fail",result["checks"]["ideal_readout_coordinate_error"],tol,"measured (M D) S = M"),
           "identifiability_reported":check("pass",True,None,"mode_comparison.csv"),
           "noise_zero_matches_clean":check("pass" if result["checks"]["noise_zero_matches_clean"] else "fail",0.0,tol,"delta=0 prediction equality"),
           "all_required_artifacts_present":check("pass",True,None,"numeric artifacts written before plots"),
@@ -78,10 +133,25 @@ def main(argv=None):
         except Exception: pass
     env["ended_at"]=datetime.now(timezone.utc).isoformat(); env["dtype"]=locals().get("cfg",None).data.dtype if "cfg" in locals() else "unknown"; env["device"]=locals().get("cfg",None).data.device if "cfg" in locals() else "unknown"
     write_json(out/"environment.json",env); write_json(out/"failed_runs.json",failures); write_json(out/"e1_summary.json",summary)
-    records=[]
-    for path in sorted(out.iterdir()):
-        if path.is_file() and path.name!="artifact_manifest.json":
-            data=path.read_bytes(); records.append({"relative_path":path.name,"byte_size":len(data),"sha256":hashlib.sha256(data).hexdigest(),"artifact_type":path.suffix.lstrip(".") or "file"})
-    write_json(out/"artifact_manifest.json",records)
+    # The manifest excludes itself. The summary is updated first, then the final
+    # manifest is generated and verified without mutating any covered artifact.
+    try:
+        summary.setdefault("required_checks", {})["artifact_manifest_verified"] = check(
+            "pass", True, True, "final path/size/SHA-256 read-after-write verification"
+        )
+        write_json(out / "e1_summary.json", summary)
+        write_and_verify_manifest(out)
+    except Exception as exc:
+        summary["status"] = "fail"
+        summary.setdefault("required_checks", {})["artifact_manifest_verified"] = check(
+            "fail", False, True, str(exc)
+        )
+        write_json(out / "e1_summary.json", summary)
+        # Keep failure artifacts internally consistent whenever the filesystem
+        # still permits writing them.
+        try:
+            write_and_verify_manifest(out)
+        except Exception:
+            pass
     print(json.dumps(summary,sort_keys=True)); return 0 if summary["status"]=="pass" else 1
 if __name__=="__main__": raise SystemExit(main())

@@ -128,6 +128,41 @@ E1 records validation-only ridge selection, stable/unstable multiplier and
 readout diagnostics, identifiability, noise repeats, prerequisite hashes,
 machine-readable checks, plots, and a SHA-256 artifact manifest.
 
+E1 is a heat-to-heat Model 2 calibration using the exact Fourier semigroup
+(`spectral_exact`).  Stable means `nu*T - nu_tilde*T_tilde > 0`; unstable
+means the inverse-diffusive readout multiplier grows with wavenumber.  The
+only input reaching the surrogate is the finite path `n_ref -> n_tar ->
+n_sur`. Ridge candidates use training and validation data only; the test split
+is evaluated once after selecting zeta. Mode-wise training variance records
+identifiability. A singular unregularized covariance is represented by a null
+regularized condition number plus an explicit infinite boolean, not JSON
+infinity.
+
+Production reuses the Paper 1 E0 master (it does not create an E1-specific
+master):
+
+```bash
+python3 scripts/paper1/run_e0.py \
+  --config configs/paper1_e0_main.json \
+  --output-dir outputs/paper1_e0_main \
+  --overwrite
+
+python3 scripts/paper1/run_e1.py \
+  --config configs/paper1_e1_main.json \
+  --e0-dir outputs/paper1_e0_main \
+  --output-dir outputs/paper1_e1_main \
+  --overwrite \
+  --torch-threads 1
+```
+
+The main heat products are deliberately mild (`0.01*0.01` target and
+`0.005*0.01`/`0.015*0.01` surrogates): at q=65 the extreme multipliers are
+about 0.132 and 7.55, avoiding the former overflow/underflow regime. The run
+writes the six CSV tables, selected models, E0 prerequisite report, data and
+resolved-config metadata, environment/failure/plot summaries, E1 summary,
+and a read-back-verified artifact manifest. The checked-in smoke is a wiring
+and reduced scientific integration test; it is not a production result.
+
 ## Data Generation
 
 Generate a smoke `.pt` dataset from the checked-in B0 config:
