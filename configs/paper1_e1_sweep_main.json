@@ -1,0 +1,15 @@
+{
+  "resolution_sweep": {
+    "target_data_nx": [128, 256, 512, 1024],
+    "surrogate_internal_nx": [128, 256, 512, 1024],
+    "observation_rule": "full"
+  },
+  "observation_sweeps": [
+    {
+      "target_data_nx": 256,
+      "surrogate_internal_nx":1024,
+      "observation_dim": [256, 512, 1024]
+    }
+  ],
+  "explicit_runs": []
+}

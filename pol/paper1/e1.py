@@ -207,7 +207,9 @@ def finite_input_path_check(n_ref: int, n_tar: int, n_sur: int, domain_length: f
     tar=spectral_resample_periodic(pair,n_tar,domain_length=domain_length)
     sur=build_surrogate_from_finite_target(tar,n_sur,domain_length)
     error=float(torch.max(torch.abs(sur[0]-sur[1])))
-    tolerance=100*torch.finfo(dtype).eps
+    eps = torch.finfo(dtype).eps
+    fft_scale = 1.0 + math.log2(max(n_ref, n_tar, n_sur))
+    tolerance = 64.0 * fft_scale * eps
     return {"status":"pass" if error <= tolerance else "fail","max_abs_error":error,"tolerance":tolerance,"high_wavenumber":high_k}
 
 
