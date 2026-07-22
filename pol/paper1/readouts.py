@@ -25,12 +25,22 @@ class AffineReadout:
     # Prediction uses row samples: y = x @ W.T + b; mathematical W is (q,J).
     W: torch.Tensor
     b: torch.Tensor
+    solver: str = "ridge_solve"
+    svd_rcond: float | None = None
+    singular_value_cutoff: float | None = None
+    numerical_rank: int | None = None
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         return x @ self.W.T + self.b
 
 
-def fit_centered_affine_ridge(x: torch.Tensor, y: torch.Tensor, zeta: float) -> AffineReadout:
+def fit_centered_affine_ridge(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    zeta: float,
+    *,
+    svd_rcond: float | None = None,
+) -> AffineReadout:
     if x.ndim != 2 or y.ndim != 2 or x.shape[0] != y.shape[0] or x.shape[0] == 0:
         raise ValueError("ridge expects x=(N,J), y=(N,q) with shared positive N")
     if x.dtype != y.dtype or x.device != y.device or zeta < 0:
@@ -38,14 +48,30 @@ def fit_centered_affine_ridge(x: torch.Tensor, y: torch.Tensor, zeta: float) -> 
     xm, ym = x.mean(0), y.mean(0)
     xc, yc = x - xm, y - ym
     if zeta == 0:
-        beta = torch.linalg.lstsq(xc, yc).solution
+        # Explicit deterministic minimum-norm solve.  The cutoff is part of
+        # the method rather than an implementation-dependent LAPACK default.
+        rcond = float(svd_rcond) if svd_rcond is not None else torch.finfo(x.dtype).eps * max(xc.shape)
+        if not 0.0 < rcond < 1.0:
+            raise ValueError("svd_rcond must lie strictly between zero and one")
+        u, singular_values, vh = torch.linalg.svd(xc, full_matrices=False)
+        cutoff = rcond * float(singular_values.max()) if singular_values.numel() else 0.0
+        retained = singular_values > cutoff
+        if bool(retained.any()):
+            projected = u[:, retained].T @ yc
+            beta = vh[retained].T @ (projected / singular_values[retained, None])
+        else:
+            beta = torch.zeros((x.shape[1], y.shape[1]), dtype=x.dtype, device=x.device)
+        solver = "svd_minimum_norm"
+        numerical_rank = int(retained.sum())
     elif x.shape[1] <= x.shape[0]:
         gram = xc.T @ xc / x.shape[0]
         rhs = xc.T @ yc / x.shape[0]
         beta = torch.linalg.solve(gram + zeta * torch.eye(x.shape[1], dtype=x.dtype, device=x.device), rhs)
+        solver, rcond, cutoff, numerical_rank = "primal_ridge_solve", None, None, None
     else:
         gram = xc @ xc.T / x.shape[0]
         dual = torch.linalg.solve(gram + zeta * torch.eye(x.shape[0], dtype=x.dtype, device=x.device), yc / x.shape[0])
         beta = xc.T @ dual
+        solver, rcond, cutoff, numerical_rank = "dual_ridge_solve", None, None, None
     W = beta.T.contiguous()
-    return AffineReadout(W, ym - xm @ beta)
+    return AffineReadout(W, ym - xm @ beta, solver, rcond, cutoff, numerical_rank)

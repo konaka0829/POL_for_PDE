@@ -138,6 +138,30 @@ identifiability. A singular unregularized covariance is represented by a null
 regularized condition number plus an explicit infinite boolean, not JSON
 infinity.
 
+The zero-ridge candidate uses an explicit thin-SVD minimum-norm solve with
+cutoff `eps(dtype) * max(N,J) * sigma_max` unless `ridge_svd_rcond` is set.
+This avoids a LAPACK-driver-dependent rank-deficient `lstsq` solution. Ridge
+selection sees only train and validation arrays; candidates within
+`ridge_tie_tolerance` use the configured deterministic `largest_zeta` tie
+break. Test data is evaluated only after the model has been fixed.
+
+Every profile evaluates the same scientific acceptance metrics: the
+identifiable nonconstant-mode fraction, maximum identifiable diagonal
+relative error, identifiable off-diagonal relative norm, stable/unstable
+operator-norm direction and monotonicity, and the clean-field error divided by
+the Fourier representation floor. Thresholds are explicit in the E1 config;
+`main` uses the paper acceptance thresholds while `smoke` uses looser wiring
+thresholds without skipping the calculations.
+
+Before exit zero, E1 rereads every CSV, JSON, and selected-model tensor,
+rejects non-finite values, verifies exact Cartesian key sets and plot files,
+checks the expected artifact set, and verifies final byte sizes and SHA-256
+records. The E0 prerequisite gate cross-checks all E0 schemas and nested
+statuses, selected convergence settings, accepted production config, master
+metadata, and tensor hashes. Exit code zero therefore means both numerical
+and saved-artifact checks passed; failures retain best-effort summary,
+environment, and failure records and return nonzero.
+
 Production reuses the Paper 1 E0 master (it does not create an E1-specific
 master):
 
@@ -155,6 +179,9 @@ python3 scripts/paper1/run_e1.py \
   --torch-threads 1
 ```
 
+For a numeric-only smoke, add `--skip-plots`. Its `plot_manifest.json` has
+status `skipped`, and the output must contain no image files.
+
 The main heat products are deliberately mild (`0.01*0.01` target and
 `0.005*0.01`/`0.015*0.01` surrogates): at q=65 the extreme multipliers are
 about 0.132 and 7.55, avoiding the former overflow/underflow regime. The run
@@ -162,6 +189,11 @@ writes the six CSV tables, selected models, E0 prerequisite report, data and
 resolved-config metadata, environment/failure/plot summaries, E1 summary,
 and a read-back-verified artifact manifest. The checked-in smoke is a wiring
 and reduced scientific integration test; it is not a production result.
+The principal artifacts are the six CSV tables, `selected_models.pt`,
+`data_manifest.json` (split, source, config, prerequisite, and canonical model
+hashes), `e0_prerequisite.json`, `plot_manifest.json`, `e1_summary.json`, and
+`artifact_manifest.json`. Production continues to reuse the master generated
+by `configs/paper1_e0_main.json`; no separate E1 production master is used.
 
 ## Data Generation
 

@@ -9,7 +9,7 @@ from typing import Any
 
 import torch
 
-from .config import Paper1Config
+from .config import Paper1Config, config_from_dict
 from .datasets import tensor_hash
 from .e0 import E0_SCHEMA_VERSION, MASTER_SCHEMA_VERSION, load_master_initial_conditions
 from .grids import spectral_resample_periodic
@@ -59,10 +59,34 @@ def validate_e0_prerequisite(e0_dir: str | Path, config: Paper1Config) -> tuple[
     failed_checks = sorted(name for name in E0_REQUIRED_CHECKS if required[name] != "pass")
     if failed_checks:
         raise ValueError("E0 prerequisite required check is not pass: " + failed_checks[0])
-    for name in ("resampling_checks.json", "input_interface_checks.json", "model1_identity.json"):
-        doc = json.loads((root / name).read_text())
-        if doc.get("status") != "pass":
-            raise ValueError(f"E0 prerequisite {name} is not pass")
+    documents = {
+        name: json.loads((root / name).read_text())
+        for name in ("resampling_checks.json", "input_interface_checks.json", "model1_identity.json", "reference_convergence.json")
+    }
+    for name, document in documents.items():
+        if document.get("schema_version") != E0_SCHEMA_VERSION:
+            raise ValueError(f"E0 prerequisite {name} schema_version mismatch")
+    resampling = documents["resampling_checks.json"]
+    if resampling.get("status") != "pass" or resampling.get("fourier_projector", {}).get("status") != "pass":
+        raise ValueError("E0 resampling/projector status mismatch")
+    interfaces = documents["input_interface_checks.json"]
+    if interfaces.get("status") != "pass" or any(
+        interfaces.get(name, {}).get("status") != "pass"
+        for name in ("finite_data_interface", "no_high_frequency_leak", "target_coefficient_consistency")
+    ):
+        raise ValueError("E0 input interface nested status mismatch")
+    model1 = documents["model1_identity.json"]
+    if model1.get("status") != "pass" or any(
+        model1.get(name, {}).get("status") != "pass"
+        for name in ("full_observation", "bandlimited_reduced_j", "aliasing_counterexample")
+    ):
+        raise ValueError("E0 Model 1 nested status mismatch")
+    convergence = documents["reference_convergence.json"]
+    joint_row = convergence.get("joint_row")
+    if convergence.get("joint_status") != "pass" or not isinstance(joint_row, dict) or joint_row.get("status") != "pass":
+        raise ValueError("E0 reference convergence joint status mismatch")
+    if summary.get("selected_reference", {}).get("joint_status") != "pass":
+        raise ValueError("E0 summary selected reference joint status mismatch")
     selected = summary.get("selected_reference", {})
     reference_nx = selected.get("reference_nx")
     if not isinstance(reference_nx, int) or reference_nx < config.spatial.target_data_nx:
@@ -106,6 +130,45 @@ def validate_e0_prerequisite(e0_dir: str | Path, config: Paper1Config) -> tuple[
         raise ValueError("master maximum_nx is missing or invalid")
     if reference_nx > maximum_nx or reference_nx < config.spatial.target_data_nx:
         raise ValueError("invalid selected reference resolution")
+    accepted_raw = json.loads((root / "accepted_production_config.json").read_text())
+    accepted = config_from_dict(accepted_raw)
+    if accepted.e0 is not None or accepted.e1 is not None:
+        raise ValueError("accepted production config must not contain e0/e1")
+    if summary.get("accepted_production_config") != "accepted_production_config.json":
+        raise ValueError("E0 summary accepted production config filename mismatch")
+    selected_summary = summary["selected_reference"]
+    if not (
+        reference_nx == joint_row.get("candidate_nx") == accepted.spatial.reference_nx
+    ):
+        raise ValueError("E0 selected reference resolution artifacts disagree")
+    selected_pairs = (
+        ("solver", "solver"), ("requested_dt", "dt"),
+        ("requested_fine_dt", "fine_dt"),
+    )
+    for artifact_key, target_key in selected_pairs:
+        values = (
+            selected_summary.get(artifact_key), joint_row.get(artifact_key),
+            getattr(accepted.target, target_key),
+        )
+        if values[0] != values[1] or values[1] != values[2]:
+            raise ValueError(f"E0 selected temporal setting mismatch: {artifact_key}")
+    if selected_summary.get("effective_inner_step") != joint_row.get("effective_inner_step"):
+        raise ValueError("E0 effective inner step mismatch")
+    for path in (("domain", "length"),) + tuple(("data", key) for key in (
+        "total_samples", "n_train", "n_val", "n_test", "seed", "dtype", "ic_type",
+        "grf_gamma", "grf_tau", "grf_sigma", "grf_mean", "preprocessing",
+    )):
+        resolved_value, accepted_value = e0_cfg, accepted_raw
+        for key in path:
+            resolved_value, accepted_value = resolved_value[key], accepted_value[key]
+        if resolved_value != accepted_value:
+            raise ValueError("accepted production config mismatch: " + ".".join(path))
+    calibration_ids = e0_cfg["e0"]["calibration_sample_ids"]
+    if joint_row.get("master_hash") != actual_hash or joint_row.get("sample_ids") != calibration_ids:
+        raise ValueError("E0 joint convergence master/sample IDs mismatch")
+    matching_joint_rows = [row for row in convergence.get("rows", []) if row == joint_row]
+    if len(matching_joint_rows) != 1:
+        raise ValueError("E0 joint row is not uniquely represented in convergence rows")
     effective = replace(config, spatial=replace(config.spatial, reference_nx=reference_nx))
     master = load_master_initial_conditions(root / "master_initial_conditions.pt", effective)
     prerequisite = {
@@ -114,6 +177,8 @@ def validate_e0_prerequisite(e0_dir: str | Path, config: Paper1Config) -> tuple[
         "required_e0_checks": {k: required[k] for k in sorted(E0_REQUIRED_CHECKS)},
         "cross_checks": {"actual_vs_payload_tensor_hash":{"status":"pass"},"actual_vs_manifest_tensor_hash":{"status":"pass"},"manifest_vs_payload_metadata":{"status":"pass"}},
         "artifacts": artifacts, "master_tensor_hash": actual_hash,
+        "master_file_sha256": file_record(root / "master_initial_conditions.pt", root)["sha256"],
+        "master_manifest_file_sha256": file_record(root / "master_manifest.json", root)["sha256"],
     }
     return effective, master, prerequisite
 
@@ -179,6 +244,38 @@ def heat_algebraic_error(config: Paper1Config, device: torch.device) -> float:
     return float(torch.max(torch.abs(actual - expected)))
 
 
+def select_ridge_readout(
+    train_features: torch.Tensor,
+    train_truth: torch.Tensor,
+    validation_features: torch.Tensor,
+    validation_truth: torch.Tensor,
+    *,
+    zetas: tuple[float, ...],
+    tie_tolerance: float,
+    svd_rcond: float | None,
+) -> tuple[float, Any, list[dict[str, Any]]]:
+    """Fit/select using only train and validation arrays; no test API exists."""
+    candidates = []
+    rows = []
+    for zeta in zetas:
+        model = fit_centered_affine_ridge(
+            train_features, train_truth, zeta, svd_rcond=svd_rcond,
+        )
+        train_mse = float(torch.mean((model(train_features) - train_truth) ** 2))
+        validation_mse = float(torch.mean((model(validation_features) - validation_truth) ** 2))
+        rows.append({
+            "zeta": zeta, "train_coefficient_mse": train_mse,
+            "validation_coefficient_mse": validation_mse, "selected": False,
+        })
+        candidates.append((validation_mse, float(zeta), model))
+    best_value = min(candidate[0] for candidate in candidates)
+    eligible = [candidate for candidate in candidates if candidate[0] <= best_value + tie_tolerance]
+    _, selected_zeta, selected_model = max(eligible, key=lambda candidate: candidate[1])
+    for row in rows:
+        row["selected"] = float(row["zeta"]) == selected_zeta
+    return selected_zeta, selected_model, rows
+
+
 def run_e1(config: Paper1Config, master: Any) -> dict[str, Any]:
     assert config.e1 is not None
     e1, L, dtype = config.e1, config.domain.length, config.data.torch_dtype()
@@ -207,20 +304,20 @@ def run_e1(config: Paper1Config, master: Any) -> dict[str, Any]:
             truth = real_fourier_analysis(y_tar, q, domain_length=L)
             ref_coeff = real_fourier_analysis(y_ref, q, domain_length=L)
             max_coeff_diff = max(max_coeff_diff, float(torch.max(torch.abs(truth - ref_coeff))))
-            candidates = []
-            for zeta in e1.ridge_zetas:
-                model = fit_centered_affine_ridge(features[splits["train"]], truth[splits["train"]], zeta)
-                mse = {}
-                for split, sl in (("train", splits["train"]), ("val", splits["val"])):
-                    mse[split] = float(torch.mean((model(features[sl]) - truth[sl]) ** 2))
-                ridge_rows.append({"case_name": case.name, "regime": regime, "q": q, "zeta": zeta, "train_coefficient_mse": mse["train"], "validation_coefficient_mse": mse["val"], "selected": False})
-                candidates.append((mse["val"], float(zeta), model))
-            best_value = min(x[0] for x in candidates)
-            eligible = [x for x in candidates if x[0] <= best_value + e1.ridge_tie_tolerance]
-            _, selected_zeta, model = min(eligible, key=lambda x: x[1])
-            for row in ridge_rows:
-                if row["case_name"] == case.name and row["q"] == q and row["zeta"] == selected_zeta: row["selected"] = True
-            models[f"{case.name}/q{q}"] = {"W": model.W.detach().cpu(), "b": model.b.detach().cpu(), "zeta": selected_zeta, "regime": regime, "delta": delta}
+            selected_zeta, model, selection_rows = select_ridge_readout(
+                features[splits["train"]], truth[splits["train"]],
+                features[splits["val"]], truth[splits["val"]],
+                zetas=e1.ridge_zetas, tie_tolerance=e1.ridge_tie_tolerance,
+                svd_rcond=e1.ridge_svd_rcond,
+            )
+            ridge_rows.extend({"case_name": case.name, "regime": regime, "q": q, **row} for row in selection_rows)
+            models[f"{case.name}/q{q}"] = {
+                "W": model.W.detach().cpu(), "b": model.b.detach().cpu(),
+                "zeta": selected_zeta, "regime": regime, "delta": delta,
+                "solver": model.solver, "svd_rcond": model.svd_rcond,
+                "singular_value_cutoff": model.singular_value_cutoff,
+                "solver_numerical_rank": model.numerical_rank,
+            }
             D = l2_analysis_matrix(q, config.spatial.observation_dim, domain_length=L, dtype=dtype, device=device)
             S = l2_synthesis_matrix(q, config.spatial.observation_dim, domain_length=L, dtype=dtype, device=device)
             mult = heat_multiplier_vector(q, target_nu=config.target.nu, target_T=config.target.T, surrogate_nu=case.nu, surrogate_T=case.T, domain_length=L, dtype=dtype, device=device)
@@ -241,6 +338,24 @@ def run_e1(config: Paper1Config, master: Any) -> dict[str, Any]:
             feature_modes = features[splits["train"]] @ D.T
             variances = torch.var(feature_modes, dim=0, unbiased=False)
             identifiable = variances > e1.identifiable_variance_floor
+            identifiable_nonconstant = identifiable.clone()
+            identifiable_nonconstant[0] = False
+            identifiable_count = int(identifiable_nonconstant.sum())
+            nonconstant_count = q - 1
+            identifiable_fraction = identifiable_count / nonconstant_count
+            if identifiable_count:
+                identifiable_errors = rel_diag[identifiable_nonconstant]
+                mean_identifiable_diag_error = float(identifiable_errors.mean())
+                max_identifiable_diag_error = float(identifiable_errors.max())
+                off_denominator = torch.linalg.vector_norm(mult[identifiable_nonconstant])
+                identifiable_offdiag = (
+                    float(torch.linalg.matrix_norm(off[:, identifiable_nonconstant]) / off_denominator)
+                    if float(off_denominator) > 0.0 else None
+                )
+            else:
+                mean_identifiable_diag_error = None
+                max_identifiable_diag_error = None
+                identifiable_offdiag = None
             for i in range(q):
                 k = 0 if i == 0 else (i + 1) // 2
                 comp = "constant" if i == 0 else ("cos" if i % 2 else "sin")
@@ -261,8 +376,46 @@ def run_e1(config: Paper1Config, master: Any) -> dict[str, Any]:
             cond_inf = selected_zeta == 0 and not full
             cond = None if cond_inf else float((cov_eigs.max()+selected_zeta)/(torch.clamp(cov_eigs.min(),min=0)+selected_zeta))
             pseudo = float(pos.max()/pos.min()) if pos.numel() else None
-            readout_rows.append({"case_name": case.name, "regime": regime, "delta_nuT": delta, "q": q, "selected_zeta": selected_zeta, "max_theoretical_multiplier": float(mult.max()), "off_diagonal_frobenius_norm": float(torch.linalg.matrix_norm(off)), "diagonal_absolute_error_all": float(diag_err.mean()), "diagonal_relative_error_all": float(rel_diag.mean()), "diagonal_absolute_error_identifiable": float(diag_err[identifiable].mean()) if bool(identifiable.any()) else 0.0, "diagonal_relative_error_identifiable": float(rel_diag[identifiable].mean()) if bool(identifiable.any()) else 0.0, "learned_frobenius_norm": float(torch.linalg.matrix_norm(model.W)), "learned_operator_norm": float(sv[0]), "ideal_frobenius_norm": float(torch.linalg.matrix_norm(ideal)), "ideal_operator_norm": float(svi[0]), "difference_frobenius_norm": float(torch.linalg.matrix_norm(model.W - ideal)), "difference_operator_norm": float(torch.linalg.svdvals(model.W - ideal)[0]), "effective_response_matrix": json.dumps(effective.detach().cpu().tolist()), "theoretical_multiplier_vector": json.dumps(mult.detach().cpu().tolist()), "learned_effective_diagonal": json.dumps(diag.detach().cpu().tolist()), "feature_covariance_eigenvalues": json.dumps(cov_eigs.detach().cpu().tolist()), "numerical_rank": rank, "feature_dimension": features.shape[1], "regularized_condition_number": cond, "regularized_condition_number_is_infinite": cond_inf, "nonzero_spectrum_pseudo_condition_number": pseudo, "effective_dimension": float(torch.sum(cov_eigs / (cov_eigs + selected_zeta))) if selected_zeta > 0 else float(rank)})
-            selected_rows.append({"case_name": case.name, "regime": regime, "delta_nuT": delta, "q": q, "selected_zeta": selected_zeta, "clean_test_coefficient_mse": float(torch.mean((test_pred-test_truth)**2)), "coefficient_relative_l2_mean": _stats(coeff_rel)["mean"], **{f"full_reference_field_relative_l2_{k}": v for k,v in _stats(field_rel).items()}, **{f"target_data_relative_l2_{k}": v for k,v in _stats(data_rel).items()}, **{f"output_representation_floor_{k}": v for k,v in _stats(floor_rel).items()}})
+            readout_rows.append({
+                "case_name": case.name, "regime": regime, "delta_nuT": delta, "q": q,
+                "selected_zeta": selected_zeta, "max_theoretical_multiplier": float(mult.max()),
+                "off_diagonal_frobenius_norm": float(torch.linalg.matrix_norm(off)),
+                "diagonal_absolute_error_all": float(diag_err.mean()),
+                "diagonal_relative_error_all": float(rel_diag.mean()),
+                "identifiable_nonconstant_count": identifiable_count,
+                "nonconstant_count": nonconstant_count,
+                "identifiable_nonconstant_fraction": identifiable_fraction,
+                "mean_identifiable_diagonal_relative_error": mean_identifiable_diag_error,
+                "max_identifiable_diagonal_relative_error": max_identifiable_diag_error,
+                "identifiable_off_diagonal_relative_norm": identifiable_offdiag,
+                "learned_frobenius_norm": float(torch.linalg.matrix_norm(model.W)),
+                "learned_operator_norm": float(sv[0]),
+                "ideal_frobenius_norm": float(torch.linalg.matrix_norm(ideal)),
+                "ideal_operator_norm": float(svi[0]),
+                "difference_frobenius_norm": float(torch.linalg.matrix_norm(model.W - ideal)),
+                "difference_operator_norm": float(torch.linalg.svdvals(model.W - ideal)[0]),
+                "effective_response_matrix": json.dumps(effective.detach().cpu().tolist()),
+                "theoretical_multiplier_vector": json.dumps(mult.detach().cpu().tolist()),
+                "learned_effective_diagonal": json.dumps(diag.detach().cpu().tolist()),
+                "feature_covariance_eigenvalues": json.dumps(cov_eigs.detach().cpu().tolist()),
+                "numerical_rank": rank, "feature_dimension": features.shape[1],
+                "regularized_condition_number": cond,
+                "regularized_condition_number_is_infinite": cond_inf,
+                "nonzero_spectrum_pseudo_condition_number": pseudo,
+                "effective_dimension": float(torch.sum(cov_eigs / (cov_eigs + selected_zeta))) if selected_zeta > 0 else float(rank),
+            })
+            field_stats, floor_stats = _stats(field_rel), _stats(floor_rel)
+            floor_ratio = field_stats["mean"] / max(floor_stats["mean"], torch.finfo(dtype).eps)
+            selected_rows.append({
+                "case_name": case.name, "regime": regime, "delta_nuT": delta, "q": q,
+                "selected_zeta": selected_zeta,
+                "clean_test_coefficient_mse": float(torch.mean((test_pred-test_truth)**2)),
+                "coefficient_relative_l2_mean": _stats(coeff_rel)["mean"],
+                "field_error_to_representation_floor_ratio": floor_ratio,
+                **{f"full_reference_field_relative_l2_{k}": v for k, v in field_stats.items()},
+                **{f"target_data_relative_l2_{k}": v for k, v in _stats(data_rel).items()},
+                **{f"output_representation_floor_{k}": v for k, v in floor_stats.items()},
+            })
             test_features = features[splits["test"]]
             gen = torch.Generator(device=device).manual_seed(e1.noise_seed + 1000003 * list(e1.surrogate_cases).index(case) + q)
             for repeat in range(e1.noise_repeats):
@@ -308,6 +461,12 @@ def run_e1(config: Paper1Config, master: Any) -> dict[str, Any]:
         "fourier_order": "constant,cos1,sin1,...",
         "observation_scaling": "sqrt(L/J)",
         "actual_solver": "spectral_exact",
+        "feature_preprocessing": "l2_scaling_only; train-mean centering inside affine ridge; no z-score",
+        "ridge_selection_metric": e1.selection_metric,
+        "ridge_tie_break": e1.ridge_tie_break,
+        "zero_ridge_solver": e1.zero_ridge_solver,
+        "ridge_svd_rcond": e1.ridge_svd_rcond,
+        "ridge_svd_default_cutoff_rule": "eps(dtype) * max(N,J) * sigma_max",
     }
     return {
         "ridge_selection": ridge_rows,

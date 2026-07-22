@@ -149,6 +149,12 @@ class E1Config:
     min_identifiable_nonconstant_fraction: float = 0.0
     max_identifiable_diagonal_relative_error: float = 0.25
     max_identifiable_off_diagonal_relative_norm: float = 0.25
+    operator_norm_atol: float = 1e-10
+    operator_norm_monotonic_rtol: float = 1e-8
+    max_field_error_to_representation_floor_ratio: float = 2.0
+    zero_ridge_solver: str = "svd_minimum_norm"
+    ridge_svd_rcond: float | None = None
+    ridge_tie_break: str = "largest_zeta"
 
 
 @dataclass(frozen=True)
@@ -342,6 +348,16 @@ class Paper1Config:
                 raise ValueError("e1.max_identifiable_diagonal_relative_error must be nonnegative")
             if e1.max_identifiable_off_diagonal_relative_norm < 0:
                 raise ValueError("e1.max_identifiable_off_diagonal_relative_norm must be nonnegative")
+            if e1.operator_norm_atol < 0 or e1.operator_norm_monotonic_rtol < 0:
+                raise ValueError("E1 operator norm tolerances must be nonnegative")
+            if e1.max_field_error_to_representation_floor_ratio <= 0:
+                raise ValueError("e1.max_field_error_to_representation_floor_ratio must be positive")
+            if e1.zero_ridge_solver != "svd_minimum_norm":
+                raise ValueError("e1.zero_ridge_solver must be svd_minimum_norm")
+            if e1.ridge_svd_rcond is not None and not 0 < e1.ridge_svd_rcond < 1:
+                raise ValueError("e1.ridge_svd_rcond must lie strictly between zero and one")
+            if e1.ridge_tie_break != "largest_zeta":
+                raise ValueError("e1.ridge_tie_break must be largest_zeta")
         return self
 
     def to_dict(self) -> dict[str, Any]:
