@@ -1,14 +1,43 @@
 {
-  "resolution_sweep": {
-    "target_data_nx": [128, 256, 512, 1024],
-    "surrogate_internal_nx": [128, 256, 512, 1024],
-    "observation_rule": "full"
-  },
-  "observation_sweeps": [
-    {
+  "schema_version": "paper1-e1-sweep-v2",
+  "invalid_run_policy": "skip",
+  "aggregate_plots": {
+    "enabled": true,
+    "q": 65,
+    "noise_level": 0.01,
+    "line_slice": {
       "target_data_nx": 256,
-      "surrogate_internal_nx":1024,
-      "observation_dim": [256, 512, 1024]
+      "surrogate_internal_nx": 512
+    },
+    "formats": ["png", "pdf", "svg"],
+    "dpi": 180
+  },
+  "experiments": [
+    {
+      "name": "full_observation_resolution",
+      "grid": {
+        "target_data_nx": [65, 72, 80, 96, 128, 192, 256, 512],
+        "surrogate_internal_nx": [65, 72, 80, 96, 128, 192, 256, 512]
+      },
+      "observation_rule": "full"
+    },
+    {
+      "name": "target_observation_grid",
+      "fixed": {"surrogate_internal_nx": 512},
+      "grid": {
+        "target_data_nx": [65, 72, 80, 96, 128, 192, 256, 512],
+        "observation_dim": [65, 72, 80, 96, 128, 192, 256, 512]
+      }
+    },
+    {
+      "name": "surrogate_resolution_J65",
+      "fixed": {"target_data_nx": 256, "observation_dim": 65},
+      "grid": {"surrogate_internal_nx": [65, 80, 96, 128, 192, 256, 512, 1024]}
+    },
+    {
+      "name": "surrogate_resolution_J96",
+      "fixed": {"target_data_nx": 256, "observation_dim": 96},
+      "grid": {"surrogate_internal_nx": [96, 128, 192, 256, 512, 1024]}
     }
   ],
   "explicit_runs": []

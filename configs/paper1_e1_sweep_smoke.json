@@ -1,0 +1,21 @@
+{
+  "schema_version": "paper1-e1-sweep-v2",
+  "invalid_run_policy": "error",
+  "aggregate_plots": {
+    "enabled": true,
+    "q": 9,
+    "noise_level": 0.01,
+    "line_slice": {"target_data_nx": 32, "surrogate_internal_nx": 32},
+    "target_observation_surrogate_nx": 32,
+    "surrogate_line_target_data_nx": 32,
+    "surrogate_line_observation_dims": [16, 32],
+    "formats": ["png", "pdf"],
+    "dpi": 80
+  },
+  "experiments": [],
+  "explicit_runs": [
+    {"target_data_nx": 32, "surrogate_internal_nx": 32, "observation_dim": 16},
+    {"target_data_nx": 16, "surrogate_internal_nx": 32, "observation_dim": 32},
+    {"target_data_nx": 32, "surrogate_internal_nx": 32, "observation_dim": 32}
+  ]
+}

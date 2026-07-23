@@ -325,8 +325,6 @@ class Paper1Config:
                 raise ValueError("e1.selection_metric must be validation_coefficient_mse")
             if e1.require_full_observation and dims.observation_dim != dims.surrogate_internal_nx:
                 raise ValueError("E1 full observation requires observation_dim = surrogate_internal_nx")
-            if not e1.require_full_observation and dims.observation_dim < dims.target_data_nx:
-                raise ValueError("E1 reduced observation requires observation_dim >= target_data_nx")
             if any(v < 0 for v in vars(e1.algebraic_tolerances).values()):
                 raise ValueError("e1.algebraic_tolerances values must be nonnegative")
             if e1.max_abs_log_multiplier <= 0 or not 0 < e1.min_surrogate_mode_attenuation <= 1:

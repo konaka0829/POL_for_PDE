@@ -195,6 +195,35 @@ hashes), `e0_prerequisite.json`, `plot_manifest.json`, `e1_summary.json`, and
 `artifact_manifest.json`. Production continues to reuse the master generated
 by `configs/paper1_e0_main.json`; no separate E1 production master is used.
 
+### E1 resolution sweep
+
+The three E1 resolutions are independent except for the actual sampling and
+Fourier-band requirements. They satisfy
+`1 <= n_tar <= n_ref`, `1 <= J <= n_sur`, and full observation means
+`J = n_sur`. For every requested `q = 2K+1`, exact calibration additionally
+requires `K < n_tar/2` and `K < J/2`. There is no general ordering constraint
+between `n_tar` and `J`.
+
+The v2 sweep spec uses Cartesian `grid` axes plus optional `fixed` dimensions.
+It deduplicates `(n_tar,n_sur,J)` while retaining `experiment_names` as a JSON
+array string in aggregate CSVs. The default experiments cover full-observation
+`n_tar` by `n_sur`, fixed `n_sur=512` `n_tar` by `J`, and `n_sur` sweeps at
+fixed `n_tar=256` for `J=65` and `J=96`.
+
+Run, inspect, or regenerate plots with:
+
+```bash
+python3 scripts/paper1/run_e1_sweep.py --jobs 2 --torch-threads 1
+python3 scripts/paper1/run_e1_sweep.py --dry-run
+python3 scripts/paper1/run_e1_sweep.py --plot-only
+```
+
+Re-running the normal command resumes from every run whose
+`e1_summary.json` has `status: "pass"`. Per-run E1 figures are omitted by
+default; add `--with-per-run-plots` to create them. Aggregate CSVs are rebuilt
+from successful run artifacts and the 14 aggregate plot families are generated
+automatically in PNG and PDF.
+
 ## Data Generation
 
 Generate a smoke `.pt` dataset from the checked-in B0 config:

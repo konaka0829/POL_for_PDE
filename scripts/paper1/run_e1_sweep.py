@@ -1,312 +1,138 @@
 #!/usr/bin/env python3
-"""Batch runner for Paper 1 E1 spatial-resolution and observation sweeps.
-
-Place this file at scripts/paper1/run_e1_sweep.py in the repository.
-It generates one ordinary E1 config per valid (n_tar, n_sur, J), invokes
-run_e1.py in separate processes, supports resume/parallel execution, and
-collects the main CSV outputs into sweep-level tables.
-"""
+"""CLI for resumable Paper 1 E1 grid sweeps and aggregate plots."""
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
-import copy
-import csv
 import json
 import os
 import subprocess
 import sys
-from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
-RUN_E1 = ROOT / "scripts" / "paper1" / "run_e1.py"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
+from pol.paper1.e1_sweep import (
+    SweepRun, collect_outputs, expand_sweep, load_json, preflight, summary_passed, write_json,
+)
+from pol.paper1.e1_sweep_plotting import generate_aggregate_plots
 
-@dataclass(frozen=True, order=True)
-class RunSpec:
-    n_tar: int
-    n_sur: int
-    J: int
-
-    @property
-    def run_id(self) -> str:
-        return f"ntar{self.n_tar}_nsur{self.n_sur}_J{self.J}"
-
-    @property
-    def full_observation(self) -> bool:
-        return self.J == self.n_sur
-
-
-def load_json(path: Path) -> dict[str, Any]:
-    with path.open(encoding="utf-8") as handle:
-        return json.load(handle)
-
-
-def write_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
-
-
-def read_csv(path: Path) -> list[dict[str, str]]:
-    with path.open(newline="", encoding="utf-8") as handle:
-        return list(csv.DictReader(handle))
-
-
-def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
-    if not rows:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames: list[str] = []
-    for row in rows:
-        for key in row:
-            if key not in fieldnames:
-                fieldnames.append(key)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def expand_sweep(spec: dict[str, Any]) -> list[RunSpec]:
-    runs: set[RunSpec] = set()
-
-    resolution = spec.get("resolution_sweep")
-    if resolution:
-        if resolution.get("observation_rule") != "full":
-            raise ValueError("resolution_sweep.observation_rule must be 'full'")
-        for n_tar in resolution["target_data_nx"]:
-            for n_sur in resolution["surrogate_internal_nx"]:
-                runs.add(RunSpec(int(n_tar), int(n_sur), int(n_sur)))
-
-    for observation in spec.get("observation_sweeps", []):
-        n_tar = int(observation["target_data_nx"])
-        n_sur = int(observation["surrogate_internal_nx"])
-        for J in observation["observation_dim"]:
-            runs.add(RunSpec(n_tar, n_sur, int(J)))
-
-    for explicit in spec.get("explicit_runs", []):
-        runs.add(
-            RunSpec(
-                int(explicit["target_data_nx"]),
-                int(explicit["surrogate_internal_nx"]),
-                int(explicit["observation_dim"]),
-            )
-        )
-
-    if not runs:
-        raise ValueError("the sweep specification produced no runs")
-    return sorted(runs)
-
-
-def validate_run(run: RunSpec, base_config: dict[str, Any]) -> None:
-    if min(run.n_tar, run.n_sur, run.J) <= 0:
-        raise ValueError(f"{run.run_id}: dimensions must be positive")
-    if run.J > run.n_sur:
-        raise ValueError(f"{run.run_id}: J must be <= n_sur")
-    if not run.full_observation and run.J < run.n_tar:
-        raise ValueError(
-            f"{run.run_id}: v24 reduced observation requires J >= n_tar"
-        )
-
-    q_values = [int(q) for q in base_config["e1"]["output_dims"]]
-    q_max = max(q_values)
-    k_max = (q_max - 1) // 2
-    if k_max >= min(run.n_tar, run.J) / 2:
-        raise ValueError(
-            f"{run.run_id}: q_max={q_max} is not representable; "
-            f"need k_max={k_max} < min(n_tar,J)/2={min(run.n_tar, run.J)/2}"
-        )
-
-
-def make_run_config(base: dict[str, Any], run: RunSpec) -> dict[str, Any]:
-    config = copy.deepcopy(base)
-    config["spatial"]["target_data_nx"] = run.n_tar
-    config["spatial"]["surrogate_internal_nx"] = run.n_sur
-    config["spatial"]["observation_dim"] = run.J
-    config["e1"]["require_full_observation"] = run.full_observation
-    return config
-
-
-def summary_passed(output_dir: Path) -> bool:
-    path = output_dir / "e1_summary.json"
-    if not path.exists():
-        return False
-    try:
-        return load_json(path).get("status") == "pass"
-    except Exception:
-        return False
-
-
-def execute_one(
-    run: RunSpec,
-    *,
-    base_config: dict[str, Any],
-    e0_dir: Path,
-    output_root: Path,
-    torch_threads: int,
-    overwrite: bool,
-    resume: bool,
-    skip_plots: bool,
-) -> dict[str, Any]:
-    config_dir = output_root / "generated_configs"
-    run_dir = output_root / "runs" / run.run_id
-    config_path = config_dir / f"{run.run_id}.json"
-    write_json(config_path, make_run_config(base_config, run))
-
-    if resume and summary_passed(run_dir):
-        return {**asdict(run), "run_id": run.run_id, "status": "skipped_passed", "returncode": 0}
-
-    command = [
-        sys.executable,
-        str(RUN_E1),
-        "--config", str(config_path),
-        "--e0-dir", str(e0_dir),
-        "--output-dir", str(run_dir),
-        "--torch-threads", str(torch_threads),
-    ]
-    if overwrite or (resume and run_dir.exists()):
-        command.append("--overwrite")
-    if skip_plots:
-        command.append("--skip-plots")
-
-    log_dir = output_root / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"{run.run_id}.log"
-    with log_path.open("w", encoding="utf-8") as log:
-        completed = subprocess.run(
-            command,
-            cwd=ROOT,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=False,
-            env=os.environ.copy(),
-        )
-
-    status = "pass" if completed.returncode == 0 and summary_passed(run_dir) else "fail"
-    return {
-        **asdict(run),
-        "run_id": run.run_id,
-        "status": status,
-        "returncode": completed.returncode,
-        "config": str(config_path),
-        "output_dir": str(run_dir),
-        "log": str(log_path),
-    }
-
-
-def collect_outputs(output_root: Path, runs: list[RunSpec]) -> None:
-    tables = {
-        "selected_results": [],
-        "readout_diagnostics": [],
-        "noise_summary": [],
-    }
-    for run in runs:
-        run_dir = output_root / "runs" / run.run_id
-        if not summary_passed(run_dir):
-            continue
-        prefix = {
-            "run_id": run.run_id,
-            "n_tar": run.n_tar,
-            "n_sur": run.n_sur,
-            "J": run.J,
-            "full_observation": run.full_observation,
-        }
-        for table_name in tables:
-            for row in read_csv(run_dir / f"{table_name}.csv"):
-                tables[table_name].append({**prefix, **row})
-
-    for name, rows in tables.items():
-        write_csv(output_root / f"sweep_{name}.csv", rows)
+RUN_E1 = ROOT / "scripts/paper1/run_e1.py"
+DEFAULT_BASE = ROOT / "configs/paper1_e1_main.json"
+DEFAULT_SPEC = ROOT / "configs/paper1_e1_sweep_main.json"
+DEFAULT_E0 = ROOT / "outputs_paper1/paper1_e0_main"
+DEFAULT_OUTPUT = ROOT / "outputs_paper1/paper1_e1_sweep_extended"
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Batch Paper 1 E1 sweep")
-    parser.add_argument("--base-config", required=True)
-    parser.add_argument("--sweep-spec", required=True)
-    parser.add_argument("--e0-dir", required=True)
-    parser.add_argument("--output-root", required=True)
+    parser = argparse.ArgumentParser(description="Paper 1 E1 grid sweep")
+    parser.add_argument("--base-config", default=str(DEFAULT_BASE))
+    parser.add_argument("--sweep-spec", default=str(DEFAULT_SPEC))
+    parser.add_argument("--e0-dir", default=str(DEFAULT_E0))
+    parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT))
     parser.add_argument("--jobs", type=int, default=1)
     parser.add_argument("--torch-threads", type=int, default=1)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--plot-only", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--no-resume", action="store_true")
     parser.add_argument("--with-per-run-plots", action="store_true")
+    parser.add_argument("--skip-aggregate-plots", action="store_true")
     return parser
 
 
+def execute_one(
+    run: SweepRun, config: dict[str, Any], *, e0_dir: Path, output_root: Path,
+    torch_threads: int, overwrite: bool, resume: bool, with_plots: bool,
+) -> dict[str, Any]:
+    run_dir = output_root / "runs" / run.run_id
+    config_path = output_root / "generated_configs" / f"{run.run_id}.json"
+    write_json(config_path, config)
+    if resume and summary_passed(run_dir):
+        return {**run.metadata(), "status": "resumed", "returncode": 0}
+    command = [sys.executable, str(RUN_E1), "--config", str(config_path), "--e0-dir", str(e0_dir),
+               "--output-dir", str(run_dir), "--torch-threads", str(torch_threads)]
+    if overwrite or run_dir.exists():
+        command.append("--overwrite")
+    if not with_plots:
+        command.append("--skip-plots")
+    log_path = output_root / "logs" / f"{run.run_id}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", encoding="utf-8") as log:
+        completed = subprocess.run(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
+                                   text=True, check=False, env=os.environ.copy())
+    return {**run.metadata(), "status": "pass" if completed.returncode == 0 and summary_passed(run_dir) else "fail",
+            "returncode": completed.returncode, "config": str(config_path), "output_dir": str(run_dir),
+            "log": str(log_path)}
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     if args.jobs <= 0 or args.torch_threads <= 0:
-        raise SystemExit("--jobs and --torch-threads must be positive")
-
-    base_config_path = Path(args.base_config).resolve()
-    sweep_spec_path = Path(args.sweep_spec).resolve()
-    e0_dir = Path(args.e0_dir).resolve()
-    output_root = Path(args.output_root).resolve()
+        parser.error("--jobs and --torch-threads must be positive")
+    if args.plot_only and (args.dry_run or args.overwrite or args.no_resume or args.with_per_run_plots):
+        parser.error("--plot-only cannot be combined with execution flags")
+    base, spec = load_json(Path(args.base_config)), load_json(Path(args.sweep_spec))
+    try:
+        runs, raw_counts = expand_sweep(spec)
+        valid, invalid, configs = preflight(runs, base)
+    except ValueError as exc:
+        parser.error(str(exc))
+    output_root = Path(args.output_root)
+    plan = {
+        "schema_version": "paper1-e1-sweep-plan-v2", "raw_run_counts": raw_counts,
+        "unique_runs": len(runs), "valid_runs": len(valid), "invalid_runs": len(invalid),
+        "contains_n_tar_gt_J": any(r.n_tar > r.J for r in valid),
+        "contains_n_tar_lt_J": any(r.n_tar < r.J for r in valid),
+        "full_observation_runs": sum(r.full_observation for r in valid),
+        "runs": [{**r.metadata(), "status": "valid"} for r in valid] + invalid,
+    }
+    if not args.plot_only:
+        write_json(output_root / "sweep_plan.json", plan)
+        write_json(output_root / "skipped_invalid_runs.json", invalid)
+    print(f"unique valid runs = {len(valid)}")
+    print(f"invalid runs = {len(invalid)}")
+    print(f"contains n_tar > J = {str(plan['contains_n_tar_gt_J']).lower()}")
+    print(f"contains n_tar < J = {str(plan['contains_n_tar_lt_J']).lower()}")
+    if invalid and spec.get("invalid_run_policy", "skip") == "error":
+        print(json.dumps(invalid, indent=2))
+        return 2
+    if args.dry_run:
+        return 0
+    plot_settings = dict(spec.get("aggregate_plots", {}))
+    plot_settings.setdefault("q", max(base["e1"]["output_dims"]))
+    if args.plot_only:
+        manifest = generate_aggregate_plots(output_root, plot_settings)
+        return 0 if manifest["status"] == "pass" else 1
     output_root.mkdir(parents=True, exist_ok=True)
-
-    base_config = load_json(base_config_path)
-    sweep_spec = load_json(sweep_spec_path)
-    runs = expand_sweep(sweep_spec)
-    for run in runs:
-        validate_run(run, base_config)
-
-    write_json(
-        output_root / "sweep_plan.json",
-        {
-            "base_config": str(base_config_path),
-            "sweep_spec": str(sweep_spec_path),
-            "e0_dir": str(e0_dir),
-            "num_runs": len(runs),
-            "runs": [asdict(run) | {"run_id": run.run_id} for run in runs],
-        },
-    )
-
-    kwargs = dict(
-        base_config=base_config,
-        e0_dir=e0_dir,
-        output_root=output_root,
-        torch_threads=args.torch_threads,
-        overwrite=args.overwrite,
-        resume=not args.no_resume,
-        skip_plots=not args.with_per_run_plots,
-    )
-
-    results: list[dict[str, Any]] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as executor:
-        future_map = {
-            executor.submit(execute_one, run, **kwargs): run for run in runs
-        }
-        for future in concurrent.futures.as_completed(future_map):
-            run = future_map[future]
-            try:
-                result = future.result()
-            except Exception as exc:
-                result = {
-                    **asdict(run),
-                    "run_id": run.run_id,
-                    "status": "exception",
-                    "returncode": -1,
-                    "error": repr(exc),
-                }
-            results.append(result)
-            print(f"[{result['status']}] {run.run_id}", flush=True)
-
-    results.sort(key=lambda row: row["run_id"])
+    (output_root / "generated_configs").mkdir(exist_ok=True)
+    (output_root / "runs").mkdir(exist_ok=True)
+    worker = lambda run: execute_one(run, configs[run.run_id], e0_dir=Path(args.e0_dir),
+                                      output_root=output_root, torch_threads=args.torch_threads,
+                                      overwrite=args.overwrite, resume=not args.no_resume,
+                                      with_plots=args.with_per_run_plots)
+    if args.jobs == 1:
+        results = [worker(run) for run in valid]
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            results = list(pool.map(worker, valid))
     write_json(output_root / "sweep_runs.json", results)
-    failures = [row for row in results if row["status"] not in {"pass", "skipped_passed"}]
-    write_json(output_root / "failed_runs.json", failures)
-    collect_outputs(output_root, runs)
-
-    passed = len(results) - len(failures)
-    print(f"completed: {passed}/{len(results)} passed or resumed")
-    print(f"aggregate: {output_root / 'sweep_selected_results.csv'}")
-    return 1 if failures else 0
+    failed = [result for result in results if result["status"] == "fail"]
+    write_json(output_root / "failed_runs.json", failed)
+    collect_outputs(output_root, valid)
+    plot_failed = False
+    if plot_settings.get("enabled", True) and not args.skip_aggregate_plots:
+        try:
+            plot_failed = generate_aggregate_plots(output_root, plot_settings)["status"] != "pass"
+        except Exception as exc:
+            write_json(output_root / "sweep_plot_manifest.json", {"schema_version": "paper1-e1-sweep-plots-v2",
+                       "status": "fail", "reason": str(exc), "plots": []})
+            plot_failed = True
+    return 1 if failed or plot_failed else 0
 
 
 if __name__ == "__main__":
