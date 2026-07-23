@@ -1,0 +1,79 @@
+"""Figures for Paper 1 E2."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+
+def create_e2_plots(output_dir: Path, result: dict[str, Any], config: Any) -> list[dict[str, Any]]:
+    e2 = config.e2
+    assert e2 is not None
+    rows = result["test_sweep"]
+    aggregates = result["model3_test_aggregate"]
+    representatives = result["shared_representatives"]
+    optima = result["model_specific_optima"]
+    panels = (("burgers", "nu_tilde"), ("burgers", "T_tilde"),
+              ("reaction_diffusion", "nu_tilde"), ("reaction_diffusion", "T_tilde"))
+    fig, axes = plt.subplots(2, 2, figsize=(12, 9), sharey=True)
+    colors = {"model1": "#0072B2", "model2": "#E69F00", "model3": "#009E73"}
+    panel_meta = []
+    for ax, (family, axis) in zip(axes.ravel(), panels):
+        for model in ("model1", "model2", "model3"):
+            selected = sorted([r for r in rows if r["family"] == family and r["sweep_axis"] == axis and r["model"] == model],
+                              key=lambda r: r["parameter_value"])
+            x, y = [r["parameter_value"] for r in selected], [r["field_relative_l2_mean"] for r in selected]
+            ax.plot(x, y, "o-", color=colors[model], label=model)
+            optimum = optima[family][model][axis]
+            ax.axvline(optimum, color=colors[model], linestyle=":", alpha=.5)
+            if model == "model3":
+                lookup = {(r["nu_tilde"], r["T_tilde"]): r for r in aggregates if r["family"] == family and r["sweep_axis"] == axis}
+                lows, highs = [], []
+                for row in selected:
+                    item = lookup.get((row["nu_tilde"], row["T_tilde"]))
+                    lows.append(item["ci95_low"] if item and item["ci95_low"] is not None else row["field_relative_l2_mean"])
+                    highs.append(item["ci95_high"] if item and item["ci95_high"] is not None else row["field_relative_l2_mean"])
+                ax.fill_between(x, lows, highs, color=colors[model], alpha=.18)
+        shared = representatives[family][axis.replace("_tilde", "_star")]
+        ax.axvline(shared, color="black", linestyle="--", label="shared" if axis == "nu_tilde" else None)
+        if selected:
+            ax.axhline(selected[0]["E_repr_q"], color="gray", linestyle="-.", label="E_repr")
+        ax.set_yscale("log"); ax.grid(True, which="both", alpha=.25)
+        ax.set_xlabel(axis); ax.set_title(f"{family}: {axis}")
+        panel_meta.append({"family": family, "axis": axis, "shared": shared,
+                           "n_tar": config.spatial.target_data_nx, "n_sur": config.spatial.surrogate_internal_nx,
+                           "J": config.spatial.observation_dim, "q": config.spatial.target_output_dim})
+    axes[0, 0].legend(fontsize=8)
+    fig.supylabel("test full-reference relative L2")
+    fig.tight_layout()
+    outputs = []
+    for fmt in ("png", "pdf"):
+        path = output_dir / f"e2_parameter_sweeps.{fmt}"; fig.savefig(path, dpi=180, bbox_inches="tight")
+        outputs.append({"relative_path": path.name, "format": fmt, "kind": "parameter_sweeps", "panels": panel_meta})
+    plt.close(fig)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), sharey=True)
+    for ax, family in zip(axes, ("burgers", "reaction_diffusion")):
+        family_rows = sorted([r for r in result["convergence_results"] if r["family"] == family], key=lambda r: r["n_sur"])
+        x = [r["n_sur"] for r in family_rows]
+        for key, label in (("terminal_relative_l2_mean", "terminal"), ("feature_relative_l2_mean", "J-feature"),
+                           ("prediction_relative_l2_mean", "frozen prediction")):
+            ax.plot(x, [r[key] for r in family_rows], "o-", label=label)
+        tolerances = e2.convergence.tolerances
+        for value, label in ((tolerances.terminal_mean, "terminal threshold"),
+                             (tolerances.feature_mean, "feature threshold"),
+                             (tolerances.prediction_mean, "prediction threshold")):
+            ax.axhline(value, linestyle=":", alpha=.35, label=label)
+        base = result["convergence_summary"]["families"][family]["n_sur_base"]
+        ax.axvline(base, color="black", linestyle="--", label=f"base={base}")
+        ax.set_yscale("log"); ax.set_xlabel("n_sur"); ax.set_title(family); ax.grid(True, which="both", alpha=.25)
+    axes[0].set_ylabel("relative L2 discrepancy"); axes[0].legend(fontsize=8); fig.tight_layout()
+    for fmt in ("png", "pdf"):
+        path = output_dir / f"e2_nsur_convergence.{fmt}"; fig.savefig(path, dpi=180, bbox_inches="tight")
+        outputs.append({"relative_path": path.name, "format": fmt, "kind": "n_sur_convergence"})
+    plt.close(fig)
+    return outputs

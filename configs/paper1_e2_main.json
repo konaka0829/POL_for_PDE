@@ -1,0 +1,14 @@
+{
+  "domain": {"length": 1.0},
+  "data": {"total_samples": 1400, "n_train": 1000, "n_val": 200, "n_test": 200, "seed": 0, "dtype": "float64", "device": "cpu", "ic_type": "grf", "grf_gamma": 2.0, "grf_tau": 5.0, "grf_sigma": 25.0, "grf_mean": 0.0, "preprocessing": "l2_scaling_only"},
+  "target": {"equation": "viscous_burgers", "nu": 0.01, "T": 1.0, "dt": 0.001, "fine_dt": 0.0001, "solver": "split_step", "dealias": true},
+  "spatial": {"reference_nx": 4096, "target_data_nx": 512, "surrogate_internal_nx": 512, "observation_dim": 256, "target_output_dim": 257},
+  "e2": {
+    "profile": "main", "selection_metric": "validation_field_relative_l2_mean", "representative_model": "model2", "parameter_tie_tolerance": 1e-8, "parameter_tie_break": "first_in_config_order", "coordinate_refinement_rounds": 1, "cache_policy": "content_addressed",
+    "ridge": {"zetas": [0.0, 1e-12, 1e-10, 1e-8, 1e-6, 0.0001], "tie_tolerance": 1e-10, "tie_break": "largest_zeta", "svd_rcond": null},
+    "burgers": {"nu_grid": [0.0025, 0.005, 0.01, 0.02, 0.04], "initial_T_anchor": 1.0, "T_grid": [0.5, 0.75, 1.0, 1.25, 1.5], "solver": "split_step", "dt": 0.01, "fine_dt": 0.001, "dealias": true, "advection_coefficient": 1.0},
+    "reaction_diffusion": {"nu_grid": [0.0025, 0.005, 0.01, 0.02, 0.04], "initial_T_anchor": 1.0, "T_grid": [0.5, 0.75, 1.0, 1.25, 1.5], "dt": 0.01, "alpha": 1.0, "beta": 1.0, "solver": "semi_implicit_spectral_euler", "nonlinear_filter": "two_thirds"},
+    "model3": {"activation": "tanh", "widths": [128, 256, 512], "weight_scales": [0.25, 0.5, 1.0], "bias_scales": [0.0, 0.1], "selection_seeds": [101, 102, 103, 104, 105], "evaluation_seeds": [201, 202, 203, 204, 205, 206, 207, 208, 209, 210], "tie_break": ["smallest_width", "largest_zeta", "smallest_weight_scale", "smallest_bias_scale", "first_in_config_order"]},
+    "convergence": {"sample_ids": [0, 1, 2, 1000, 1001], "n_sur_candidates": [512, 1024, 2048], "max_auto_reruns": 1, "tolerances": {"terminal_mean": 0.01, "terminal_max": 0.02, "feature_mean": 0.01, "feature_max": 0.02, "prediction_mean": 0.02, "prediction_max": 0.04}}
+  }
+}

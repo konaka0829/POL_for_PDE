@@ -224,6 +224,56 @@ default; add `--with-per-run-plots` to create them. Aggregate CSVs are rebuilt
 from successful run artifacts and the 14 aggregate plot families are generated
 automatically in PNG and PDF.
 
+## Paper 1 E2 surrogate parameters and readout time
+
+E2 compares Models 1--3 on identical finite Burgers inputs, sample IDs,
+splits, surrogate states, and fixed-\(J\) observations while sweeping
+surrogate viscosity and readout time for Burgers and reaction--diffusion
+families. E0 and a hash-validated Burgers master dataset are direct
+prerequisites; E1 output is not a runtime dependency.
+
+All ridge, Model 3 candidate, viscosity, time, and shared representative
+choices use validation data only. `model_specific_optima.json` records each
+model's optimum separately from the representative-model choice in
+`shared_representatives.json`. Test curves are evaluated only after
+`selection_record.json` is frozen and hashed. Model 3 candidates are selected
+by the mean across selection seeds; disjoint evaluation seeds provide the
+reported Student-t seed confidence interval.
+
+After shared points are selected, E2 compares terminal states on a common
+spectral grid, fixed-\(J\) features, and predictions from a finest-resolution
+frozen readout. Passing family bases and their global maximum are written to
+`e2_handoff.json` for E3. Content-addressed state and feature caches are
+separate and shared across Models 1--3. `--resume` accepts only hash-verified
+complete output/cache artifacts.
+
+Smoke:
+
+```bash
+python3 scripts/paper1/run_e0.py \
+  --config configs/paper1_e0_smoke.json \
+  --output-dir outputs/paper1_e0_smoke --overwrite
+python3 scripts/paper1/generate_master_dataset.py \
+  --config outputs/paper1_e0_smoke/accepted_production_config.json \
+  --master-initial-conditions outputs/paper1_e0_smoke/master_initial_conditions.pt \
+  --output-dir outputs/paper1_master_burgers_smoke --overwrite
+python3 scripts/paper1/run_e2.py \
+  --config configs/paper1_e2_smoke.json \
+  --e0-dir outputs/paper1_e0_smoke \
+  --dataset-dir outputs/paper1_master_burgers_smoke \
+  --output-dir outputs/paper1_e2_smoke --overwrite --torch-threads 1
+```
+
+Future production uses the same commands with `paper1_e0_main.json`,
+`paper1_e2_main.json`, and production output directories. The checked-in main
+parameter grids are initial candidates and must be validated; this repository
+does not treat them as pre-established optima. Principal E2 artifacts are the
+validation/test tables, Model 3 per-seed and aggregate tables, frozen selection
+record, model-specific/shared selections, convergence tables, E3 handoff,
+plots, environment, summary, and final SHA-256 manifest. The legacy root
+Model123 calibration suite is a separate compatibility experiment and does not
+implement this Paper 1 prerequisite, freeze, convergence, or handoff protocol.
+
 ## Data Generation
 
 Generate a smoke `.pt` dataset from the checked-in B0 config:

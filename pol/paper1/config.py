@@ -158,6 +158,83 @@ class E1Config:
 
 
 @dataclass(frozen=True)
+class E2RidgeConfig:
+    zetas: tuple[float, ...]
+    tie_tolerance: float = 1e-12
+    tie_break: str = "largest_zeta"
+    svd_rcond: float | None = None
+
+
+@dataclass(frozen=True)
+class E2BurgersConfig:
+    nu_grid: tuple[float, ...]
+    initial_T_anchor: float
+    T_grid: tuple[float, ...]
+    solver: str = "split_step"
+    dt: float = 0.01
+    fine_dt: float | None = 0.0025
+    dealias: bool = True
+    advection_coefficient: float = 1.0
+
+
+@dataclass(frozen=True)
+class E2ReactionDiffusionConfig:
+    nu_grid: tuple[float, ...]
+    initial_T_anchor: float
+    T_grid: tuple[float, ...]
+    dt: float
+    alpha: float = 1.0
+    beta: float = 1.0
+    solver: str = "semi_implicit_spectral_euler"
+    nonlinear_filter: str = "two_thirds"
+
+
+@dataclass(frozen=True)
+class E2Model3Config:
+    activation: str
+    widths: tuple[int, ...]
+    weight_scales: tuple[float, ...]
+    bias_scales: tuple[float, ...]
+    selection_seeds: tuple[int, ...]
+    evaluation_seeds: tuple[int, ...]
+    tie_break: tuple[str, ...] = ("smallest_width", "largest_zeta", "smallest_weight_scale", "smallest_bias_scale", "first_in_config_order")
+
+
+@dataclass(frozen=True)
+class E2ConvergenceTolerancesConfig:
+    terminal_mean: float
+    terminal_max: float
+    feature_mean: float
+    feature_max: float
+    prediction_mean: float
+    prediction_max: float
+
+
+@dataclass(frozen=True)
+class E2ConvergenceConfig:
+    sample_ids: tuple[int, ...]
+    n_sur_candidates: tuple[int, ...]
+    tolerances: E2ConvergenceTolerancesConfig
+    max_auto_reruns: int = 1
+
+
+@dataclass(frozen=True)
+class E2Config:
+    ridge: E2RidgeConfig
+    burgers: E2BurgersConfig
+    reaction_diffusion: E2ReactionDiffusionConfig
+    model3: E2Model3Config
+    convergence: E2ConvergenceConfig
+    profile: str = "smoke"
+    selection_metric: str = "validation_field_relative_l2_mean"
+    representative_model: str = "model2"
+    parameter_tie_tolerance: float = 1e-12
+    parameter_tie_break: str = "first_in_config_order"
+    coordinate_refinement_rounds: int = 0
+    cache_policy: str = "content_addressed"
+
+
+@dataclass(frozen=True)
 class Paper1Config:
     domain: DomainConfig
     data: DataConfig
@@ -165,6 +242,7 @@ class Paper1Config:
     spatial: SpatialConfig
     e0: E0Config | None = None
     e1: E1Config | None = None
+    e2: E2Config | None = None
 
     def validate(self) -> "Paper1Config":
         if self.domain.length <= 0.0:
@@ -356,6 +434,78 @@ class Paper1Config:
                 raise ValueError("e1.ridge_svd_rcond must lie strictly between zero and one")
             if e1.ridge_tie_break != "largest_zeta":
                 raise ValueError("e1.ridge_tie_break must be largest_zeta")
+        if self.e2 is not None:
+            e2 = self.e2
+            if self.target.equation not in {"burgers", "viscous_burgers"}:
+                raise ValueError("E2 requires a Burgers target")
+            if self.data.n_val <= 0 or self.data.n_test <= 0:
+                raise ValueError("E2 requires nonempty train/validation/test splits")
+            if e2.selection_metric != "validation_field_relative_l2_mean":
+                raise ValueError("e2.selection_metric must be validation_field_relative_l2_mean")
+            if e2.representative_model not in {"model1", "model2", "model3"}:
+                raise ValueError("e2.representative_model must be model1, model2, or model3")
+            if e2.parameter_tie_break != "first_in_config_order" or e2.parameter_tie_tolerance < 0:
+                raise ValueError("invalid E2 parameter tie policy")
+            if e2.coordinate_refinement_rounds < 0 or e2.cache_policy != "content_addressed":
+                raise ValueError("invalid E2 refinement/cache policy")
+            for path, grid in (
+                ("e2.burgers.nu_grid", e2.burgers.nu_grid),
+                ("e2.burgers.T_grid", e2.burgers.T_grid),
+                ("e2.reaction_diffusion.nu_grid", e2.reaction_diffusion.nu_grid),
+                ("e2.reaction_diffusion.T_grid", e2.reaction_diffusion.T_grid),
+                ("e2.ridge.zetas", e2.ridge.zetas),
+            ):
+                if not grid or len(set(grid)) != len(grid) or any(not math.isfinite(float(v)) for v in grid):
+                    raise ValueError(f"{path} must be nonempty, finite, and unique")
+            if any(v <= 0 for v in (*e2.burgers.nu_grid, *e2.burgers.T_grid, e2.burgers.initial_T_anchor,
+                                    *e2.reaction_diffusion.nu_grid, *e2.reaction_diffusion.T_grid,
+                                    e2.reaction_diffusion.initial_T_anchor)):
+                raise ValueError("E2 PDE parameter/time grids must be positive")
+            if any(z < 0 for z in e2.ridge.zetas) or 0.0 not in e2.ridge.zetas:
+                raise ValueError("e2.ridge.zetas must be nonnegative and contain zero")
+            if e2.ridge.tie_break != "largest_zeta" or e2.ridge.tie_tolerance < 0:
+                raise ValueError("invalid e2.ridge tie policy")
+            if e2.burgers.advection_coefficient != 1.0:
+                raise ValueError("Paper 1 E2 supports Burgers advection_coefficient=1.0")
+            normalize_burgers_solver_name(e2.burgers.solver)
+            for value in (e2.burgers.initial_T_anchor, *e2.burgers.T_grid):
+                if abs(round(value / e2.burgers.dt) * e2.burgers.dt - value) > 1e-10:
+                    raise ValueError("e2.burgers times must align exactly with dt")
+            rd = e2.reaction_diffusion
+            if rd.solver != "semi_implicit_spectral_euler" or rd.nonlinear_filter not in {"none", "two_thirds"}:
+                raise ValueError("invalid E2 reaction-diffusion solver/filter")
+            if not all(math.isfinite(v) for v in (rd.alpha, rd.beta)):
+                raise ValueError("reaction-diffusion alpha/beta must be finite")
+            for value in (rd.initial_T_anchor, *rd.T_grid):
+                if abs(round(value / rd.dt) * rd.dt - value) > 1e-10:
+                    raise ValueError("e2.reaction_diffusion times must align exactly with dt")
+            m3 = e2.model3
+            if m3.activation not in {"tanh", "relu", "identity"}:
+                raise ValueError("invalid e2.model3.activation")
+            if not m3.widths or any(v <= 0 for v in m3.widths) or not m3.weight_scales or not m3.bias_scales:
+                raise ValueError("invalid E2 Model 3 candidate grids")
+            if any(v < 0 or not math.isfinite(v) for v in (*m3.weight_scales, *m3.bias_scales)):
+                raise ValueError("E2 Model 3 scales must be finite and nonnegative")
+            if len(set(m3.selection_seeds)) != len(m3.selection_seeds) or len(set(m3.evaluation_seeds)) != len(m3.evaluation_seeds):
+                raise ValueError("E2 Model 3 seed lists must be unique")
+            if set(m3.selection_seeds) & set(m3.evaluation_seeds):
+                raise ValueError("E2 Model 3 selection/evaluation seeds must be disjoint")
+            if self.e2.profile == "main" and (len(m3.selection_seeds) < 5 or len(m3.evaluation_seeds) < 10):
+                raise ValueError("main E2 requires >=5 selection and >=10 evaluation seeds")
+            conv = e2.convergence
+            if len(conv.n_sur_candidates) < 2 or tuple(sorted(set(conv.n_sur_candidates))) != conv.n_sur_candidates:
+                raise ValueError("e2.convergence.n_sur_candidates must be strictly increasing and unique")
+            if conv.n_sur_candidates[0] != self.spatial.surrogate_internal_nx:
+                raise ValueError("first convergence n_sur candidate must equal spatial.surrogate_internal_nx")
+            if self.spatial.observation_dim > conv.n_sur_candidates[0]:
+                raise ValueError("E2 requires J <= min convergence n_sur candidates")
+            if len(set(conv.sample_ids)) != len(conv.sample_ids) or not conv.sample_ids:
+                raise ValueError("E2 convergence sample IDs must be nonempty and unique")
+            train_val_limit = self.data.n_train + self.data.n_val
+            if any(i < 0 or i >= train_val_limit for i in conv.sample_ids):
+                raise ValueError("E2 convergence sample IDs must be train/validation IDs, never test")
+            if any(v < 0 for v in vars(conv.tolerances).values()) or conv.max_auto_reruns < 0:
+                raise ValueError("invalid E2 convergence tolerances/auto-reruns")
         return self
 
     def to_dict(self) -> dict[str, Any]:
@@ -371,7 +521,7 @@ def _strict_dataclass(cls, values: dict[str, Any], *, path: str):
 
 
 def config_from_dict(raw: dict[str, Any]) -> Paper1Config:
-    top_names = {"domain", "data", "target", "spatial", "e0", "e1"}
+    top_names = {"domain", "data", "target", "spatial", "e0", "e1", "e2"}
     unknown_top = sorted(set(raw) - top_names)
     if unknown_top:
         raise ValueError(f"unknown config key: {unknown_top[0]}")
@@ -418,6 +568,34 @@ def config_from_dict(raw: dict[str, Any]) -> Paper1Config:
             e1_values[key] = tuple(e1_values.get(key, []))
         e1_values["algebraic_tolerances"] = _strict_dataclass(E1AlgebraicTolerancesConfig, dict(e1_values.get("algebraic_tolerances", {})), path="e1.algebraic_tolerances")
         e1 = _strict_dataclass(E1Config, e1_values, path="e1")
+    e2_raw = raw.get("e2")
+    e2 = None
+    if e2_raw is not None:
+        values = dict(e2_raw)
+        unknown = sorted(set(values) - {f.name for f in fields(E2Config)})
+        if unknown:
+            raise ValueError(f"unknown config key: e2.{unknown[0]}")
+        nested = (
+            ("ridge", E2RidgeConfig), ("burgers", E2BurgersConfig),
+            ("reaction_diffusion", E2ReactionDiffusionConfig), ("model3", E2Model3Config),
+        )
+        for key, cls in nested:
+            item = dict(values.get(key, {}))
+            for tuple_key in {
+                "ridge": ("zetas",), "burgers": ("nu_grid", "T_grid"),
+                "reaction_diffusion": ("nu_grid", "T_grid"),
+                "model3": ("widths", "weight_scales", "bias_scales", "selection_seeds", "evaluation_seeds", "tie_break"),
+            }[key]:
+                item[tuple_key] = tuple(item.get(tuple_key, []))
+            values[key] = _strict_dataclass(cls, item, path=f"e2.{key}")
+        conv_values = dict(values.get("convergence", {}))
+        conv_values["sample_ids"] = tuple(conv_values.get("sample_ids", []))
+        conv_values["n_sur_candidates"] = tuple(conv_values.get("n_sur_candidates", []))
+        conv_values["tolerances"] = _strict_dataclass(
+            E2ConvergenceTolerancesConfig, dict(conv_values.get("tolerances", {})),
+            path="e2.convergence.tolerances")
+        values["convergence"] = _strict_dataclass(E2ConvergenceConfig, conv_values, path="e2.convergence")
+        e2 = _strict_dataclass(E2Config, values, path="e2")
     cfg = Paper1Config(
         domain=_strict_dataclass(DomainConfig, dict(raw.get("domain", {})), path="domain"),
         data=_strict_dataclass(DataConfig, dict(raw.get("data", {})), path="data"),
@@ -425,6 +603,7 @@ def config_from_dict(raw: dict[str, Any]) -> Paper1Config:
         spatial=_strict_dataclass(SpatialConfig, spatial_raw, path="spatial"),
         e0=e0,
         e1=e1,
+        e2=e2,
     )
     return cfg.validate()
 

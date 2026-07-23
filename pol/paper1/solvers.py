@@ -115,3 +115,56 @@ def solve_burgers_final_state(
         dtype=str(u0.dtype).removeprefix("torch."), device=str(u0.device),
     )
     return BurgersFinalStateResult(values=values.detach(), metadata=metadata)
+
+
+@dataclass(frozen=True)
+class ReactionDiffusionFinalStateResult:
+    values: torch.Tensor
+    metadata: dict[str, object]
+
+
+@torch.no_grad()
+def solve_reaction_diffusion_final_state(
+    u0: torch.Tensor, *, nu: float, alpha: float, beta: float, T: float, dt: float,
+    domain_length: float, nonlinear_filter: str = "two_thirds", context: str = "",
+) -> ReactionDiffusionFinalStateResult:
+    """Semi-implicit spectral Euler for ``r_t=nu*r_xx+alpha*r-beta*r^3``.
+
+    The update is ``rhat[n+1]=(rhat[n]+dt*FFT(alpha*r-beta*r^3))/
+    (1+dt*nu*k^2)``.  ``two_thirds`` masks the sampled cubic term; this is a
+    stabilizing 2/3 filter, not exact cubic de-aliasing.
+    """
+    if u0.ndim != 2 or not u0.dtype.is_floating_point:
+        raise ValueError("reaction-diffusion u0 must be real (batch,nx)")
+    if nu <= 0 or T <= 0 or dt <= 0 or domain_length <= 0:
+        raise ValueError("reaction-diffusion nu,T,dt,L must be positive")
+    if nonlinear_filter not in {"none", "two_thirds"}:
+        raise ValueError("nonlinear_filter must be none or two_thirds")
+    steps = int(round(T / dt))
+    if abs(steps * dt - T) > 1e-10 * max(1.0, abs(T)):
+        raise ValueError(f"T={T} must be aligned with dt={dt}")
+    nx = u0.shape[-1]
+    k = 2 * math.pi * torch.fft.rfftfreq(nx, d=domain_length / nx, device=u0.device, dtype=u0.dtype)
+    denominator = 1.0 + dt * nu * k.square()
+    mask = (torch.arange(k.numel(), device=u0.device) <= nx // 3).to(u0.dtype)
+    values = u0.clone()
+    for _ in range(steps):
+        nonlinear_hat = torch.fft.rfft(alpha * values - beta * values.pow(3), dim=-1)
+        if nonlinear_filter == "two_thirds":
+            nonlinear_hat = nonlinear_hat * mask
+        values = torch.fft.irfft(
+            (torch.fft.rfft(values, dim=-1) + dt * nonlinear_hat) / denominator,
+            n=nx, dim=-1,
+        )
+        if not bool(torch.isfinite(values).all()):
+            raise FloatingPointError(
+                f"reaction-diffusion produced NaN/Inf; context={context or 'unspecified'}, "
+                f"nx={nx}, nu={nu}, T={T}, dt={dt}")
+    metadata = {
+        "solver": "semi_implicit_spectral_euler", "requested_dt": float(dt),
+        "effective_inner_step": float(dt), "step_count": steps, "nu_tilde": float(nu),
+        "alpha": float(alpha), "beta": float(beta), "nonlinear_filter": nonlinear_filter,
+        "dealiasing": False, "domain_length": float(domain_length),
+        "dtype": str(u0.dtype).removeprefix("torch."), "device": str(u0.device),
+    }
+    return ReactionDiffusionFinalStateResult(values.detach(), metadata)
