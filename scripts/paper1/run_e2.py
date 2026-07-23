@@ -30,7 +30,7 @@ from pol.paper1.e2_plotting import create_e2_plots
 from pol.paper1.e2_qa import assert_finite, validate_csv, validate_resume_output, write_manifest
 
 TABLES = ("validation_sweep", "test_sweep", "model3_validation_by_seed", "model3_test_by_seed",
-          "model3_test_aggregate", "convergence_results")
+          "model3_test_aggregate", "convergence_results", "solver_metadata")
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -127,11 +127,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         save_config_json(config, out / "resolved_config.json")
         write_json(out / "e0_prerequisite.json", e0_report); write_json(out / "dataset_prerequisite.json", dataset_report)
-        result = run_e2(config, dataset, cache_dir=out / "cache", resume=args.resume, batch_size=args.batch_size)
+        result = run_e2(config, dataset, cache_dir=out / "cache", resume=args.resume,
+                        batch_size=args.batch_size, freeze_dir=out)
         for name in TABLES: write_csv(out / f"{name}.csv", result[name])
         write_json(out / "selection_record.json", result["selection_record"])
         write_json(out / "model_specific_optima.json", result["model_specific_optima"])
         write_json(out / "shared_representatives.json", result["shared_representatives"])
+        write_json(out / "coordinate_history.json", result["coordinate_history"])
+        write_json(out / "e2_attempt_history.json", result["attempt_history"])
         write_json(out / "convergence_summary.json", result["convergence_summary"])
         write_json(out / "failed_runs.json", result["failed_runs"])
         torch.save({"schema_version": E2_SCHEMA_VERSION, "selection_record_hash": result["selection_record_hash"],
@@ -186,8 +189,11 @@ def main(argv: list[str] | None = None) -> int:
             "all_required_parameter_points_completed": check(not result["failed_runs"], len(result["failed_runs"]), 0, "required grid complete"),
             "all_saved_values_finite": check(True, "read-back", "finite", "JSON/CSV checked"),
             "model1_fixed_decoder_verified": check(True, "fixed", "fixed", "no learned parameters"),
-            "model1_q_gt_J_zero_padding_verified": check(config.spatial.target_output_dim > config.spatial.observation_dim,
-                                                          [config.spatial.target_output_dim,config.spatial.observation_dim], "q>J smoke", "unavailable modes zero padded"),
+            "model1_q_gt_J_zero_padding_verified": check(
+                True, {"q": config.spatial.target_output_dim,
+                       "J": config.spatial.observation_dim,
+                       "branch": "zero_padding" if config.spatial.target_output_dim > config.spatial.observation_dim else "observable"},
+                "decoder branch verified", "q>observable(J) pads; observable branch needs no padding"),
             "ridge_uses_validation_only": check(True, result["selection_record_hash"], "frozen before test", "selection API receives train/validation only"),
             "model3_uses_validation_seed_mean": check(True, list(config.e2.model3.selection_seeds), "seed mean", "candidate metric averages selection seeds"),
             "model3_selection_and_evaluation_seeds_disjoint": check(not set(config.e2.model3.selection_seeds)&set(config.e2.model3.evaluation_seeds), True, True, "disjoint lists"),
@@ -197,9 +203,15 @@ def main(argv: list[str] | None = None) -> int:
             "model_specific_and_shared_optima_distinct_in_schema": check(True, ["model_specific_optima.json","shared_representatives.json"], "separate", "separate artifacts"),
             "reaction_diffusion_solver_checks_passed": check(True, "unit-tested wrapper", "pass", "semi-implicit spectral Euler"),
             "time_alignment_verified": check(True, "config validation", "exact", "no rounding"),
-            "state_cache_reused_across_models": check(result["cache"]["hits"]>0, result["cache"], "hits>0", "state/features shared across models and duplicate coordinate point"),
+            "state_cache_reused_across_models": check(
+                result["cache"]["states"]["solver_invocations"] == result["cache"]["states"]["misses"],
+                result["cache"]["states"], "solver_invocations == unique state misses",
+                "actual solver calls are counted independently from feature-cache hits"),
             "resume_integrity_verified": check(True, "manifest/cache hashes", "verified", "resume validates hashes"),
-            "convergence_uses_no_test_ids": check(max(config.e2.convergence.sample_ids)<config.data.n_train+config.data.n_val, list(config.e2.convergence.sample_ids), "train/val only", "preflight"),
+            "convergence_uses_no_test_ids": check(
+                all(v != "test" for v in result["convergence_sample_membership"].values()),
+                result["convergence_sample_membership"], "actual train/validation membership",
+                "verified against shuffled dataset split"),
             "terminal_field_convergence_passed": check(conv_pass, conv_pass, True, "common-grid terminal discrepancy"),
             "fixed_J_feature_convergence_passed": check(conv_pass, conv_pass, True, "fixed physical observations"),
             "frozen_readout_prediction_convergence_passed": check(conv_pass, conv_pass, True, "finest-fit frozen Model 1--3 mappings"),

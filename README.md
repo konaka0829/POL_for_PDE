@@ -234,11 +234,20 @@ prerequisites; E1 output is not a runtime dependency.
 
 All ridge, Model 3 candidate, viscosity, time, and shared representative
 choices use validation data only. `model_specific_optima.json` records each
-model's optimum separately from the representative-model choice in
+model's independent coordinate path separately from the representative-model choice in
 `shared_representatives.json`. Test curves are evaluated only after
 `selection_record.json` is frozen and hashed. Model 3 candidates are selected
-by the mean across selection seeds; disjoint evaluation seeds provide the
-reported Student-t seed confidence interval.
+as `(width, weight scale, bias scale, zeta)` by the mean across selection
+seeds; the selected zeta is common to every selection/evaluation seed.
+Disjoint evaluation seeds provide the reported Student-t seed confidence
+interval.
+
+Convergence sample IDs are checked against the actual shuffled dataset split,
+not against a numeric ID range. Selection state/features contain only
+train/validation samples; test surrogate states are first generated after the
+selection record has been atomically written and read back. The reaction--
+diffusion `two_thirds` convention filters only the sampled cubic spectrum, not
+the linear reaction term, and is not described as exact cubic de-aliasing.
 
 After shared points are selected, E2 compares terminal states on a common
 spectral grid, fixed-\(J\) features, and predictions from a finest-resolution
@@ -246,6 +255,9 @@ frozen readout. Passing family bases and their global maximum are written to
 `e2_handoff.json` for E3. Content-addressed state and feature caches are
 separate and shared across Models 1--3. `--resume` accepts only hash-verified
 complete output/cache artifacts.
+Cache keys use canonical JSON and the v2 cache schema; state and fixed-\(J\)
+feature units are committed atomically and partial/tampered units are rejected
+under `--resume`.
 
 Smoke:
 

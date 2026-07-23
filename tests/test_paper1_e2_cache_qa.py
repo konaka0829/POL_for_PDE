@@ -17,6 +17,28 @@ def test_state_key_reused_independent_of_model_q_zeta_width(tmp_path):
     assert digest==digest2 and torch.equal(first,second) and calls==[1] and cache.hits==1
 
 
+def test_cache_key_tuple_round_trip_across_instances(tmp_path):
+    key = {"solver": {"grid": (1, 2)}, "n_sur": 32}
+    TensorCache(tmp_path, resume=False).get_or_compute(
+        "states", key, lambda: (torch.ones(2, 3), {"solver": "test"}))
+    calls = []
+    value, _, _ = TensorCache(tmp_path, resume=True).get_or_compute(
+        "states", key, lambda: (calls.append(1) or torch.zeros(2, 3), {}))
+    assert torch.equal(value, torch.ones(2, 3))
+    assert calls == []
+
+
+@pytest.mark.parametrize("missing_suffix", [".pt", ".json"])
+def test_resume_rejects_half_cache_unit(tmp_path, missing_suffix):
+    cache = TensorCache(tmp_path, resume=False)
+    _, _, digest = cache.get_or_compute(
+        "states", {"x": (1, 2)}, lambda: (torch.ones(2), {"solver": "test"}))
+    (tmp_path / "states" / f"{digest}{missing_suffix}").unlink()
+    with pytest.raises(ValueError, match="incomplete unit"):
+        TensorCache(tmp_path, resume=True).get_or_compute(
+            "states", {"x": (1, 2)}, lambda: (torch.zeros(2), {}))
+
+
 def test_resume_rejects_extra_or_tampered_artifact(tmp_path):
     (tmp_path/"e2_summary.json").write_text('{"status":"pass"}')
     payload=tmp_path/"x.json"; payload.write_text('{"x":1}')

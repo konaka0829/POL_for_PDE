@@ -444,7 +444,9 @@ class Paper1Config:
                 raise ValueError("e2.selection_metric must be validation_field_relative_l2_mean")
             if e2.representative_model not in {"model1", "model2", "model3"}:
                 raise ValueError("e2.representative_model must be model1, model2, or model3")
-            if e2.parameter_tie_break != "first_in_config_order" or e2.parameter_tie_tolerance < 0:
+            if (e2.parameter_tie_break != "first_in_config_order"
+                    or not math.isfinite(e2.parameter_tie_tolerance)
+                    or e2.parameter_tie_tolerance < 0):
                 raise ValueError("invalid E2 parameter tie policy")
             if e2.coordinate_refinement_rounds < 0 or e2.cache_policy != "content_addressed":
                 raise ValueError("invalid E2 refinement/cache policy")
@@ -463,8 +465,17 @@ class Paper1Config:
                 raise ValueError("E2 PDE parameter/time grids must be positive")
             if any(z < 0 for z in e2.ridge.zetas) or 0.0 not in e2.ridge.zetas:
                 raise ValueError("e2.ridge.zetas must be nonnegative and contain zero")
-            if e2.ridge.tie_break != "largest_zeta" or e2.ridge.tie_tolerance < 0:
+            if (e2.ridge.tie_break != "largest_zeta" or not math.isfinite(e2.ridge.tie_tolerance)
+                    or e2.ridge.tie_tolerance < 0):
                 raise ValueError("invalid e2.ridge tie policy")
+            if e2.ridge.svd_rcond is not None and (
+                    not math.isfinite(e2.ridge.svd_rcond) or not 0 < e2.ridge.svd_rcond < 1):
+                raise ValueError("e2.ridge.svd_rcond must lie strictly between zero and one")
+            if not math.isfinite(e2.burgers.dt) or e2.burgers.dt <= 0:
+                raise ValueError("e2.burgers.dt must be finite and positive")
+            if e2.burgers.fine_dt is not None and (
+                    not math.isfinite(e2.burgers.fine_dt) or e2.burgers.fine_dt <= 0):
+                raise ValueError("e2.burgers.fine_dt must be finite and positive when provided")
             if e2.burgers.advection_coefficient != 1.0:
                 raise ValueError("Paper 1 E2 supports Burgers advection_coefficient=1.0")
             normalize_burgers_solver_name(e2.burgers.solver)
@@ -472,6 +483,8 @@ class Paper1Config:
                 if abs(round(value / e2.burgers.dt) * e2.burgers.dt - value) > 1e-10:
                     raise ValueError("e2.burgers times must align exactly with dt")
             rd = e2.reaction_diffusion
+            if not math.isfinite(rd.dt) or rd.dt <= 0:
+                raise ValueError("e2.reaction_diffusion.dt must be finite and positive")
             if rd.solver != "semi_implicit_spectral_euler" or rd.nonlinear_filter not in {"none", "two_thirds"}:
                 raise ValueError("invalid E2 reaction-diffusion solver/filter")
             if not all(math.isfinite(v) for v in (rd.alpha, rd.beta)):
@@ -486,6 +499,12 @@ class Paper1Config:
                 raise ValueError("invalid E2 Model 3 candidate grids")
             if any(v < 0 or not math.isfinite(v) for v in (*m3.weight_scales, *m3.bias_scales)):
                 raise ValueError("E2 Model 3 scales must be finite and nonnegative")
+            if not m3.selection_seeds or not m3.evaluation_seeds:
+                raise ValueError("E2 Model 3 seed lists must be nonempty")
+            if any(not isinstance(v, int) for v in (*m3.selection_seeds, *m3.evaluation_seeds)):
+                raise ValueError("E2 Model 3 seeds must be integers")
+            if len(set(m3.widths)) != len(m3.widths) or len(set(m3.weight_scales)) != len(m3.weight_scales) or len(set(m3.bias_scales)) != len(m3.bias_scales):
+                raise ValueError("E2 Model 3 candidate grids must be unique")
             if len(set(m3.selection_seeds)) != len(m3.selection_seeds) or len(set(m3.evaluation_seeds)) != len(m3.evaluation_seeds):
                 raise ValueError("E2 Model 3 seed lists must be unique")
             if set(m3.selection_seeds) & set(m3.evaluation_seeds):
@@ -501,10 +520,10 @@ class Paper1Config:
                 raise ValueError("E2 requires J <= min convergence n_sur candidates")
             if len(set(conv.sample_ids)) != len(conv.sample_ids) or not conv.sample_ids:
                 raise ValueError("E2 convergence sample IDs must be nonempty and unique")
-            train_val_limit = self.data.n_train + self.data.n_val
-            if any(i < 0 or i >= train_val_limit for i in conv.sample_ids):
-                raise ValueError("E2 convergence sample IDs must be train/validation IDs, never test")
-            if any(v < 0 for v in vars(conv.tolerances).values()) or conv.max_auto_reruns < 0:
+            if any(not isinstance(i, int) or i < 0 or i >= self.data.total_samples for i in conv.sample_ids):
+                raise ValueError("E2 convergence sample IDs must be integer IDs in the dataset range")
+            if (any(not math.isfinite(v) or v < 0 for v in vars(conv.tolerances).values())
+                    or not isinstance(conv.max_auto_reruns, int) or conv.max_auto_reruns < 0):
                 raise ValueError("invalid E2 convergence tolerances/auto-reruns")
         return self
 

@@ -130,12 +130,15 @@ def solve_reaction_diffusion_final_state(
 ) -> ReactionDiffusionFinalStateResult:
     """Semi-implicit spectral Euler for ``r_t=nu*r_xx+alpha*r-beta*r^3``.
 
-    The update is ``rhat[n+1]=(rhat[n]+dt*FFT(alpha*r-beta*r^3))/
-    (1+dt*nu*k^2)``.  ``two_thirds`` masks the sampled cubic term; this is a
-    stabilizing 2/3 filter, not exact cubic de-aliasing.
+    The update is ``rhat[n+1]=(rhat[n]+dt*alpha*rhat[n]
+    -dt*beta*filter(FFT(r^3)))/(1+dt*nu*k^2)``.  ``two_thirds`` masks only
+    the sampled cubic spectrum; it is a stabilizing filter, not exact cubic
+    de-aliasing.
     """
     if u0.ndim != 2 or not u0.dtype.is_floating_point:
         raise ValueError("reaction-diffusion u0 must be real (batch,nx)")
+    if not all(math.isfinite(v) for v in (nu, alpha, beta, T, dt, domain_length)):
+        raise ValueError("reaction-diffusion parameters must be finite")
     if nu <= 0 or T <= 0 or dt <= 0 or domain_length <= 0:
         raise ValueError("reaction-diffusion nu,T,dt,L must be positive")
     if nonlinear_filter not in {"none", "two_thirds"}:
@@ -148,12 +151,16 @@ def solve_reaction_diffusion_final_state(
     denominator = 1.0 + dt * nu * k.square()
     mask = (torch.arange(k.numel(), device=u0.device) <= nx // 3).to(u0.dtype)
     values = u0.clone()
+    if not bool(torch.isfinite(values).all()):
+        raise FloatingPointError(
+            f"reaction-diffusion input contains NaN/Inf; context={context or 'unspecified'}")
     for _ in range(steps):
-        nonlinear_hat = torch.fft.rfft(alpha * values - beta * values.pow(3), dim=-1)
+        rhat = torch.fft.rfft(values, dim=-1)
+        cubic_hat = torch.fft.rfft(values.pow(3), dim=-1)
         if nonlinear_filter == "two_thirds":
-            nonlinear_hat = nonlinear_hat * mask
+            cubic_hat = cubic_hat * mask
         values = torch.fft.irfft(
-            (torch.fft.rfft(values, dim=-1) + dt * nonlinear_hat) / denominator,
+            (rhat + dt * alpha * rhat - dt * beta * cubic_hat) / denominator,
             n=nx, dim=-1,
         )
         if not bool(torch.isfinite(values).all()):

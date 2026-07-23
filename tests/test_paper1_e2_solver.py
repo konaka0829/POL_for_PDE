@@ -43,3 +43,14 @@ def test_rd_dt_refinement_converges():
     fine=solve_reaction_diffusion_final_state(u,nu=.1,alpha=1,beta=1,T=.02,dt=.001,domain_length=1).values
     finer=solve_reaction_diffusion_final_state(u,nu=.1,alpha=1,beta=1,T=.02,dt=.0005,domain_length=1).values
     assert torch.linalg.vector_norm(fine-finer)<torch.linalg.vector_norm(coarse-fine)
+
+
+def test_rd_filter_preserves_linear_reaction_high_mode():
+    nx, mode = 24, 9
+    x = torch.arange(nx, dtype=torch.float64) / nx
+    u = torch.cos(2 * torch.pi * mode * x)[None]
+    result = solve_reaction_diffusion_final_state(
+        u, nu=.001, alpha=1., beta=0., T=.01, dt=.01,
+        domain_length=1., nonlinear_filter="two_thirds").values
+    expected = u * (1.01 / (1 + .01 * .001 * (2 * torch.pi * mode) ** 2))
+    torch.testing.assert_close(result, expected, atol=2e-15, rtol=2e-15)
