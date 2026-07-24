@@ -62,14 +62,23 @@ def create_e2_plots(output_dir: Path, result: dict[str, Any], config: Any) -> li
         x = [r["n_sur"] for r in family_rows]
         for key, label in (("terminal_relative_l2_mean", "terminal"), ("feature_relative_l2_mean", "J-feature"),
                            ("prediction_relative_l2_mean", "frozen prediction")):
-            ax.plot(x, [r[key] for r in family_rows], "o-", label=label)
+            values = [r[key] if r["n_sur"] != r["reference_n_sur"] else float("nan")
+                      for r in family_rows]
+            ax.plot(x, values, "o-", label=label)
         tolerances = e2.convergence.tolerances
         for value, label in ((tolerances.terminal_mean, "terminal threshold"),
                              (tolerances.feature_mean, "feature threshold"),
                              (tolerances.prediction_mean, "prediction threshold")):
             ax.axhline(value, linestyle=":", alpha=.35, label=label)
         base = result["convergence_summary"]["families"][family]["n_sur_base"]
-        ax.axvline(base, color="black", linestyle="--", label=f"base={base}")
+        if base is None:
+            ax.text(.03, .04, "no accepted base", transform=ax.transAxes,
+                    color="#A00000", fontsize=9)
+        else:
+            ax.axvline(base, color="black", linestyle="--", label=f"base={base}")
+        if x:
+            ax.axvline(x[-1], color="gray", linestyle=":",
+                       label=f"reference={x[-1]}")
         ax.set_yscale("log"); ax.set_xlabel("n_sur"); ax.set_title(family); ax.grid(True, which="both", alpha=.25)
     axes[0].set_ylabel("relative L2 discrepancy"); axes[0].legend(fontsize=8); fig.tight_layout()
     for fmt in ("png", "pdf"):

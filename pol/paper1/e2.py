@@ -26,8 +26,103 @@ from .readouts import AffineReadout, fit_centered_affine_ridge
 from .solvers import solve_burgers_final_state, solve_reaction_diffusion_final_state
 from .target_representation import real_fourier_synthesis
 
-E2_SCHEMA_VERSION = "paper1-e2-v2"
+E2_SCHEMA_VERSION = "paper1-e2-v3"
 MODELS = ("model1", "model2", "model3")
+
+
+def dry_run_cost_summary(config: Paper1Config) -> dict[str, Any]:
+    """Pure upper-bound cost plan; it performs no tensor allocation or solve."""
+    if config.e2 is None:
+        raise ValueError("config must contain e2")
+    e2 = config.e2
+    axis_rows = 0
+    physical: set[tuple[str, float, float, int]] = set()
+    for family, family_cfg in (
+            ("burgers", e2.burgers),
+            ("reaction_diffusion", e2.reaction_diffusion)):
+        # Initial nu stage, one T path per model, then two coordinate axes per
+        # model and refinement round.
+        axis_rows += len(family_cfg.nu_grid)
+        axis_rows += len(MODELS) * len(family_cfg.T_grid)
+        axis_rows += (
+            e2.coordinate_refinement_rounds * len(MODELS)
+            * (len(family_cfg.nu_grid) + len(family_cfg.T_grid)))
+        for nu in family_cfg.nu_grid:
+            for T in set((*family_cfg.T_grid, family_cfg.initial_T_anchor)):
+                physical.add((family, float(nu), float(T),
+                              config.spatial.surrogate_internal_nx))
+    nphysical = len(physical)
+    map_shapes = (len(e2.model3.widths) * len(e2.model3.weight_scales)
+                  * len(e2.model3.bias_scales))
+    selection_seed_fits = nphysical * map_shapes * len(e2.model3.selection_seeds)
+    return {
+        "schema_version": "paper1-e2-cost-v1",
+        "axis_row_count": axis_rows,
+        "unique_physical_point_count_upper_bound": nphysical,
+        "expected_surrogate_state_solves": {
+            "selection_train_validation_shard": nphysical,
+            "convergence_nonfinest_shards_per_family":
+                max(0, len(e2.convergence.n_sur_candidates) - 1),
+            "convergence_finest_train_validation_shards_per_family": 1,
+            "test_shards_after_final_freeze": nphysical,
+        },
+        "model2_svd_count": nphysical,
+        "model3_svd_count_after_path_reuse": selection_seed_fits,
+        "model3_svd_count_legacy_single_zeta":
+            selection_seed_fits * len(e2.ridge.zetas),
+        "evaluation_seed_fit_count":
+            nphysical * len(e2.model3.evaluation_seeds),
+        "convergence_fit_count_upper_bound":
+            2 * (1 + map_shapes * len(e2.model3.selection_seeds)),
+        "zeta_count": len(e2.ridge.zetas),
+    }
+
+
+def _tensor_manifest(value: Any, prefix: str = "root") -> dict[str, str]:
+    records: dict[str, str] = {}
+    if isinstance(value, torch.Tensor):
+        if not bool(torch.isfinite(value).all()):
+            raise ValueError(f"non-finite frozen tensor at {prefix}")
+        records[prefix] = tensor_hash(value)
+    elif isinstance(value, dict):
+        for key in sorted(value, key=str):
+            records.update(_tensor_manifest(value[key], f"{prefix}.{key}"))
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            records.update(_tensor_manifest(item, f"{prefix}[{index}]"))
+    return records
+
+
+def validate_frozen_evaluation_plan(
+        path: Path, *, expected_selection_hash: str | None = None) -> dict[str, Any]:
+    """Strict read-back boundary for the immutable test evaluator input."""
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    required = {
+        "schema_version", "selection_record_hash", "models",
+        "tensor_hashes", "plan_content_hash"}
+    if set(payload) != required:
+        raise ValueError("frozen evaluation plan schema mismatch")
+    if payload["schema_version"] != E2_SCHEMA_VERSION:
+        raise ValueError("frozen evaluation plan version mismatch")
+    if (expected_selection_hash is not None
+            and payload["selection_record_hash"] != expected_selection_hash):
+        raise ValueError("frozen evaluation plan selection hash mismatch")
+    actual_tensors = _tensor_manifest(payload["models"], "models")
+    if actual_tensors != payload["tensor_hashes"]:
+        raise ValueError("frozen evaluation plan tensor hash mismatch")
+    content = {
+        "schema_version": payload["schema_version"],
+        "selection_record_hash": payload["selection_record_hash"],
+        "models": payload["models"],
+        "tensor_hashes": payload["tensor_hashes"],
+    }
+    hashable = {
+        **{k: v for k, v in content.items() if k != "models"},
+        "model_tensor_hashes": actual_tensors,
+    }
+    if stable_hash(hashable) != payload["plan_content_hash"]:
+        raise ValueError("frozen evaluation plan content hash mismatch")
+    return payload
 
 
 @dataclass(frozen=True)
@@ -87,13 +182,13 @@ def select_ridge(
     validation_reference_master: torch.Tensor | None = None,
     validation_target_data: torch.Tensor | None = None,
     n_ref: int | None = None, n_tar: int | None = None, domain_length: float = 1.0,
+    _return_candidate_models: bool = False,
 ) -> tuple[AffineReadout, float, list[dict[str, Any]]]:
     """Fit a normalized-objective ridge path from one compact SVD.
 
     The filter is ``s/(s**2 + N*zeta)`` because the data loss is normalized
     by ``N``.  At zero ridge the retained singular values use ``1/s``.
     """
-    started = time.perf_counter()
     xm, ym = x_train.mean(0), y_train.mean(0)
     xc, yc = x_train - xm, y_train - ym
     U, singular, Vh = torch.linalg.svd(xc, full_matrices=False)
@@ -133,9 +228,14 @@ def select_ridge(
     best = min(row["validation_field_relative_l2_mean"] for row in candidates)
     tied = [row for row in candidates if row["validation_field_relative_l2_mean"] <= best + tolerance]
     selected = max(tied, key=lambda row: row["zeta"])
-    elapsed = time.perf_counter() - started
-    provenance = [{**{k: v for k, v in row.items() if k != "model"},
-                   "ridge_path_runtime_seconds": elapsed} for row in candidates]
+    # Selection provenance is deliberately mathematical content only.  Timing,
+    # cache and host diagnostics belong in runtime_diagnostics, never in a
+    # selection hash.
+    provenance = [
+        {**{k: v for k, v in row.items() if k != "model"},
+         **({"_model": row["model"]} if _return_candidate_models else {})}
+        for row in candidates
+    ]
     return selected["model"], float(selected["zeta"]), provenance
 
 
@@ -253,34 +353,50 @@ def _fit_point(
         domain_length=L)
     models["model2"], selections["model2"] = model2, {"zeta": zeta2, "ridge_candidates": ridge_rows}
     candidates = []
-    for order, (width, ws, bs, common_zeta) in enumerate(itertools.product(
-            e2.model3.widths, e2.model3.weight_scales, e2.model3.bias_scales,
-            e2.ridge.zetas)):
-        seed_metrics, seed_models = [], {}
+    order = 0
+    # One random map and one compact SVD per (width, scales, seed); every zeta
+    # is evaluated from that same decomposition.
+    for width, ws, bs in itertools.product(
+            e2.model3.widths, e2.model3.weight_scales, e2.model3.bias_scales):
+        by_zeta: dict[float, dict[int, tuple[RandomFeatureMap, AffineReadout, float]]] = {
+            float(z): {} for z in e2.ridge.zetas}
+        metrics_by_zeta: dict[float, list[float]] = {float(z): [] for z in e2.ridge.zetas}
         for seed in e2.model3.selection_seeds:
             random_map = RandomFeatureMap.create(features.shape[1], width, activation=e2.model3.activation,
                                                  seed=seed, weight_scale=ws, bias_scale=bs,
                                                  dtype=features.dtype, device=features.device)
             augmented = random_map(features)
-            readout, zeta, _ = select_ridge(
+            _, _, ridge_path = select_ridge(
                 augmented[train], targets[train], augmented[val], targets[val],
-                (common_zeta,), tolerance=0.0, svd_rcond=e2.ridge.svd_rcond,
+                e2.ridge.zetas, tolerance=0.0, svd_rcond=e2.ridge.svd_rcond,
                 validation_reference_master=data.reference_validation,
                 validation_target_data=data.target_data_validation,
                 n_ref=config.spatial.reference_nx, n_tar=config.spatial.target_data_nx,
-                domain_length=L)
-            pred = readout(augmented[val])
-            field = real_fourier_synthesis(pred, config.spatial.reference_nx, domain_length=L)
-            metric = float(samplewise_l2_errors(
-                field, data.reference_validation, domain_length=L)["relative"].mean())
-            seed_metrics.append(metric); seed_models[seed] = (random_map, readout, zeta)
-            provenance.append({"candidate_order": order, "width": width, "weight_scale": ws,
-                               "bias_scale": bs, "zeta": common_zeta, "seed": seed, "validation_field_relative_l2_mean": metric,
-                               "selected_zeta": zeta})
-        candidates.append({"order": order, "width": width, "weight_scale": ws, "bias_scale": bs,
-                           "zeta": common_zeta,
-                           "validation_field_relative_l2_mean": sum(seed_metrics) / len(seed_metrics),
-                           "seed_models": seed_models})
+                domain_length=L, _return_candidate_models=True)
+            for ridge_row in ridge_path:
+                zeta = float(ridge_row["zeta"])
+                zeta_index = tuple(float(v) for v in e2.ridge.zetas).index(zeta)
+                readout = ridge_row.pop("_model")
+                metric = float(ridge_row["validation_field_relative_l2_mean"])
+                metrics_by_zeta[zeta].append(metric)
+                by_zeta[zeta][seed] = (random_map, readout, zeta)
+                provenance.append({
+                    "candidate_order": order + zeta_index, "width": width,
+                    "weight_scale": ws, "bias_scale": bs, "zeta": zeta,
+                    "seed": seed,
+                    "formal_selection_seed_field_relative_l2": metric,
+                })
+        for common_zeta in e2.ridge.zetas:
+            zeta = float(common_zeta)
+            seed_metrics = metrics_by_zeta[zeta]
+            candidates.append({
+                "order": order, "width": width, "weight_scale": ws,
+                "bias_scale": bs, "zeta": zeta,
+                "validation_field_relative_l2_mean":
+                    sum(seed_metrics) / len(seed_metrics),
+                "seed_models": by_zeta[zeta],
+            })
+            order += 1
     best_value = min(row["validation_field_relative_l2_mean"] for row in candidates)
     tied = [row for row in candidates if row["validation_field_relative_l2_mean"] <= best_value + e2.parameter_tie_tolerance]
     selected = min(tied, key=lambda row: (row["width"], -row["zeta"],
@@ -323,6 +439,7 @@ def run_e2(
     local_val = torch.arange(n_train, selection_positions.numel(), device=device)
     cache = TensorCache(cache_dir, resume=resume)
     validation_rows, point_models, point_selections, model3_validation = [], {}, {}, []
+    physical_models: dict[tuple[str, float, float, int, str], tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]] = {}
     point_order: list[tuple[str, str, float, float]] = []
     representatives: dict[str, dict[str, Any]] = {}
     failed_runs: list[dict[str, Any]] = []
@@ -332,22 +449,44 @@ def run_e2(
         if identity in point_models:
             return
         try:
-            state, solver_meta, state_digest = _solve_state(
-                config, finite.u0_data[selection_positions], dataset, cache, family, nu, T,
-                pilot_n_sur, batch_size, selection_positions)
-            features, feature_digest = _features(config, state, state_digest, cache)
-            features = features.to(device)
-            selection_data = TrainValidationData(
-                x_train=features[local_train], x_validation=features[local_val],
-                y_train=finite.target_coefficients[split["train"]],
-                y_validation=finite.target_coefficients[split["val"]],
-                target_data_validation=finite.y_target_data[split["val"]],
-                reference_validation=yref[split["val"]])
-            models, selections, provenance = _fit_point(config, selection_data)
-            point_models[identity] = {"models": models, "features": features.to(device), "solver_metadata": solver_meta,
-                                      "state_digest": state_digest, "feature_digest": feature_digest}
-            point_selections[identity] = selections; model3_validation.extend(
-                [{"family": family, "sweep_axis": axis, "nu_tilde": nu, "T_tilde": T, **row} for row in provenance])
+            physical_key = (
+                family, float(nu), float(T), pilot_n_sur,
+                tensor_hash(selection_positions.detach().cpu()))
+            if physical_key not in physical_models:
+                state, solver_meta, state_digest = _solve_state(
+                    config, finite.u0_data[selection_positions], dataset, cache,
+                    family, nu, T, pilot_n_sur, batch_size,
+                    selection_positions)
+                features, feature_digest = _features(
+                    config, state, state_digest, cache)
+                features = features.to(device)
+                selection_data = TrainValidationData(
+                    x_train=features[local_train],
+                    x_validation=features[local_val],
+                    y_train=finite.target_coefficients[split["train"]],
+                    y_validation=finite.target_coefficients[split["val"]],
+                    target_data_validation=finite.y_target_data[split["val"]],
+                    reference_validation=yref[split["val"]])
+                models, selections, provenance = _fit_point(
+                    config, selection_data)
+                bundle = {
+                    "models": models, "features": features,
+                    "solver_metadata": solver_meta,
+                    "state_digest": state_digest,
+                    "feature_digest": feature_digest,
+                    "physical_key": physical_key,
+                }
+                physical_models[physical_key] = (bundle, selections, provenance)
+            bundle, selections, provenance = physical_models[physical_key]
+            point_models[identity] = bundle
+            point_selections[identity] = selections
+            model3_validation.extend(
+                [{"family": family, "sweep_axis": axis, "nu_tilde": nu,
+                  "T_tilde": T, **row} for row in provenance])
+            features = bundle["features"]
+            models = bundle["models"]
+            state_digest = bundle["state_digest"]
+            feature_digest = bundle["feature_digest"]
             for model_name in MODELS:
                 if model_name == "model1":
                     pred = decode_equispaced_point_observation_to_real_fourier(features[local_val], config.spatial.target_output_dim, domain_length=config.domain.length)
@@ -420,12 +559,62 @@ def run_e2(
                     "representative_model": model, "selection_metric": e2.selection_metric}
                 representative_identities[family] = (
                     family, time_axis, nu_star, T_star)
+
+    # Resolution is part of selection.  Convergence uses only configured
+    # train/validation members and completes before a test state, feature or
+    # label is generated.  A rejected pilot returns immediately into the next
+    # attempt, so rejected attempts cannot evaluate test data.
+    convergence_rows, convergence_summary = _convergence(
+        config, dataset, finite.u0_data, finite.target_coefficients, split,
+        cache, representatives, pilot_n_sur=pilot_n_sur,
+        validation_reference_master=yref[split["val"]],
+        batch_size=batch_size)
+    selected_base = convergence_summary["global_n_sur_base"]
+    if selected_base is not None and selected_base > pilot_n_sur:
+        candidates = [
+            nx for nx in config.e2.convergence.n_sur_candidates
+            if nx >= selected_base]
+        if auto_reruns_remaining <= 0 or len(candidates) < 2:
+            convergence_summary["status"] = "nonconverged"
+            convergence_summary["reason"] = (
+                "pilot failed and no permitted rerun with a finer confirmation level")
+        else:
+            attempt_runtime = time.perf_counter() - start
+            rejected = {
+                "attempt_index": 0, "input_pilot_n_sur": pilot_n_sur,
+                "selected_next_pilot": selected_base,
+                "convergence": convergence_summary, "cache": cache.stats,
+                "runtime_seconds": attempt_runtime, "status": "rerun",
+                "rerun_reason": "selected base exceeds pilot",
+                "test_evaluated": False,
+            }
+            rerun = run_e2(
+                config, dataset, cache_dir=cache_dir, resume=True,
+                pilot_n_sur=selected_base,
+                auto_reruns_remaining=auto_reruns_remaining - 1,
+                batch_size=batch_size, freeze_dir=freeze_dir)
+            old_attempts = rerun.get("attempt_history", [])
+            for index, attempt in enumerate(old_attempts, start=1):
+                attempt["attempt_index"] = index
+            rerun["attempt_history"] = [rejected, *old_attempts]
+            rerun["auto_rerun_history"] = [
+                {"from_n_sur": pilot_n_sur, "to_n_sur": selected_base,
+                 "reason": rejected["rerun_reason"]},
+                *rerun.get("auto_rerun_history", [])]
+            return rerun
+
     # Freeze every evaluation-seed map/readout using train data and the common
     # selected candidate. No validation or test choice is made here.
     frozen_evaluation: dict[tuple[str, str, float, float], dict[str, Any]] = {}
     frozen_tensor_payload: dict[str, Any] = {}
+    frozen_by_physical: dict[tuple[Any, ...], dict[str, Any]] = {}
     for identity in point_order:
         bundle = point_models[identity]
+        physical_key = bundle["physical_key"]
+        if physical_key in frozen_by_physical:
+            frozen_evaluation[identity] = frozen_by_physical[physical_key]
+            frozen_tensor_payload[str(identity)] = frozen_evaluation[identity]["serialized"]
+            continue
         selected = bundle["models"]["model3"]
         seed_models: dict[int, tuple[RandomFeatureMap, AffineReadout]] = {}
         serialized: dict[str, Any] = {}
@@ -447,6 +636,7 @@ def run_e2(
                 "W": readout.W.detach().cpu(), "b": readout.b.detach().cpu(),
                 "zeta": float(selected["zeta"])}
         frozen_evaluation[identity] = {"seed_models": seed_models, "serialized": serialized}
+        frozen_by_physical[physical_key] = frozen_evaluation[identity]
         frozen_tensor_payload[str(identity)] = serialized
     model_hashes = {
         identity: stable_hash({
@@ -477,16 +667,59 @@ def run_e2(
         fd, temporary = tempfile.mkstemp(prefix=".frozen.", suffix=".pt", dir=frozen_path.parent)
         os.close(fd)
         try:
-            torch.save({"schema_version": E2_SCHEMA_VERSION,
-                        "selection_record_hash": selection_hash,
-                        "models": frozen_tensor_payload}, temporary)
+            complete_models = {}
+            for identity in point_order:
+                bundle = point_models[identity]
+                model2 = bundle["models"]["model2"]
+                complete_models[str(identity)] = {
+                    "physical_key": list(bundle["physical_key"][:-1]),
+                    "axis_alias": list(identity),
+                    "model1": {
+                        "kind": "fixed_equispaced_fourier_decoder",
+                        "J": config.spatial.observation_dim,
+                        "q": config.spatial.target_output_dim,
+                        "q_gt_J_policy": "unobservable_coefficients_zero",
+                    },
+                    "model2": {
+                        "W": model2.W.detach().cpu(),
+                        "b": model2.b.detach().cpu(),
+                        "zeta": point_selections[identity]["model2"]["zeta"],
+                        "solver": model2.solver,
+                        "rank": model2.numerical_rank,
+                        "cutoff": model2.singular_value_cutoff,
+                        "svd_rcond": model2.svd_rcond,
+                    },
+                    "model3": {
+                        "candidate": {
+                            key: bundle["models"]["model3"][key]
+                            for key in ("width", "weight_scale",
+                                        "bias_scale", "zeta")},
+                        "activation": e2.model3.activation,
+                        "scaling": "skip_[phi,rho(Aphi+c)/sqrt(M)]",
+                        "evaluation_seeds": frozen_tensor_payload[str(identity)],
+                    },
+                }
+            tensor_hashes = _tensor_manifest(complete_models, "models")
+            hashable = {
+                "schema_version": E2_SCHEMA_VERSION,
+                "selection_record_hash": selection_hash,
+                "tensor_hashes": tensor_hashes,
+                "model_tensor_hashes": tensor_hashes,
+            }
+            frozen_payload = {
+                "schema_version": E2_SCHEMA_VERSION,
+                "selection_record_hash": selection_hash,
+                "models": complete_models,
+                "tensor_hashes": tensor_hashes,
+                "plan_content_hash": stable_hash(hashable),
+            }
+            torch.save(frozen_payload, temporary)
             os.replace(temporary, frozen_path)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
-        loaded_frozen = torch.load(frozen_path, map_location="cpu", weights_only=False)
-        if loaded_frozen.get("selection_record_hash") != selection_hash:
-            raise ValueError("frozen evaluation plan read-back hash mismatch")
+        loaded_frozen = validate_frozen_evaluation_plan(
+            frozen_path, expected_selection_hash=selection_hash)
 
     # Test states/features are first generated below, after durable selection freeze.
     test_rows, model3_test_by_seed, model3_aggregate, saved_models = [], [], [], {}
@@ -558,22 +791,6 @@ def run_e2(
             },
         }
 
-    convergence_rows, convergence_summary = _convergence(
-        config, dataset, finite.u0_data, finite.target_coefficients, split, cache, representatives,
-        pilot_n_sur=pilot_n_sur, validation_reference_master=yref[split["val"]], batch_size=batch_size)
-    selected_base = convergence_summary["global_n_sur_base"]
-    if selected_base is not None and selected_base > pilot_n_sur:
-        candidates = [nx for nx in config.e2.convergence.n_sur_candidates if nx >= selected_base]
-        if auto_reruns_remaining <= 0 or len(candidates) < 2:
-            convergence_summary["status"] = "nonconverged"
-            convergence_summary["reason"] = "pilot failed and no permitted rerun with a finer confirmation level"
-        else:
-            rerun = run_e2(config, dataset, cache_dir=cache_dir, resume=True, pilot_n_sur=selected_base,
-                           auto_reruns_remaining=auto_reruns_remaining - 1, batch_size=batch_size,
-                           freeze_dir=freeze_dir)
-            rerun["auto_rerun_history"] = [{"from_n_sur": pilot_n_sur, "to_n_sur": selected_base},
-                                           *rerun.get("auto_rerun_history", [])]
-            return rerun
     runtime = time.perf_counter() - start
     solver_metadata = []
     for identity in point_order:
@@ -589,6 +806,18 @@ def run_e2(
         "T_tilde": row["T_tilde"],
         "validation_field_relative_l2_mean": row["validation_field_relative_l2_mean"],
     } for row in validation_rows]
+    physical_aliases = [{
+        "family": identity[0], "sweep_axis": identity[1],
+        "nu_tilde": identity[2], "T_tilde": identity[3],
+        "n_sur": pilot_n_sur,
+        "physical_point_hash": stable_hash({
+            "family": identity[0], "nu_tilde": identity[2],
+            "T_tilde": identity[3], "n_sur": pilot_n_sur,
+            "sample_shard_hash": point_models[identity]["physical_key"][-1],
+        }),
+        "state_cache_key": point_models[identity]["state_digest"],
+        "feature_cache_key": point_models[identity]["feature_digest"],
+    } for identity in point_order]
     return {
         "validation_sweep": validation_rows, "test_sweep": test_rows,
         "model3_validation_by_seed": model3_validation, "model3_test_by_seed": model3_test_by_seed,
@@ -603,6 +832,7 @@ def run_e2(
         "shared_hyperparameters": shared_hyperparameters,
         "convergence_sample_membership": convergence_membership,
         "solver_metadata": solver_metadata, "coordinate_history": coordinate_history,
+        "physical_point_aliases": physical_aliases,
         "attempt_history": [{"attempt_index": 0, "input_pilot_n_sur": pilot_n_sur,
                              "selection_record_hash": selection_hash,
                              "convergence": convergence_summary,
@@ -624,45 +854,90 @@ def _convergence(
         return [], {"status": "nonconverged", "global_n_sur_base": None, "families": {},
                     "reason": "no finer n_sur candidate remains", "sample_ids": list(conv.sample_ids)}
     position_by_id = {int(sample_id): position for position, sample_id in enumerate(dataset.sample_ids.tolist())}
-    ids = torch.tensor([position_by_id[int(i)] for i in conv.sample_ids],
-                       dtype=torch.long, device=u0_data.device)
+    conv_positions = torch.tensor(
+        [position_by_id[int(i)] for i in conv.sample_ids],
+        dtype=torch.long, device=u0_data.device)
+    selection_positions = torch.cat((split["train"], split["val"]))
+    selection_lookup = {
+        int(position): local for local, position in enumerate(selection_positions.tolist())}
+    conv_in_selection = torch.tensor(
+        [selection_lookup[int(position)] for position in conv_positions.tolist()],
+        dtype=torch.long, device=u0_data.device)
+    n_train = split["train"].numel()
+    local_train = torch.arange(n_train, device=u0_data.device)
+    local_val = torch.arange(n_train, selection_positions.numel(), device=u0_data.device)
     rows, summary = [], {"families": {}}
     bases = []
     for family, representative in representatives.items():
         states, features = {}, {}
+        finest = candidates[-1]
         for nx in candidates:
+            shard = selection_positions if nx == finest else conv_positions
             state, _, digest = _solve_state(
-                config, u0_data, dataset, cache, family, representative["nu_star"],
-                representative["T_star"], nx, batch_size)
+                config, u0_data[shard], dataset, cache, family,
+                representative["nu_star"], representative["T_star"], nx,
+                batch_size, shard)
             feature, _ = _features(config, state, digest, cache)
             states[nx], features[nx] = state.to(u0_data.device), feature.to(u0_data.device)
-        finest = candidates[-1]
         frozen_models, _, _ = _fit_point(config, TrainValidationData(
-            x_train=features[finest][split["train"]],
-            x_validation=features[finest][split["val"]],
+            x_train=features[finest][local_train],
+            x_validation=features[finest][local_val],
             y_train=targets[split["train"]], y_validation=targets[split["val"]],
             target_data_validation=real_fourier_synthesis(
                 targets[split["val"]], config.spatial.target_data_nx,
                 domain_length=L),
             reference_validation=validation_reference_master))
         frozen2 = frozen_models["model2"]
-        frozen3_entry = next(iter(frozen_models["model3"]["seed_models"].values()))
-        frozen_map3, frozen_readout3, _ = frozen3_entry
+        selected3 = frozen_models["model3"]
+        frozen3 = {}
+        for seed in config.e2.model3.evaluation_seeds:
+            random_map = RandomFeatureMap.create(
+                features[finest].shape[1], selected3["width"],
+                activation=config.e2.model3.activation, seed=seed,
+                weight_scale=selected3["weight_scale"],
+                bias_scale=selected3["bias_scale"],
+                dtype=features[finest].dtype,
+                device=features[finest].device)
+            augmented = random_map(features[finest][local_train])
+            readout, _, _ = select_ridge(
+                augmented, targets[split["train"]], augmented,
+                targets[split["train"]], (float(selected3["zeta"]),),
+                tolerance=0.0, svd_rcond=config.e2.ridge.svd_rcond)
+            frozen3[seed] = (random_map, readout)
         passing = []
         for nx in candidates:
-            terminal = compare_fields_on_common_grid(states[nx][ids], states[finest][ids], common_nx=finest, domain_length=L)["relative_aggregate"]
-            feature_err = samplewise_l2_errors(features[nx][ids], features[finest][ids], domain_length=float(J))["relative"]
+            nx_state = states[nx] if nx != finest else states[nx][conv_in_selection]
+            nx_feature = features[nx] if nx != finest else features[nx][conv_in_selection]
+            finest_state = states[finest][conv_in_selection]
+            finest_feature = features[finest][conv_in_selection]
+            terminal = compare_fields_on_common_grid(
+                nx_state, finest_state, common_nx=finest,
+                domain_length=L)["relative_aggregate"]
+            feature_err = samplewise_l2_errors(
+                nx_feature, finest_feature, domain_length=float(J))["relative"]
             feature = aggregate_errors(feature_err)
             prediction_sets = []
             for pred, pred_ref in (
-                (decode_equispaced_point_observation_to_real_fourier(features[nx][ids], config.spatial.target_output_dim, domain_length=L),
-                 decode_equispaced_point_observation_to_real_fourier(features[finest][ids], config.spatial.target_output_dim, domain_length=L)),
-                (frozen2(features[nx][ids]), frozen2(features[finest][ids])),
-                (frozen_readout3(frozen_map3(features[nx][ids])), frozen_readout3(frozen_map3(features[finest][ids]))),
+                (decode_equispaced_point_observation_to_real_fourier(nx_feature, config.spatial.target_output_dim, domain_length=L),
+                 decode_equispaced_point_observation_to_real_fourier(finest_feature, config.spatial.target_output_dim, domain_length=L)),
+                (frozen2(nx_feature), frozen2(finest_feature)),
             ):
                 pred_field = real_fourier_synthesis(pred, config.spatial.reference_nx, domain_length=L)
                 pred_ref_field = real_fourier_synthesis(pred_ref, config.spatial.reference_nx, domain_length=L)
                 prediction_sets.append(aggregate_errors(samplewise_l2_errors(pred_field, pred_ref_field, domain_length=L)["relative"]))
+            model3_seed_evidence = {}
+            for seed, (random_map, readout) in frozen3.items():
+                pred = readout(random_map(nx_feature))
+                pred_ref = readout(random_map(finest_feature))
+                pred_field = real_fourier_synthesis(
+                    pred, config.spatial.reference_nx, domain_length=L)
+                pred_ref_field = real_fourier_synthesis(
+                    pred_ref, config.spatial.reference_nx, domain_length=L)
+                evidence = aggregate_errors(samplewise_l2_errors(
+                    pred_field, pred_ref_field,
+                    domain_length=L)["relative"])
+                prediction_sets.append(evidence)
+                model3_seed_evidence[str(seed)] = evidence
             prediction = {"mean": max(item["mean"] for item in prediction_sets),
                           "max": max(item["max"] for item in prediction_sets)}
             tol = conv.tolerances
@@ -670,9 +945,14 @@ def _convergence(
                 feature["mean"] <= tol.feature_mean and feature["max"] <= tol.feature_max and \
                 prediction["mean"] <= tol.prediction_mean and prediction["max"] <= tol.prediction_max
             rows.append({"family": family, "n_sur": nx, "reference_n_sur": finest,
+                         "sample_ids": ",".join(str(i) for i in conv.sample_ids),
+                         "sample_membership": "train_or_validation",
                          "terminal_relative_l2_mean": terminal["mean"], "terminal_relative_l2_max": terminal["max"],
                          "feature_relative_l2_mean": feature["mean"], "feature_relative_l2_max": feature["max"],
                          "prediction_relative_l2_mean": prediction["mean"], "prediction_relative_l2_max": prediction["max"],
+                         "model3_evaluation_seed_evidence":
+                             __import__("json").dumps(model3_seed_evidence, sort_keys=True),
+                         "model3_aggregate_type": "worst_case_over_evaluation_seeds_and_models",
                          "frozen_readout": "max_of_model1_model2_model3_frozen_at_finest",
                          "status": "pass" if passed else "fail"})
             if passed and nx < finest:

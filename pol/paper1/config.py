@@ -509,6 +509,13 @@ class Paper1Config:
                 raise ValueError("E2 Model 3 seed lists must be unique")
             if set(m3.selection_seeds) & set(m3.evaluation_seeds):
                 raise ValueError("E2 Model 3 selection/evaluation seeds must be disjoint")
+            expected_m3_tie_break = (
+                "smallest_width", "largest_zeta", "smallest_weight_scale",
+                "smallest_bias_scale", "first_in_config_order")
+            if m3.tie_break != expected_m3_tie_break:
+                raise ValueError(
+                    "e2.model3.tie_break must exactly equal "
+                    f"{expected_m3_tie_break}")
             if self.e2.profile == "main" and (len(m3.selection_seeds) < 5 or len(m3.evaluation_seeds) < 10):
                 raise ValueError("main E2 requires >=5 selection and >=10 evaluation seeds")
             conv = e2.convergence

@@ -232,11 +232,15 @@ surrogate viscosity and readout time for Burgers and reaction--diffusion
 families. E0 and a hash-validated Burgers master dataset are direct
 prerequisites; E1 output is not a runtime dependency.
 
-All ridge, Model 3 candidate, viscosity, time, and shared representative
-choices use validation data only. `model_specific_optima.json` records each
+All ridge, Model 3 candidate, viscosity, time, final sweep resolution, and
+shared representative choices use validation/non-test data only.
+`model_specific_optima.json` records each
 model's independent coordinate path separately from the representative-model choice in
-`shared_representatives.json`. Test curves are evaluated only after
-`selection_record.json` is frozen and hashed. Model 3 candidates are selected
+`shared_representatives.json`. The enforced order is train/validation
+selection, shared representative, non-test-only convergence, any finer-pilot
+reruns, atomic selection and complete evaluation-plan freeze with read-back
+verification, and only then one test evaluation from the loaded plan. A
+rejected pilot never generates a test state or feature. Model 3 candidates are selected
 as `(width, weight scale, bias scale, zeta)` by the mean across selection
 seeds; the selected zeta is common to every selection/evaluation seed.
 Disjoint evaluation seeds provide the reported Student-t seed confidence
@@ -252,9 +256,15 @@ the linear reaction term, and is not described as exact cubic de-aliasing.
 After shared points are selected, E2 compares terminal states on a common
 spectral grid, fixed-\(J\) features, and predictions from a finest-resolution
 frozen readout. Passing family bases and their global maximum are written to
-`e2_handoff.json` for E3. Content-addressed state and feature caches are
-separate and shared across Models 1--3. `--resume` accepts only hash-verified
-complete output/cache artifacts.
+`e2_handoff.json` for E3 only for a passing run; scientific or procedural
+failure has nonzero exit status and no handoff. Content-addressed state and
+feature caches are separate and shared across Models 1--3. `--resume` accepts
+only hash-verified complete output/cache artifacts bound to the currently
+supplied canonical config, E0 summary/config/archive, dataset
+manifest/payload, dataset/split and sample IDs, protocol version, and plot
+policy. Relocating identical content is allowed; missing or changed inputs are
+rejected. Partial resume uses only validated cache units. `--overwrite` and
+`--resume` are mutually exclusive.
 Cache keys use canonical JSON and the v2 cache schema; state and fixed-\(J\)
 feature units are committed atomically and partial/tampered units are rejected
 under `--resume`.
@@ -273,13 +283,24 @@ python3 scripts/paper1/run_e2.py \
   --config configs/paper1_e2_smoke.json \
   --e0-dir outputs/paper1_e0_smoke \
   --dataset-dir outputs/paper1_master_burgers_smoke \
-  --output-dir outputs/paper1_e2_smoke --overwrite --torch-threads 1
+  --output-dir outputs/paper1_e2_smoke --overwrite --torch-threads 1 \
+  --batch-size 64
 ```
 
 Future production uses the same commands with `paper1_e0_main.json`,
 `paper1_e2_main.json`, and production output directories. The checked-in main
 parameter grids are initial candidates and must be validated; this repository
-does not treat them as pre-established optima. Principal E2 artifacts are the
+does not treat them as pre-established optima. Inspect structural cost without
+running the production sweep:
+
+```bash
+python3 scripts/paper1/run_e2.py \
+  --config configs/paper1_e2_main.json --dry-run-cost
+```
+
+Use the same three-stage E0, master-dataset, E2 sequence for the eventual
+production run. `--skip-plots` is a debugging option only and must not be used
+for the final paper run. Principal E2 artifacts are the
 validation/test tables, Model 3 per-seed and aggregate tables, frozen selection
 record, model-specific/shared selections, convergence tables, E3 handoff,
 plots, environment, summary, and final SHA-256 manifest. The legacy root

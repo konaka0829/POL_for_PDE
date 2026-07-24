@@ -25,12 +25,13 @@ if str(ROOT) not in sys.path:
 
 from pol.paper1.config import canonical_config_json, load_config_json, save_config_json
 from pol.paper1.datasets import load_master_dataset
-from pol.paper1.e2 import E2_SCHEMA_VERSION, run_e2, stable_hash
+from pol.paper1.e2 import E2_SCHEMA_VERSION, dry_run_cost_summary, run_e2, stable_hash
 from pol.paper1.e2_plotting import create_e2_plots
 from pol.paper1.e2_qa import assert_finite, validate_csv, validate_resume_output, write_manifest
 
 TABLES = ("validation_sweep", "test_sweep", "model3_validation_by_seed", "model3_test_by_seed",
-          "model3_test_aggregate", "convergence_results", "solver_metadata")
+          "model3_test_aggregate", "convergence_results", "solver_metadata",
+          "physical_point_aliases")
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -91,9 +92,12 @@ def prerequisite(config: Any, e0_dir: Path, dataset_dir: Path) -> tuple[Any, dic
 
 def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser(description="Paper 1 E2 parameter/time sweeps")
-    value.add_argument("--config", required=True); value.add_argument("--e0-dir", required=True)
-    value.add_argument("--dataset-dir", required=True); value.add_argument("--output-dir", required=True)
-    value.add_argument("--overwrite", action="store_true"); value.add_argument("--resume", action="store_true")
+    value.add_argument("--config", required=True); value.add_argument("--e0-dir")
+    value.add_argument("--dataset-dir"); value.add_argument("--output-dir")
+    modes = value.add_mutually_exclusive_group()
+    modes.add_argument("--overwrite", action="store_true")
+    modes.add_argument("--resume", action="store_true")
+    value.add_argument("--dry-run-cost", action="store_true")
     value.add_argument("--skip-plots", action="store_true"); value.add_argument("--torch-threads", type=int, default=1)
     value.add_argument("--batch-size", type=int, default=64)
     return value
@@ -103,12 +107,37 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if args.torch_threads <= 0 or args.batch_size <= 0:
         parser().error("--torch-threads and --batch-size must be positive")
+    config = load_config_json(args.config)
+    if args.dry_run_cost:
+        print(json.dumps(dry_run_cost_summary(config), indent=2, sort_keys=True))
+        return 0
+    if not args.e0_dir or not args.dataset_dir or not args.output_dir:
+        parser().error("--e0-dir, --dataset-dir, and --output-dir are required unless --dry-run-cost is used")
     out = Path(args.output_dir)
     try:
-        config = load_config_json(args.config)
         if config.e2 is None: raise ValueError("config has no e2 section")
+        # Resolve and hash every current prerequisite before considering a
+        # complete-output early return.  A missing or mismatched input is never
+        # hidden by --resume.
+        dataset, e0_report, dataset_report = prerequisite(
+            config, Path(args.e0_dir), Path(args.dataset_dir))
         if args.resume and out.exists() and (out / "e2_summary.json").exists():
             if validate_resume_output(out):
+                old_config = load_config_json(out / "resolved_config.json")
+                if canonical_config_json(old_config) != canonical_config_json(config):
+                    raise ValueError("complete resume rejected: resolved config content mismatch")
+                old_e0 = json.loads((out / "e0_prerequisite.json").read_text())
+                old_dataset = json.loads((out / "dataset_prerequisite.json").read_text())
+                for label, old, current in (
+                        ("E0", old_e0, e0_report),
+                        ("dataset", old_dataset, dataset_report)):
+                    if old != current:
+                        raise ValueError(
+                            f"complete resume rejected: {label} content hash binding mismatch")
+                plot_manifest = json.loads((out / "plot_manifest.json").read_text())
+                expected_plot_status = "skipped" if args.skip_plots else "pass"
+                if plot_manifest.get("status") != expected_plot_status:
+                    raise ValueError("complete resume rejected: plot policy mismatch")
                 print(json.dumps({"status": "pass", "resume": "reused_complete_output"}))
                 return 0
         if out.exists() and any(out.iterdir()) and not (args.overwrite or args.resume):
@@ -119,7 +148,6 @@ def main(argv: list[str] | None = None) -> int:
             shutil.rmtree(out)
         out.mkdir(parents=True, exist_ok=True)
         torch.set_num_threads(args.torch_threads)
-        dataset, e0_report, dataset_report = prerequisite(config, Path(args.e0_dir), Path(args.dataset_dir))
     except Exception as exc:
         parser().error(str(exc))
     summary: dict[str, Any] = {"schema_version": E2_SCHEMA_VERSION, "status": "fail", "required_checks": {}}
@@ -137,6 +165,13 @@ def main(argv: list[str] | None = None) -> int:
         write_json(out / "e2_attempt_history.json", result["attempt_history"])
         write_json(out / "convergence_summary.json", result["convergence_summary"])
         write_json(out / "failed_runs.json", result["failed_runs"])
+        write_json(out / "experiment_plan.json", dry_run_cost_summary(config))
+        write_json(out / "runtime_diagnostics.json", {
+            "schema_version": "paper1-e2-runtime-v1",
+            "total_runtime_seconds": result["runtime_seconds"],
+            "cache": result["cache"],
+            "attempts": result["attempt_history"],
+        })
         torch.save({"schema_version": E2_SCHEMA_VERSION, "selection_record_hash": result["selection_record_hash"],
                     "models": result["selected_models"]}, out / "selected_models.pt")
         saved_models = torch.load(out / "selected_models.pt", map_location="cpu", weights_only=False)
@@ -150,6 +185,7 @@ def main(argv: list[str] | None = None) -> int:
                          "split_hash": dataset.metadata["split_hash"], "sample_ids_hash": stable_hash(dataset.sample_ids.tolist()),
                          "finite_input_path": "n_ref -> n_tar spectral low-pass -> n_sur interpolation",
                          "n_tar": config.spatial.target_data_nx, "n_sur_pilot": config.spatial.surrogate_internal_nx,
+                         "actual_final_sweep_n_sur": result["pilot_n_sur"],
                          "J": config.spatial.observation_dim, "q": config.spatial.target_output_dim,
                          "cache": result["cache"]}
         write_json(out / "data_manifest.json", data_manifest)
@@ -224,10 +260,15 @@ def main(argv: list[str] | None = None) -> int:
         status = "pass" if all(v["status"]=="pass" for v in checks.values()) else "fail"
         summary = {"schema_version": E2_SCHEMA_VERSION, "status": status, "profile": config.e2.profile,
                    "required_checks": checks, "selection_record_hash": result["selection_record_hash"],
-                   "global_n_sur_base": result["convergence_summary"]["global_n_sur_base"]}
+                   "global_n_sur_base": result["convergence_summary"]["global_n_sur_base"],
+                   "final_attempt_index": len(result["attempt_history"]) - 1,
+                   "actual_final_sweep_n_sur": result["pilot_n_sur"]}
         if status == "pass":
             handoff = {"schema_version": "paper1-e2-handoff-v1", "status": "pass",
                        "families": result["shared_representatives"], "model_specific_optima": result["model_specific_optima"],
+                       "final_attempt_index": len(result["attempt_history"]) - 1,
+                       "actual_final_sweep_n_sur": result["pilot_n_sur"],
+                       "auto_rerun_history": result["auto_rerun_history"],
                        "representative_model": config.e2.representative_model, "selection_policy": config.e2.selection_metric,
                        "family_n_sur_base": {k:v["n_sur_base"] for k,v in result["convergence_summary"]["families"].items()},
                        "global_n_sur_base": result["convergence_summary"]["global_n_sur_base"],
