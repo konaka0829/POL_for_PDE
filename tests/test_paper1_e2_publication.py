@@ -11,8 +11,10 @@ from pol.paper1.e2 import (
     select_ridge,
     stable_hash,
     tensor_hash,
+    frozen_plan_content_hash,
     validate_frozen_evaluation_plan,
 )
+from pol.paper1.e2_qa import validate_artifact_contract
 
 
 def test_selection_provenance_and_hash_ignore_runtime(monkeypatch):
@@ -81,17 +83,15 @@ def test_model3_tie_break_must_be_exact():
 
 def test_frozen_plan_rejects_tensor_tamper(tmp_path):
     models = {"point": {"W": torch.eye(2, dtype=torch.float64)}}
-    hashes = {"models.point.W": tensor_hash(models["point"]["W"])}
-    hashable = {
-        "schema_version": E2_SCHEMA_VERSION,
-        "selection_record_hash": "s",
-        "tensor_hashes": hashes,
-        "model_tensor_hashes": hashes,
-    }
+    hashes = {"models.point.W": {
+        "sha256": tensor_hash(models["point"]["W"]),
+        "shape": [2, 2], "dtype": "torch.float64"}}
     payload = {
         "schema_version": E2_SCHEMA_VERSION,
+        "protocol_version": E2_SCHEMA_VERSION, "bindings": {"config_hash": "c"},
         "selection_record_hash": "s", "models": models,
-        "tensor_hashes": hashes, "plan_content_hash": stable_hash(hashable)}
+        "final_pilot_n_sur": 64, "tensor_hashes": hashes}
+    payload["plan_content_hash"] = frozen_plan_content_hash(payload)
     path = tmp_path / "plan.pt"
     torch.save(payload, path)
     validate_frozen_evaluation_plan(path, expected_selection_hash="s")
@@ -100,3 +100,58 @@ def test_frozen_plan_rejects_tensor_tamper(tmp_path):
     torch.save(changed, path)
     with pytest.raises(ValueError, match="tensor hash mismatch"):
         validate_frozen_evaluation_plan(path, expected_selection_hash="s")
+
+
+@pytest.mark.parametrize("field,value", [
+    ("protocol_version", "old"),
+    ("final_pilot_n_sur", 128),
+    ("selection_record_hash", "other"),
+])
+def test_frozen_plan_hash_protects_non_tensor_metadata(tmp_path, field, value):
+    models = {"point": {
+        "physical_identity": {
+            "family": "burgers", "nu_tilde": .1, "T_tilde": 1.,
+            "n_sur": 64},
+        "model1": {
+            "kind": "fixed_equispaced_fourier_decoder", "J": 16, "q": 17,
+            "domain_length": 1., "q_gt_J_policy": "zero"},
+        "model2": {"W": torch.eye(2), "b": torch.zeros(2), "zeta": 0.,
+                   "rank": 2, "svd_rcond": None},
+        "model3": {"activation": "tanh", "candidate": {"width": 2},
+                   "evaluation_seeds": {"21": {"A": torch.eye(2)}}},
+    }}
+    payload = {
+        "schema_version": E2_SCHEMA_VERSION,
+        "protocol_version": E2_SCHEMA_VERSION,
+        "bindings": {"config_hash": "c", "dataset_hash": "d",
+                     "split_hash": "p"},
+        "selection_record_hash": "s", "final_pilot_n_sur": 64,
+        "models": models,
+        "tensor_hashes": {
+            "models.point.model2.W": {
+                "sha256": tensor_hash(models["point"]["model2"]["W"]),
+                "shape": [2, 2], "dtype": "torch.float32"},
+            "models.point.model2.b": {
+                "sha256": tensor_hash(models["point"]["model2"]["b"]),
+                "shape": [2], "dtype": "torch.float32"},
+            "models.point.model3.evaluation_seeds.21.A": {
+                "sha256": tensor_hash(models["point"]["model3"]["evaluation_seeds"]["21"]["A"]),
+                "shape": [2, 2], "dtype": "torch.float32"},
+        }}
+    payload["plan_content_hash"] = frozen_plan_content_hash(payload)
+    path = tmp_path / "plan.pt"
+    torch.save(payload, path)
+    validate_frozen_evaluation_plan(path, expected_selection_hash="s")
+    changed = copy.deepcopy(payload)
+    changed[field] = value
+    torch.save(changed, path)
+    with pytest.raises(ValueError):
+        validate_frozen_evaluation_plan(path, expected_selection_hash="s")
+
+
+def test_artifact_contract_rejects_unknown_file_and_directory(tmp_path):
+    (tmp_path / "obsolete_result.txt").write_text("stale")
+    with pytest.raises(ValueError, match="artifact contract mismatch"):
+        validate_artifact_contract(
+            tmp_path, status="fail", skip_plots=True,
+            test_evaluated=False, include_manifest=False)

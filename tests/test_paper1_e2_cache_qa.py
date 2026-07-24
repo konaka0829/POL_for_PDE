@@ -47,9 +47,10 @@ def test_resume_rejects_extra_or_tampered_artifact(tmp_path):
             "sha256":hashlib.sha256((tmp_path/"e2_summary.json").read_bytes()).hexdigest()}
     record2={"relative_path":"x.json","size_bytes":payload.stat().st_size,"sha256":hashlib.sha256(payload.read_bytes()).hexdigest()}
     (tmp_path/"artifact_manifest.json").write_text(json.dumps({"files":[record,record2]}))
-    assert validate_resume_output(tmp_path)
+    with pytest.raises(ValueError, match="protocol mismatch"):
+        validate_resume_output(tmp_path)
     (tmp_path/"fake.png").write_bytes(b"x")
-    with pytest.raises(ValueError,match="artifact set mismatch"): validate_resume_output(tmp_path)
+    with pytest.raises(ValueError,match="protocol mismatch"): validate_resume_output(tmp_path)
 
 
 def test_csv_qa_rejects_duplicate_and_nonfinite(tmp_path):

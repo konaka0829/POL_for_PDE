@@ -240,7 +240,11 @@ model's independent coordinate path separately from the representative-model cho
 selection, shared representative, non-test-only convergence, any finer-pilot
 reruns, atomic selection and complete evaluation-plan freeze with read-back
 verification, and only then one test evaluation from the loaded plan. A
-rejected pilot never generates a test state or feature. Model 3 candidates are selected
+rejected pilot never generates a test state or feature. If no resolution has a
+strictly finer confirmation, E2 stops before freeze/test and publishes only
+validation, convergence, and structured failure evidence. The test evaluator
+is reconstructed from the read-back `frozen_evaluation_plan.pt`; in-memory
+selection objects are not an inference input. Model 3 candidates are selected
 as `(width, weight scale, bias scale, zeta)` by the mean across selection
 seeds; the selected zeta is common to every selection/evaluation seed.
 Disjoint evaluation seeds provide the reported Student-t seed confidence
@@ -268,6 +272,20 @@ rejected. Partial resume uses only validated cache units. `--overwrite` and
 Cache keys use canonical JSON and the v2 cache schema; state and fixed-\(J\)
 feature units are committed atomically and partial/tampered units are rejected
 under `--resume`.
+
+The frozen-plan content hash covers tensor hashes, shapes and dtypes as well
+as decoder conventions, physical coordinates, ridge diagnostics, Model 3
+activation/seeds/candidate metadata, final pilot, and the complete input hash
+chain. Every test row, summary, and passing E3 handoff carries that hash.
+Formal Model 3 selection-seed statistics and ensemble-prediction diagnostics
+use separate column prefixes.
+
+Final artifacts are built in an attempt-staging directory, validated against
+an explicit pass/fail and plot-policy contract, manifested once, and then
+published. A pre-test failure therefore has no frozen plan, test CSV,
+test-model archive, test plot, or `e2_handoff.json`. Unknown top-level files,
+directories, stale plots, test tables, or handoffs cause resume validation to
+fail rather than being incorporated into the manifest.
 
 Smoke:
 

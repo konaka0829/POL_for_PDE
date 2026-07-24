@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import platform
@@ -77,6 +78,23 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
     master = None if args.master_initial_conditions is None else load_master_initial_conditions(args.master_initial_conditions, config)
     dataset = build_master_dataset(config, generate_target=not args.no_target, master_initial_conditions=master)
+    if args.master_initial_conditions is not None:
+        archive = Path(args.master_initial_conditions)
+        e0_dir = archive.parent
+        source_files = (
+            "e0_summary.json", "accepted_production_config.json",
+            "master_initial_conditions.pt", "master_manifest.json")
+        if all((e0_dir / name).is_file() for name in source_files):
+            dataset.metadata["source_e0"] = {
+                "schema_version": "paper1-dataset-source-e0-v1",
+                "files": {
+                    name: hashlib.sha256(
+                        (e0_dir / name).read_bytes()).hexdigest()
+                    for name in source_files
+                },
+                "master_tensor_hash": dataset.metadata["tensor_hashes"][
+                    "u0_master"],
+            }
     runtime = {
         "command": [sys.executable, str(Path(__file__).relative_to(REPO_ROOT)), *sys.argv[1:]],
         "git_commit": _git_commit(),

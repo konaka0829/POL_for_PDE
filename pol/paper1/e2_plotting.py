@@ -45,15 +45,25 @@ def create_e2_plots(output_dir: Path, result: dict[str, Any], config: Any) -> li
         ax.set_yscale("log"); ax.grid(True, which="both", alpha=.25)
         ax.set_xlabel(axis); ax.set_title(f"{family}: {axis}")
         panel_meta.append({"family": family, "axis": axis, "shared": shared,
-                           "n_tar": config.spatial.target_data_nx, "n_sur": config.spatial.surrogate_internal_nx,
-                           "J": config.spatial.observation_dim, "q": config.spatial.target_output_dim})
+                           "n_tar": config.spatial.target_data_nx,
+                           "actual_final_pilot_n_sur": result["pilot_n_sur"],
+                           "J": config.spatial.observation_dim,
+                           "q": config.spatial.target_output_dim,
+                           "selection_record_hash": result["selection_record_hash"],
+                           "frozen_plan_hash": result["frozen_plan_hash"],
+                           "curve_identity": {
+                               "family": family, "axis": axis,
+                               "stage": "initial_or_selected_path"}})
     axes[0, 0].legend(fontsize=8)
     fig.supylabel("test full-reference relative L2")
     fig.tight_layout()
     outputs = []
     for fmt in ("png", "pdf"):
         path = output_dir / f"e2_parameter_sweeps.{fmt}"; fig.savefig(path, dpi=180, bbox_inches="tight")
-        outputs.append({"relative_path": path.name, "format": fmt, "kind": "parameter_sweeps", "panels": panel_meta})
+        outputs.append({"status": "created", "relative_path": path.name,
+                        "size_bytes": path.stat().st_size,
+                        "format": fmt, "kind": "parameter_sweeps",
+                        "panels": panel_meta})
     plt.close(fig)
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), sharey=True)
@@ -83,6 +93,11 @@ def create_e2_plots(output_dir: Path, result: dict[str, Any], config: Any) -> li
     axes[0].set_ylabel("relative L2 discrepancy"); axes[0].legend(fontsize=8); fig.tight_layout()
     for fmt in ("png", "pdf"):
         path = output_dir / f"e2_nsur_convergence.{fmt}"; fig.savefig(path, dpi=180, bbox_inches="tight")
-        outputs.append({"relative_path": path.name, "format": fmt, "kind": "n_sur_convergence"})
+        outputs.append({"status": "created", "relative_path": path.name,
+                        "size_bytes": path.stat().st_size,
+                        "format": fmt, "kind": "n_sur_convergence",
+                        "actual_final_pilot_n_sur": result["pilot_n_sur"],
+                        "selection_record_hash": result["selection_record_hash"],
+                        "frozen_plan_hash": result["frozen_plan_hash"]})
     plt.close(fig)
     return outputs

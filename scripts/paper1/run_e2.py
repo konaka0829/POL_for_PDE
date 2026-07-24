@@ -24,10 +24,16 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from pol.paper1.config import canonical_config_json, load_config_json, save_config_json
-from pol.paper1.datasets import load_master_dataset
+from pol.paper1.datasets import load_master_dataset, tensor_hash
+from pol.paper1.e1 import E0_REQUIRED_CHECKS, validate_e0_prerequisite
+from pol.paper1.grids import spectral_resample_periodic
 from pol.paper1.e2 import E2_SCHEMA_VERSION, dry_run_cost_summary, run_e2, stable_hash
 from pol.paper1.e2_plotting import create_e2_plots
-from pol.paper1.e2_qa import assert_finite, validate_csv, validate_resume_output, write_manifest
+from pol.paper1.e2_qa import (
+    CSV_CONTRACT_VERSION, assert_finite, expected_artifacts, validate_artifact_contract,
+    validate_csv, validate_result_cartesian, validate_resume_output,
+    write_manifest,
+)
 
 TABLES = ("validation_sweep", "test_sweep", "model3_validation_by_seed", "model3_test_by_seed",
           "model3_test_aggregate", "convergence_results", "solver_metadata",
@@ -41,8 +47,10 @@ def write_json(path: Path, value: Any) -> None:
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     if not rows:
         raise ValueError(f"no rows for {path.name}")
+    rows = [{"schema_version": CSV_CONTRACT_VERSION, **row} for row in rows]
     fields: list[str] = []
-    for row in rows: fields.extend(key for key in row if key not in fields)
+    for row in rows:
+        fields.extend(key for key in row if key not in fields)
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
 
@@ -56,9 +64,10 @@ def check(status: bool, value: Any, threshold: Any, message: str) -> dict[str, A
 
 
 def prerequisite(config: Any, e0_dir: Path, dataset_dir: Path) -> tuple[Any, dict[str, Any], dict[str, Any]]:
+    _, master, strict_e0 = validate_e0_prerequisite(e0_dir, config)
     e0_summary = json.loads((e0_dir / "e0_summary.json").read_text())
-    if e0_summary.get("status") != "pass" or any(v != "pass" for v in e0_summary.get("required_checks", {}).values()):
-        raise ValueError("E0 prerequisite status/required checks did not pass")
+    if set(e0_summary.get("required_checks", {})) != E0_REQUIRED_CHECKS:
+        raise ValueError("E0 required-check name set mismatch")
     accepted_path = e0_dir / "accepted_production_config.json"
     accepted = load_config_json(accepted_path)
     dataset = load_master_dataset(dataset_dir)
@@ -76,17 +85,35 @@ def prerequisite(config: Any, e0_dir: Path, dataset_dir: Path) -> tuple[Any, dic
             raise ValueError(f"E2 config {name} does not match dataset")
     if config.spatial.reference_nx != dataset.config.spatial.reference_nx:
         raise ValueError("E2 reference_nx does not match dataset")
-    archive = dataset.metadata.get("runtime", {}).get("master_initial_conditions_archive")
-    if archive and Path(archive).exists() and sha(Path(archive)) != sha(e0_dir / "master_initial_conditions.pt"):
-        raise ValueError("dataset master initial-condition archive hash does not match E0")
-    e0_report = {"schema_version": "paper1-e2-e0-prerequisite-v1", "status": "pass",
+    master_at_reference = spectral_resample_periodic(
+        master.values_master, dataset.config.spatial.reference_nx,
+        domain_length=config.domain.length)
+    if tensor_hash(master_at_reference) != dataset.metadata["tensor_hashes"]["u0_master"]:
+        raise ValueError("dataset u0 tensor hash does not match validated E0 master tensor")
+    source_e0 = dataset.metadata.get("source_e0")
+    if not isinstance(source_e0, dict):
+        raise ValueError("dataset manifest lacks cryptographic source_e0 provenance")
+    expected_source_files = {
+        name: sha(e0_dir / name) for name in (
+            "e0_summary.json", "accepted_production_config.json",
+            "master_initial_conditions.pt", "master_manifest.json")}
+    if source_e0.get("files") != expected_source_files:
+        raise ValueError("dataset source_e0 hash chain mismatch")
+    e0_report = {"schema_version": "paper1-e2-e0-prerequisite-v3", "status": "pass",
                  "e0_summary_sha256": sha(e0_dir / "e0_summary.json"),
                  "accepted_config_sha256": sha(accepted_path),
-                 "master_file_sha256": sha(e0_dir / "master_initial_conditions.pt")}
-    dataset_report = {"schema_version": "paper1-e2-dataset-prerequisite-v1", "status": "pass",
+                 "master_file_sha256": sha(e0_dir / "master_initial_conditions.pt"),
+                 "master_tensor_hash": strict_e0["master_tensor_hash"],
+                 "master_manifest_sha256": sha(e0_dir / "master_manifest.json"),
+                 "strict_validator_hash": stable_hash(strict_e0),
+                 "selected_reference": json.loads(
+                     (e0_dir / "e0_summary.json").read_text())["selected_reference"]}
+    dataset_report = {"schema_version": "paper1-e2-dataset-prerequisite-v3", "status": "pass",
                       "dataset_hash": dataset.metadata["dataset_hash"], "split_hash": dataset.metadata["split_hash"],
                       "manifest_sha256": sha(dataset_dir / "manifest.json"),
-                      "payload_sha256": sha(dataset_dir / "master_dataset.pt")}
+                      "payload_sha256": sha(dataset_dir / "master_dataset.pt"),
+                      "tensor_hashes": dataset.metadata["tensor_hashes"],
+                      "source_e0": source_e0}
     return dataset, e0_report, dataset_report
 
 
@@ -150,121 +177,170 @@ def main(argv: list[str] | None = None) -> int:
         torch.set_num_threads(args.torch_threads)
     except Exception as exc:
         parser().error(str(exc))
-    summary: dict[str, Any] = {"schema_version": E2_SCHEMA_VERSION, "status": "fail", "required_checks": {}}
-    failures = []
+    final_out = out
+    stage = final_out / ".attempt-staging"
+    if stage.exists():
+        shutil.rmtree(stage)
+    stage.mkdir(parents=True)
+    bindings = {
+        "resolved_config_hash": hashlib.sha256(
+            canonical_config_json(config).encode()).hexdigest(),
+        "e0_prerequisite_hash": stable_hash(e0_report),
+        "dataset_prerequisite_hash": stable_hash(dataset_report),
+        "dataset_hash": dataset.metadata["dataset_hash"],
+        "split_hash": dataset.metadata["split_hash"],
+        "sample_ids_hash": tensor_hash(dataset.sample_ids),
+        "input_tensor_hashes": dataset.metadata["tensor_hashes"],
+        "protocol_version": E2_SCHEMA_VERSION,
+    }
+    summary: dict[str, Any] = {
+        "schema_version": E2_SCHEMA_VERSION, "status": "fail",
+        "required_checks": {}, "test_evaluated": False}
     try:
-        save_config_json(config, out / "resolved_config.json")
-        write_json(out / "e0_prerequisite.json", e0_report); write_json(out / "dataset_prerequisite.json", dataset_report)
-        result = run_e2(config, dataset, cache_dir=out / "cache", resume=args.resume,
-                        batch_size=args.batch_size, freeze_dir=out)
-        for name in TABLES: write_csv(out / f"{name}.csv", result[name])
-        write_json(out / "selection_record.json", result["selection_record"])
-        write_json(out / "model_specific_optima.json", result["model_specific_optima"])
-        write_json(out / "shared_representatives.json", result["shared_representatives"])
-        write_json(out / "coordinate_history.json", result["coordinate_history"])
-        write_json(out / "e2_attempt_history.json", result["attempt_history"])
-        write_json(out / "convergence_summary.json", result["convergence_summary"])
-        write_json(out / "failed_runs.json", result["failed_runs"])
-        write_json(out / "experiment_plan.json", dry_run_cost_summary(config))
-        write_json(out / "runtime_diagnostics.json", {
-            "schema_version": "paper1-e2-runtime-v1",
+        save_config_json(config, stage / "resolved_config.json")
+        write_json(stage / "e0_prerequisite.json", e0_report)
+        write_json(stage / "dataset_prerequisite.json", dataset_report)
+        result = run_e2(
+            config, dataset, cache_dir=final_out / "cache",
+            resume=args.resume, batch_size=args.batch_size,
+            freeze_dir=stage, input_bindings=bindings)
+        validate_result_cartesian(result, config)
+        for name in ("validation_sweep", "model3_validation_by_seed",
+                     "convergence_results", "solver_metadata",
+                     "physical_point_aliases"):
+            write_csv(stage / f"{name}.csv", result[name])
+        if result["test_evaluated"]:
+            for name in ("test_sweep", "model3_test_by_seed",
+                         "model3_test_aggregate"):
+                write_csv(stage / f"{name}.csv", result[name])
+        write_json(stage / "selection_record.json", result["selection_record"])
+        write_json(stage / "model_specific_optima.json", result["model_specific_optima"])
+        write_json(stage / "shared_representatives.json", result["shared_representatives"])
+        write_json(stage / "coordinate_history.json", result["coordinate_history"])
+        write_json(stage / "e2_attempt_history.json", result["attempt_history"])
+        write_json(stage / "convergence_summary.json", result["convergence_summary"])
+        write_json(stage / "failed_runs.json", result["failed_runs"])
+        write_json(stage / "event_log.json", {
+            "schema_version": "paper1-e2-events-v1",
+            "events": result["event_log"]})
+        write_json(stage / "experiment_plan.json", dry_run_cost_summary(config))
+        write_json(stage / "runtime_diagnostics.json", {
+            "schema_version": "paper1-e2-runtime-v3",
+            "definition": "cumulative wall-clock time inside run_e2 attempts",
             "total_runtime_seconds": result["runtime_seconds"],
             "cache": result["cache"],
             "attempts": result["attempt_history"],
         })
-        torch.save({"schema_version": E2_SCHEMA_VERSION, "selection_record_hash": result["selection_record_hash"],
-                    "models": result["selected_models"]}, out / "selected_models.pt")
-        saved_models = torch.load(out / "selected_models.pt", map_location="cpu", weights_only=False)
-        def check_tensors(value: Any) -> None:
-            if isinstance(value, torch.Tensor) and not bool(torch.isfinite(value).all()):
-                raise ValueError("selected_models.pt contains non-finite tensor values")
-            if isinstance(value, dict):
-                for item in value.values(): check_tensors(item)
-        check_tensors(saved_models)
-        data_manifest = {"schema_version": "paper1-e2-data-v1", "dataset_hash": dataset.metadata["dataset_hash"],
-                         "split_hash": dataset.metadata["split_hash"], "sample_ids_hash": stable_hash(dataset.sample_ids.tolist()),
+        if result["test_evaluated"]:
+            torch.save({
+                "schema_version": E2_SCHEMA_VERSION,
+                "selection_record_hash": result["selection_record_hash"],
+                "frozen_plan_hash": result["frozen_plan_hash"],
+                "models": result["selected_models"]},
+                stage / "selected_models.pt")
+        data_manifest = {"schema_version": "paper1-e2-data-v3", "dataset_hash": dataset.metadata["dataset_hash"],
+                         "split_hash": dataset.metadata["split_hash"], "sample_ids_hash": tensor_hash(dataset.sample_ids),
+                         "bindings": bindings,
                          "finite_input_path": "n_ref -> n_tar spectral low-pass -> n_sur interpolation",
                          "n_tar": config.spatial.target_data_nx, "n_sur_pilot": config.spatial.surrogate_internal_nx,
                          "actual_final_sweep_n_sur": result["pilot_n_sur"],
                          "J": config.spatial.observation_dim, "q": config.spatial.target_output_dim,
                          "cache": result["cache"]}
-        write_json(out / "data_manifest.json", data_manifest)
+        write_json(stage / "data_manifest.json", data_manifest)
         environment = {"python_version": platform.python_version(), "torch_version": torch.__version__,
                        "platform": platform.platform(), "command": [sys.executable, *sys.argv],
                        "git_commit": subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip() or "unavailable",
-                       "ended_at": datetime.now(timezone.utc).isoformat(), "runtime_seconds": result["runtime_seconds"]}
-        write_json(out / "environment.json", environment)
+                       "ended_at": datetime.now(timezone.utc).isoformat(),
+                       "runtime_seconds": result["runtime_seconds"],
+                       "runtime_definition": "cumulative run_e2 wall-clock time"}
+        write_json(stage / "environment.json", environment)
         plots = []
-        if not args.skip_plots: plots = create_e2_plots(out, result, config)
-        plot_manifest = {"status": "skipped" if args.skip_plots else "pass",
-                         "reason": "--skip-plots" if args.skip_plots else None, "plots": plots}
-        write_json(out / "plot_manifest.json", plot_manifest)
-        if args.skip_plots and any(out.glob("*.png")): raise ValueError("--skip-plots produced image files")
+        make_plots = result["test_evaluated"] and not args.skip_plots
+        if make_plots:
+            plots = create_e2_plots(stage, result, config)
+            for record in plots:
+                path = stage / record["relative_path"]
+                record["sha256"] = sha(path)
+        plot_manifest = {
+            "schema_version": "paper1-e2-plots-v3",
+            "status": "pass" if make_plots else "skipped",
+            "reason": None if make_plots else (
+                "--skip-plots" if args.skip_plots
+                else "pre-test scientific failure"),
+            "plots": plots}
+        write_json(stage / "plot_manifest.json", plot_manifest)
+        actual_plot_files = {
+            path.name for path in stage.iterdir()
+            if path.is_file() and path.suffix.lower() in {".png", ".pdf"}}
+        listed_plot_files = {record["relative_path"] for record in plots}
+        if actual_plot_files != listed_plot_files:
+            raise ValueError("plot manifest/file set mismatch")
+        if any(
+                record["size_bytes"] !=
+                (stage / record["relative_path"]).stat().st_size
+                or record["sha256"] != sha(
+                    stage / record["relative_path"])
+                for record in plots):
+            raise ValueError("plot manifest size/hash mismatch")
         # Read-back structural QA.
-        validate_csv(out / "validation_sweep.csv", {"family","sweep_axis","model","validation_field_relative_l2_mean"},
+        validate_csv(stage / "validation_sweep.csv", {"family","sweep_axis","model","validation_field_relative_l2_mean"},
                      ("family","sweep_axis","nu_tilde","T_tilde","model"))
-        validate_csv(out / "test_sweep.csv", {"family","sweep_axis","model","field_relative_l2_mean","selection_record_hash"},
-                     ("family","sweep_axis","nu_tilde","T_tilde","model"))
-        validate_csv(out / "model3_validation_by_seed.csv", {"family","sweep_axis","candidate_order","seed"},
+        validate_csv(stage / "model3_validation_by_seed.csv", {"family","sweep_axis","candidate_order","seed"},
                      ("family","sweep_axis","nu_tilde","T_tilde","candidate_order","seed"))
-        validate_csv(out / "model3_test_by_seed.csv", {"family","sweep_axis","seed","field_relative_l2_mean"},
-                     ("family","sweep_axis","nu_tilde","T_tilde","seed"))
-        validate_csv(out / "model3_test_aggregate.csv", {"family","sweep_axis","seed_count","mean"},
-                     ("family","sweep_axis","nu_tilde","T_tilde"))
-        validate_csv(out / "convergence_results.csv", {"family","n_sur","frozen_readout","status"},
+        if result["test_evaluated"]:
+            validate_csv(stage / "test_sweep.csv", {"family","sweep_axis","model","field_relative_l2_mean","selection_record_hash","frozen_plan_hash"},
+                         ("family","sweep_axis","nu_tilde","T_tilde","model"))
+            validate_csv(stage / "model3_test_by_seed.csv", {"family","sweep_axis","seed","field_relative_l2_mean","frozen_plan_hash"},
+                         ("family","sweep_axis","nu_tilde","T_tilde","seed"))
+            validate_csv(stage / "model3_test_aggregate.csv", {"family","sweep_axis","seed_count","mean","frozen_plan_hash"},
+                         ("family","sweep_axis","nu_tilde","T_tilde"))
+        validate_csv(stage / "convergence_results.csv", {"family","n_sur","frozen_readout","status"},
                      ("family","n_sur"))
-        assert_finite(json.loads((out / "selection_record.json").read_text()))
+        assert_finite(json.loads((stage / "selection_record.json").read_text()))
         conv_pass = result["convergence_summary"]["status"] == "pass"
+        events = [item["event"] for item in result["event_log"]]
+        event_order_ok = (
+            not result["test_evaluated"] or (
+                events.index("freeze_read_back")
+                < events.index("first_test_state_solve")
+                < events.index("first_test_metric")))
+        test_hashes_ok = (
+            not result["test_evaluated"] or all(
+                row["selection_record_hash"] == result["selection_record_hash"]
+                and row["frozen_plan_hash"] == result["frozen_plan_hash"]
+                for row in result["test_sweep"]))
         checks = {
-            "e0_prerequisite_passed": check(True, "pass", "pass", "E0 summary and checks verified"),
-            "dataset_prerequisite_passed": check(True, dataset_report["dataset_hash"], "hash verified", "dataset payload/manifest read back"),
-            "target_is_burgers": check(True, config.target.equation, "Burgers", "target source of truth verified"),
-            "finite_input_path_verified": check(True, data_manifest["finite_input_path"], "finite-only API", "master fields never enter surrogate initializer"),
-            "no_reference_high_frequency_leak": check(True, "API boundary", "u0_data only", "build_surrogate_initial_state accepts finite input"),
-            "shared_sample_ids_and_splits": check(True, dataset.metadata["split_hash"], "single shared split", "all families/models share features"),
+            "e0_prerequisite_passed": check(e0_report["status"] == "pass", e0_report["status"], "pass", "strict E0 validator"),
+            "dataset_prerequisite_passed": check(dataset_report["status"] == "pass", dataset_report["status"], "pass", "dataset payload/hash chain"),
             "all_required_parameter_points_completed": check(not result["failed_runs"], len(result["failed_runs"]), 0, "required grid complete"),
-            "all_saved_values_finite": check(True, "read-back", "finite", "JSON/CSV checked"),
-            "model1_fixed_decoder_verified": check(True, "fixed", "fixed", "no learned parameters"),
-            "model1_q_gt_J_zero_padding_verified": check(
-                True, {"q": config.spatial.target_output_dim,
-                       "J": config.spatial.observation_dim,
-                       "branch": "zero_padding" if config.spatial.target_output_dim > config.spatial.observation_dim else "observable"},
-                "decoder branch verified", "q>observable(J) pads; observable branch needs no padding"),
-            "ridge_uses_validation_only": check(True, result["selection_record_hash"], "frozen before test", "selection API receives train/validation only"),
-            "model3_uses_validation_seed_mean": check(True, list(config.e2.model3.selection_seeds), "seed mean", "candidate metric averages selection seeds"),
             "model3_selection_and_evaluation_seeds_disjoint": check(not set(config.e2.model3.selection_seeds)&set(config.e2.model3.evaluation_seeds), True, True, "disjoint lists"),
-            "model3_common_random_maps_verified": check(True, "key excludes parameter point", "same candidate/seed", "deterministic constructor"),
             "no_zscore_standardization": check(config.data.preprocessing=="l2_scaling_only", config.data.preprocessing, "l2_scaling_only", "mean centering only"),
-            "selection_frozen_before_test": check(True, result["selection_record_hash"], "content hash", "test accessed after freeze"),
-            "model_specific_and_shared_optima_distinct_in_schema": check(True, ["model_specific_optima.json","shared_representatives.json"], "separate", "separate artifacts"),
-            "reaction_diffusion_solver_checks_passed": check(True, "unit-tested wrapper", "pass", "semi-implicit spectral Euler"),
-            "time_alignment_verified": check(True, "config validation", "exact", "no rounding"),
+            "selection_frozen_before_test": check(event_order_ok, events, "freeze < test solve < metric", "measured event order"),
+            "test_rows_bound_to_frozen_plan": check(test_hashes_ok, result["frozen_plan_hash"], "all rows match", "row hash cross-check"),
             "state_cache_reused_across_models": check(
                 result["cache"]["states"]["solver_invocations"] == result["cache"]["states"]["misses"],
                 result["cache"]["states"], "solver_invocations == unique state misses",
                 "actual solver calls are counted independently from feature-cache hits"),
-            "resume_integrity_verified": check(True, "manifest/cache hashes", "verified", "resume validates hashes"),
             "convergence_uses_no_test_ids": check(
                 all(v != "test" for v in result["convergence_sample_membership"].values()),
                 result["convergence_sample_membership"], "actual train/validation membership",
                 "verified against shuffled dataset split"),
             "terminal_field_convergence_passed": check(conv_pass, conv_pass, True, "common-grid terminal discrepancy"),
-            "fixed_J_feature_convergence_passed": check(conv_pass, conv_pass, True, "fixed physical observations"),
-            "frozen_readout_prediction_convergence_passed": check(conv_pass, conv_pass, True, "finest-fit frozen Model 1--3 mappings"),
-            "handoff_generated_iff_pass": check(conv_pass, conv_pass, True, "handoff only on procedural pass"),
-            "all_required_artifacts_present": check(True, "pending finalization", "exact set", "top-level artifacts enumerated"),
-            "all_required_artifacts_finite": check(True, "read-back", "finite", "saved artifacts scanned"),
-            "plot_manifest_matches_files": check(all((out/p["relative_path"]).exists() for p in plots), len(plots), len(plots), "manifest/file bidirectional"),
-            "artifact_manifest_verified": check(True, "final SHA-256", "verified", "created after summary"),
         }
-        status = "pass" if all(v["status"]=="pass" for v in checks.values()) else "fail"
+        status = "pass" if result["procedural_status"] == "pass" and all(v["status"]=="pass" for v in checks.values()) else "fail"
+        attempt_history_hash = stable_hash(result["attempt_history"])
         summary = {"schema_version": E2_SCHEMA_VERSION, "status": status, "profile": config.e2.profile,
                    "required_checks": checks, "selection_record_hash": result["selection_record_hash"],
+                   "frozen_plan_hash": result["frozen_plan_hash"],
+                   "test_evaluated": result["test_evaluated"],
+                   "failure_kind": result["failure_kind"],
+                   "failure_reason": result["failure_reason"],
                    "global_n_sur_base": result["convergence_summary"]["global_n_sur_base"],
                    "final_attempt_index": len(result["attempt_history"]) - 1,
-                   "actual_final_sweep_n_sur": result["pilot_n_sur"]}
+                   "actual_final_sweep_n_sur": result["pilot_n_sur"],
+                   "attempt_history_hash": attempt_history_hash}
         if status == "pass":
-            handoff = {"schema_version": "paper1-e2-handoff-v1", "status": "pass",
+            handoff = {"schema_version": "paper1-e2-handoff-v3", "status": "pass",
                        "families": result["shared_representatives"], "model_specific_optima": result["model_specific_optima"],
                        "final_attempt_index": len(result["attempt_history"]) - 1,
                        "actual_final_sweep_n_sur": result["pilot_n_sur"],
@@ -276,20 +352,62 @@ def main(argv: list[str] | None = None) -> int:
                        "solver": {"burgers": asdict(config.e2.burgers), "reaction_diffusion": asdict(config.e2.reaction_diffusion)},
                        "selected_hyperparameters": result["shared_hyperparameters"],
                        "model3": asdict(config.e2.model3), "dataset_hash": dataset.metadata["dataset_hash"],
-                       "split_hash": dataset.metadata["split_hash"], "e0_prerequisite_hash": sha(out/"e0_prerequisite.json"),
-                       "resolved_config_hash": sha(out/"resolved_config.json"), "selection_record_hash": result["selection_record_hash"],
-                       "convergence_artifact": "convergence_summary.json", "convergence_hash": sha(out/"convergence_summary.json"),
+                       "split_hash": dataset.metadata["split_hash"],
+                       "e0_prerequisite_hash": sha(stage/"e0_prerequisite.json"),
+                       "resolved_config_hash": sha(stage/"resolved_config.json"),
+                       "selection_record_hash": result["selection_record_hash"],
+                       "frozen_plan_hash": result["frozen_plan_hash"],
+                       "attempt_history_hash": attempt_history_hash,
+                       "convergence_artifact": "convergence_summary.json", "convergence_hash": sha(stage/"convergence_summary.json"),
                        "git_commit": environment["git_commit"], "environment": "environment.json"}
-            write_json(out / "e2_handoff.json", handoff)
-        write_json(out / "e2_summary.json", summary)
-        expected = {p.name for p in out.iterdir() if p.is_file() and p.name != "artifact_manifest.json"}
-        write_manifest(out, expected)
-        if status != "pass": raise ValueError("one or more E2 required checks failed")
+            write_json(stage / "e2_handoff.json", handoff)
+        write_json(stage / "e2_summary.json", summary)
     except Exception as exc:
-        failures.append({"stage": "run_or_qa", "error": f"{type(exc).__name__}: {exc}", "traceback": traceback.format_exc()})
-        summary["status"] = "fail"; summary["failure_reason"] = failures[-1]["error"]
-        write_json(out / "failed_runs.json", failures); write_json(out / "e2_summary.json", summary)
-        if (out / "e2_handoff.json").exists(): (out / "e2_handoff.json").unlink()
+        # Runtime failures are finalized from the staging state without
+        # rewriting any file after the manifest.
+        failure = {"failure_kind": "runtime_error", "stage": "run_or_qa",
+                   "error": f"{type(exc).__name__}: {exc}",
+                   "traceback": traceback.format_exc()}
+        summary.update({"status": "fail", "test_evaluated": False,
+                        "failure_kind": "runtime_error",
+                        "failure_reason": failure["error"]})
+        write_json(stage / "failed_runs.json", [failure])
+        write_json(stage / "e2_summary.json", summary)
+        if not (stage / "environment.json").exists():
+            write_json(stage / "environment.json", {
+                "schema_version": "paper1-e2-environment-v3",
+                "python_version": platform.python_version(),
+                "torch_version": torch.__version__,
+                "runtime_definition": "runtime failure before scientific result"})
+        keep = expected_artifacts(
+            status="fail", skip_plots=True, test_evaluated=False,
+            failure_kind="runtime_error") - {"artifact_manifest.json"}
+        for path in list(stage.iterdir()):
+            if path.is_file() and path.name not in keep:
+                path.unlink()
+    expected = expected_artifacts(
+        status=summary["status"], skip_plots=args.skip_plots,
+        test_evaluated=bool(summary["test_evaluated"]),
+        failure_kind=summary.get("failure_kind"))
+    validate_artifact_contract(
+        stage, status=summary["status"], skip_plots=args.skip_plots,
+        test_evaluated=bool(summary["test_evaluated"]),
+        include_manifest=False, failure_kind=summary.get("failure_kind"))
+    write_manifest(stage, expected - {"artifact_manifest.json"})
+    validate_artifact_contract(
+        stage, status=summary["status"], skip_plots=args.skip_plots,
+        test_evaluated=bool(summary["test_evaluated"]),
+        failure_kind=summary.get("failure_kind"))
+    # Publish only after complete QA. Remove stale known artifacts, retain cache.
+    known = expected_artifacts(status="pass", skip_plots=False, test_evaluated=True) | expected_artifacts(
+        status="fail", skip_plots=True, test_evaluated=False) | expected_artifacts(
+        status="fail", skip_plots=True, test_evaluated=False,
+        failure_kind="runtime_error")
+    for name in known:
+        (final_out / name).unlink(missing_ok=True)
+    for path in stage.iterdir():
+        os.replace(path, final_out / path.name)
+    stage.rmdir()
     print(json.dumps(summary, sort_keys=True, allow_nan=False))
     return 0 if summary["status"] == "pass" else 1
 
