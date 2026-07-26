@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 import traceback
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 from pol.runtime.recipe import (
     RecipeInvocation,
@@ -26,14 +26,21 @@ from .run_spec import Paper1RunSpec, run_spec_to_resolved_dict
 
 @dataclass(frozen=True)
 class PlannedStep:
-    """One recipe invocation with its legacy-equivalent command."""
+    """One direct recipe invocation and optional legacy reproduction command."""
 
     recipe_id: Literal["e0", "master_dataset", "e1", "e2"]
+    recipe_callable: str
     name: str
-    command: tuple[str, ...]
     output_dir: Path
     log_path: Path
     config_path: Path
+    parameters: Mapping[str, object]
+    legacy_equivalent_command: tuple[str, ...] | None = None
+
+    @property
+    def logical_invocation(self) -> tuple[str, ...]:
+        """Return the actual logical invocation recorded in recipe artifacts."""
+        return ("direct_recipe", self.recipe_callable)
 
 
 def _sha256(path: Path) -> str:
@@ -103,7 +110,17 @@ def build_plan(spec: Paper1RunSpec, *, repo_root: Path) -> list[PlannedStep]:
     steps = [
         PlannedStep(
             "e0",
+            "pol.paper1.recipes.foundation_validation.run_foundation_validation",
             "e0",
+            run_dir / "e0",
+            run_dir / "logs/01_e0.log",
+            e0_config,
+            {
+                "config_path": str(e0_config),
+                "output_dir": str(run_dir / "e0"),
+                "overwrite": True,
+                "torch_threads": 1,
+            },
             (
                 sys.executable,
                 str(root / "scripts/paper1/run_e0.py"),
@@ -113,9 +130,6 @@ def build_plan(spec: Paper1RunSpec, *, repo_root: Path) -> list[PlannedStep]:
                 str(run_dir / "e0"),
                 "--overwrite",
             ),
-            run_dir / "e0",
-            run_dir / "logs/01_e0.log",
-            e0_config,
         )
     ]
     if spec.kind == "e2":
@@ -123,7 +137,21 @@ def build_plan(spec: Paper1RunSpec, *, repo_root: Path) -> list[PlannedStep]:
         steps.append(
             PlannedStep(
                 "master_dataset",
+                "pol.paper1.recipes.master_dataset.run_master_dataset_generation",
                 "master_dataset",
+                run_dir / "master_dataset",
+                run_dir / "logs/02_master_dataset.log",
+                accepted,
+                {
+                    "config_path": str(accepted),
+                    "master_initial_conditions": str(
+                        run_dir / "e0/master_initial_conditions.pt"
+                    ),
+                    "output_dir": str(run_dir / "master_dataset"),
+                    "overwrite": True,
+                    "generate_target": True,
+                    "torch_threads": 1,
+                },
                 (
                     sys.executable,
                     str(root / "scripts/paper1/generate_master_dataset.py"),
@@ -135,9 +163,6 @@ def build_plan(spec: Paper1RunSpec, *, repo_root: Path) -> list[PlannedStep]:
                     str(run_dir / "master_dataset"),
                     "--overwrite",
                 ),
-                run_dir / "master_dataset",
-                run_dir / "logs/02_master_dataset.log",
-                accepted,
             )
         )
     if spec.kind in {"e1", "e2"}:
@@ -170,18 +195,40 @@ def build_plan(spec: Paper1RunSpec, *, repo_root: Path) -> list[PlannedStep]:
         steps.append(
             PlannedStep(
                 spec.kind,
+                (
+                    "pol.paper1.recipes.heat_calibration.run_heat_calibration"
+                    if spec.kind == "e1"
+                    else (
+                        "pol.paper1.recipes.surrogate_parameter_time."
+                        "run_surrogate_parameter_time"
+                    )
+                ),
                 spec.kind,
-                tuple(command),
                 output,
                 run_dir / f"logs/{number}_{spec.kind}.log",
                 spec.experiment_config,
+                {
+                    "config_path": str(spec.experiment_config),
+                    "e0_dir": str(run_dir / "e0"),
+                    **(
+                        {"dataset_dir": str(run_dir / "master_dataset")}
+                        if spec.kind == "e2"
+                        else {}
+                    ),
+                    "output_dir": str(output),
+                    "overwrite": True,
+                    **({"resume": False} if spec.kind == "e2" else {}),
+                    "skip_plots": spec.skip_plots,
+                    "torch_threads": spec.torch_threads,
+                    **(
+                        {"batch_size": spec.batch_size}
+                        if spec.kind == "e2"
+                        else {}
+                    ),
+                },
+                tuple(command),
             )
         )
-    missing_scripts = [
-        step.command[1] for step in steps if not Path(step.command[1]).is_file()
-    ]
-    if missing_scripts:
-        raise ValueError(f"runner child script does not exist: {missing_scripts[0]}")
     return steps
 
 
@@ -196,8 +243,17 @@ def plan_to_dict(spec: Paper1RunSpec, *, repo_root: Path) -> dict[str, object]:
         "steps": [
             {
                 "name": step.name,
-                "command": list(step.command),
+                "execution_mode": "direct_recipe",
+                "recipe_id": step.recipe_id,
+                "recipe_callable": step.recipe_callable,
+                "config_path": str(step.config_path),
                 "output_dir": str(step.output_dir),
+                "parameters": dict(step.parameters),
+                "legacy_equivalent_command": (
+                    list(step.legacy_equivalent_command)
+                    if step.legacy_equivalent_command
+                    else None
+                ),
             }
             for step in build_plan(spec, repo_root=repo_root)
         ],
@@ -310,7 +366,16 @@ def _manifest(
             {
                 "name": step.name,
                 "status": "pending",
-                "command": list(step.command),
+                "execution_mode": "direct_recipe",
+                "recipe_id": step.recipe_id,
+                "recipe_callable": step.recipe_callable,
+                "command": list(step.logical_invocation),
+                "parameters": dict(step.parameters),
+                "legacy_equivalent_command": (
+                    list(step.legacy_equivalent_command)
+                    if step.legacy_equivalent_command
+                    else None
+                ),
                 "config_path": str(step.config_path),
                 "config_sha256": (
                     _sha256(step.config_path) if step.config_path.is_file() else None
@@ -343,7 +408,7 @@ def _execute_recipe(
     invocation = RecipeInvocation(
         repo_root=repo_root,
         working_directory=repo_root,
-        command=step.command,
+        command=step.logical_invocation,
         torch_threads=threads,
     )
     with numerical_thread_scope(threads):
@@ -434,7 +499,15 @@ def execute_run(spec: Paper1RunSpec, *, repo_root: Path, force: bool) -> int:
             "planned_steps": [
                 {
                     "name": step.name,
-                    "command": list(step.command),
+                    "execution_mode": "direct_recipe",
+                    "recipe_id": step.recipe_id,
+                    "recipe_callable": step.recipe_callable,
+                    "parameters": dict(step.parameters),
+                    "legacy_equivalent_command": (
+                        list(step.legacy_equivalent_command)
+                        if step.legacy_equivalent_command
+                        else None
+                    ),
                     "output_dir": str(step.output_dir),
                     "log_path": str(step.log_path),
                 }

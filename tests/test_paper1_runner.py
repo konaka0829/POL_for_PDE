@@ -27,19 +27,24 @@ def _spec(kind: str):
 @pytest.mark.parametrize(
     ("kind", "names"), [("e0", ["e0"]), ("e1", ["e0", "e1"]), ("e2", ["e0", "master_dataset", "e2"])]
 )
-def test_plans_use_existing_scripts(kind: str, names: list[str]) -> None:
+def test_plans_describe_direct_recipes(kind: str, names: list[str]) -> None:
     plan = build_plan(_spec(kind), repo_root=ROOT)
     assert [step.name for step in plan] == names
-    assert all(step.command[0] == sys.executable for step in plan)
-    assert all("scripts/paper1/" in step.command[1] for step in plan)
+    assert all(step.logical_invocation[0] == "direct_recipe" for step in plan)
+    assert all(step.recipe_callable.startswith("pol.paper1.recipes.") for step in plan)
+    assert all(
+        step.legacy_equivalent_command
+        and step.legacy_equivalent_command[0] == sys.executable
+        for step in plan
+    )
 
 
 @pytest.mark.parametrize("kind", ["e1", "e2"])
 def test_skip_plots_is_conditional(kind: str) -> None:
     spec = _spec(kind)
-    assert "--skip-plots" not in build_plan(spec, repo_root=ROOT)[-1].command
+    assert build_plan(spec, repo_root=ROOT)[-1].parameters["skip_plots"] is False
     enabled = spec.__class__(**{**spec.__dict__, "skip_plots": True})
-    assert "--skip-plots" in build_plan(enabled, repo_root=ROOT)[-1].command
+    assert build_plan(enabled, repo_root=ROOT)[-1].parameters["skip_plots"] is True
 
 
 def test_plan_has_no_filesystem_or_popen(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -62,7 +67,75 @@ def test_plan_has_no_filesystem_or_popen(tmp_path: Path, monkeypatch, capsys) ->
     assert main(["run", str(source), "--plan"]) == 0
     assert not (tmp_path / "out").exists()
     assert {name: os.environ.get(name) for name in variables} == before
-    assert json.loads(capsys.readouterr().out)["schema_version"] == "paper1-run-plan-v1"
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["schema_version"] == "paper1-run-plan-v1"
+    assert plan["steps"][0]["execution_mode"] == "direct_recipe"
+    assert plan["steps"][0]["recipe_callable"].endswith(
+        ".run_foundation_validation"
+    )
+    assert "command" not in plan["steps"][0]
+    assert plan["steps"][0]["legacy_equivalent_command"]
+
+
+def test_plan_does_not_require_legacy_wrapper_scripts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    spec = _temp_spec(tmp_path, "e2")
+    original_is_file = Path.is_file
+
+    def wrappers_are_missing(path: Path) -> bool:
+        if "scripts/paper1" in path.as_posix():
+            return False
+        return original_is_file(path)
+
+    monkeypatch.setattr(Path, "is_file", wrappers_are_missing)
+    assert [step.recipe_id for step in build_plan(spec, repo_root=ROOT)] == [
+        "e0",
+        "master_dataset",
+        "e2",
+    ]
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_cli_restores_thread_environment_after_execution(
+    tmp_path: Path, monkeypatch, failure: bool
+) -> None:
+    raw = json.loads((ROOT / "configs/runs/paper1_e0_smoke.json").read_text())
+    raw["run"]["output_root"] = str(tmp_path / "runs")
+    raw["run"]["name"] = "failure" if failure else "success"
+    source = tmp_path / f"{raw['run']['name']}.json"
+    source.write_text(json.dumps(raw), encoding="utf-8")
+    variables = (
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    )
+    monkeypatch.setenv(variables[0], "7")
+    monkeypatch.delenv(variables[1], raising=False)
+    monkeypatch.setenv(variables[2], "9")
+    monkeypatch.delenv(variables[3], raising=False)
+    before = {name: os.environ.get(name) for name in variables}
+    monkeypatch.setattr(runner_module, "_git", lambda *args: "test")
+    if failure:
+        monkeypatch.setattr(
+            runner_module,
+            "_execute_recipe",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                RuntimeError("simulated failure")
+            ),
+        )
+        expected = 1
+    else:
+        monkeypatch.setattr(
+            runner_module,
+            "_execute_recipe",
+            lambda step, *args, **kwargs: _result(step),
+        )
+        monkeypatch.setattr(runner_module, "_verify_step", lambda step: None)
+        expected = 0
+    assert main(["run", str(source)]) == expected
+    assert {name: os.environ.get(name) for name in variables} == before
 
 
 def _result(step, exit_code: int = 0) -> RecipeResult:
@@ -120,6 +193,11 @@ def test_existing_guard_force_and_manifest(tmp_path: Path, monkeypatch) -> None:
     manifest = json.loads((spec.run_dir / "run_manifest.json").read_text())
     assert manifest["status"] == "pass"
     assert manifest["steps"][0]["returncode"] == 0
+    assert manifest["steps"][0]["execution_mode"] == "direct_recipe"
+    assert manifest["steps"][0]["command"][0] == "direct_recipe"
+    assert manifest["steps"][0]["recipe_callable"].endswith(
+        ".run_foundation_validation"
+    )
 
 
 def test_child_failure_stops_and_records(tmp_path: Path, monkeypatch) -> None:
@@ -382,11 +460,12 @@ def test_unknown_recipe_id_is_rejected(tmp_path: Path) -> None:
 def test_recipe_result_status_must_match_exit_code(result: RecipeResult) -> None:
     step = runner_module.PlannedStep(
         "e0",
+        "pol.paper1.recipes.foundation_validation.run_foundation_validation",
         "e0",
-        ("python", "run_e0.py"),
         Path("output"),
         Path("e0.log"),
         Path("config.json"),
+        {},
     )
     with pytest.raises(ValueError, match="status/exit_code mismatch"):
         runner_module._validate_recipe_result(step, result)
@@ -395,11 +474,12 @@ def test_recipe_result_status_must_match_exit_code(result: RecipeResult) -> None
 def test_recipe_result_output_dir_must_match_plan() -> None:
     step = runner_module.PlannedStep(
         "e0",
+        "pol.paper1.recipes.foundation_validation.run_foundation_validation",
         "e0",
-        ("python", "run_e0.py"),
         Path("expected"),
         Path("e0.log"),
         Path("config.json"),
+        {},
     )
     result = RecipeResult("pass", 0, Path("other"), {})
     with pytest.raises(ValueError, match="output_dir mismatch"):

@@ -1,59 +1,21 @@
-# Time-Scaled PDE Surrogate Operator Learning
+# Surrogate-PDE Feature Maps for PDE Operator Learning
 
 ## Overview
 
-This repository contains a slim research implementation for time-scaled surrogate PDE operator learning on 1D periodic Burgers-type problems. The active code focuses on Burgers target dynamics, Burgers/reaction-diffusion/Kuramoto-Sivashinsky surrogate reservoirs, Model 1/2/3 experiments, and the Model 1 time-scaled error decomposition.
+This repository contains reproducible research code for approximating PDE
+solution operators with fixed surrogate-PDE dynamics as feature maps. The
+active Paper 1 implementation compares a fixed decoder, an affine ridge
+readout, and fixed random nonlinear features with a learned affine output.
 
-## Theory-to-Code Map
+The validated experiment sequence is:
 
-For target final time `T` and surrogate readout time `Ttilde`, the code uses
+- E0: fail-fast numerical and finite-input validation;
+- E1: heat-to-heat theoretical calibration;
+- E2: validation-only surrogate selection and convergence, followed by frozen
+  test evaluation.
 
-```text
-alpha = Ttilde / T
-r_alpha(s) = Gtilde_{alpha*s}(u0),  s in [0,T]
-R_scale(r) = F(r) - alpha * Ftilde(r)
-```
-
-The primary bound reported by `pol/model123_1d/error_decomposition.py` is
-
-```text
-D1(theta, alpha*T) <= exp(beta*T) Delta_init + c_beta_T Delta_scale
-```
-
-In the current full-state 1D setting, `Delta_init = 0`.
-
-## Model 1 / Model 2 / Model 3
-
-- Model 1 directly reads the surrogate state at `Ttilde`.
-- Model 2 fits a ridge readout from finite-dimensional trajectory observations.
-- Model 3 adds fixed random ELM features before the ridge readout.
-
-The main runner is:
-
-```bash
-python model123_burgers_1d.py --model model1 --data-file data/burgers_model123.mat --T 1.0 --Ttilde 1.0
-```
-
-## Burgers Target and Surrogate PDEs
-
-The target generator is
-
-```text
-F(z) = target_nu * z_xx - z * z_x
-```
-
-Supported surrogate families are:
-
-- Burgers: `res_burgers_nu * z_xx - res_burgers_b * z*z_x`
-- Reaction-diffusion: `rd_nu * z_xx + rd_alpha*z - rd_beta*z^3`
-- Kuramoto-Sivashinsky style: `-ks_b*z*z_x - ks_eta*z_xx - ks_kappa*z_xxxx`
-
-## Time-Scaled Generator Defect and Delta_scale
-
-For `Ttilde != T`, the scaled generator defect is evaluated along `r_alpha(s)`, not along native surrogate times `s`. Linear interpolation is used when `alpha*s` does not land exactly on the native `dt` grid.
-
-Primary numerical-study diagnostics use the sample-wise integrated quantity `delta_scale_pathwise_abs_l2h`; `Delta_scale_abs_l2h` and `Delta_dyn` may appear as compatibility aliases.
-The alpha/parameter heatmap correlations use this per-sample integrated defect, not instantaneous residual fields. For Model 1 the error variable is `D1`; for Model 2/3 it is the readout prediction error, so the correlation is a diagnostic against the underlying surrogate PDE defect rather than a direct theorem bound.
+See [AGENTS.md](AGENTS.md) for the scientific invariants that changes must
+preserve.
 
 ## Installation
 
@@ -86,6 +48,33 @@ pol run configs/runs/paper1_e2_main.json --plan
 A run name may not be reused unless `--force` is supplied. Main profiles are
 costly, so inspect them with `--plan` first. The runner does not implement
 automatic resume or artifact reuse.
+
+## Phase 1 scientific regression baseline
+
+The checked-in semantic baseline is generated only from already completed,
+passing legacy-wrapper artifacts. The generator does not run experiments:
+
+```bash
+python scripts/dev/generate_paper1_phase1_scientific_baseline.py \
+  --e0-dir /absolute/path/to/e0 \
+  --e1-dir /absolute/path/to/e1 \
+  --e2-dir /absolute/path/to/e2 \
+  --source-revision 59076f9 \
+  --output tests/fixtures/paper1_phase1_scientific_baseline_v2.json
+```
+
+Regeneration requires an explicit source revision and `--overwrite` when
+replacing an existing expectation. Review the scientific-core diff and verify
+legacy-wrapper versus unified-runner exact parity before accepting an update.
+Floats and tensors use the documented 12-significant-digit semantic
+canonicalization; execution paths, timestamps, binding hashes, and raw
+PyTorch/PDF bytes are not scientific baseline identities.
+
+## Legacy time-scaled experiments
+
+The root-level Model123 scripts and `pol.model123_1d` retain the earlier
+time-scaled Model 1 error-decomposition experiments for compatibility. They are
+not the architecture or research-identity baseline for new Paper 1 work.
 
 ## Paper 1 E0 acceptance gate
 
