@@ -1,0 +1,7 @@
+{
+  "schema_version": "paper1-run-v1",
+  "run": {"name": "paper1_e2_smoke", "output_root": "outputs/paper1_runs"},
+  "experiment": {"kind": "e2", "config": "configs/paper1_e2_smoke.json"},
+  "prerequisites": {"e0_config": "configs/paper1_e0_smoke.json"},
+  "execution": {"torch_threads": 1, "batch_size": 64, "skip_plots": false}
+}

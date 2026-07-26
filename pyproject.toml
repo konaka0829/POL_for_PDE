@@ -15,6 +15,9 @@ dependencies = [
     "matplotlib>=3.7",
 ]
 
+[project.scripts]
+pol = "pol.cli:main"
+
 [project.optional-dependencies]
 test = ["pytest>=7.0"]
 

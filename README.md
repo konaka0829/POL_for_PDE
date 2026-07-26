@@ -67,6 +67,25 @@ or:
 python -m pip install -r requirements.txt
 ```
 
+## Unified Paper 1 runner (Phase 1)
+
+The unified runner is a thin façade that invokes the existing E0, dataset,
+E1, and E2 scripts in order. Scientific settings remain in the existing
+`configs/paper1_*.json` files; each run spec contains only their paths and the
+minimal execution order.
+
+```bash
+python -m pip install -e .
+pol run configs/runs/paper1_e0_smoke.json
+pol run configs/runs/paper1_e1_smoke.json
+pol run configs/runs/paper1_e2_smoke.json
+pol run configs/runs/paper1_e2_main.json --plan
+```
+
+A run name may not be reused unless `--force` is supplied. Main profiles are
+costly, so inspect them with `--plan` first. Phase 1 does not implement
+automatic resume or artifact reuse.
+
 ## Paper 1 E0 acceptance gate
 
 The current Paper 1 E0 is a fail-fast validation of Fourier conventions,

@@ -1,0 +1,7 @@
+{
+  "schema_version": "paper1-run-v1",
+  "run": {"name": "paper1_e0_main", "output_root": "outputs/paper1_runs"},
+  "experiment": {"kind": "e0", "config": "configs/paper1_e0_main.json"},
+  "prerequisites": {},
+  "execution": {}
+}

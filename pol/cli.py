@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import json
+from pathlib import Path
+import sys
 
 
 def add_data_mode_args(
@@ -66,3 +69,33 @@ def validate_data_mode_args(args: argparse.Namespace, parser: argparse.ArgumentP
     else:
         if not args.train_file or not args.test_file:
             parser.error("--train-file and --test-file are required when --data-mode=separate_files")
+
+
+def _build_main_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="pol", description="POL research commands")
+    commands = parser.add_subparsers(dest="command", required=True)
+    run = commands.add_parser("run", help="run a Paper 1 orchestration manifest")
+    run.add_argument("run_spec")
+    modes = run.add_mutually_exclusive_group()
+    modes.add_argument("--plan", action="store_true", help="print the plan without side effects")
+    modes.add_argument("--force", action="store_true", help="replace only this run directory")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the package-level command line interface."""
+    parser = _build_main_parser()
+    args = parser.parse_args(argv)
+    repo_root = Path(__file__).resolve().parent.parent
+    try:
+        from .paper1.run_spec import load_run_spec
+        from .paper1.runner import execute_run, plan_to_dict
+
+        spec = load_run_spec(args.run_spec, repo_root=repo_root)
+        if args.plan:
+            print(json.dumps(plan_to_dict(spec, repo_root=repo_root), indent=2, allow_nan=False))
+            return 0
+        return execute_run(spec, repo_root=repo_root, force=args.force)
+    except (OSError, ValueError) as exc:
+        print(f"pol: error: {exc}", file=sys.stderr)
+        return 2
