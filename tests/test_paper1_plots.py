@@ -275,3 +275,200 @@ def test_plot_runtime_records_partial_format_failures(
     )
     assert manifest["outputs"][0]["format"] == "png"
     assert manifest["format_failures"][0]["format"] == "pdf"
+
+
+def test_plot_runtime_rejects_unreported_extra_and_cleans_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    input_dir = tmp_path / "compute"
+    input_dir.mkdir()
+    (input_dir / "data").write_text("ok")
+
+    def render(context):
+        (context.output_dir / "figure.png").write_bytes(b"png")
+        (context.output_dir / "extra.txt").write_text("unreported")
+        return PlotResult(({"relative_path": "figure.png", "format": "png"},))
+
+    recipe = PlotRecipe(
+        "extra.v1", "1", ("test",), ("data",), render, lambda settings: settings
+    )
+    monkeypatch.setattr("pol.plots.runtime.get_plot_recipe", lambda _: recipe)
+    with pytest.raises(ValueError, match="output set"):
+        execute_plot_tasks(
+            experiment_kind="test",
+            input_dir=input_dir,
+            figures_dir=tmp_path / "figures",
+            tasks=(PlotTaskSpec("extra.v1", {}),),
+        )
+    assert not list((tmp_path / "figures").glob(".extra.v1.*"))
+    assert not (tmp_path / "figures/extra.v1").exists()
+
+
+def test_plot_runtime_extra_file_invalidates_reuse_and_is_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    input_dir = tmp_path / "compute"
+    input_dir.mkdir()
+    (input_dir / "data").write_text("ok")
+    calls = 0
+
+    def render(context):
+        nonlocal calls
+        calls += 1
+        (context.output_dir / "figure.png").write_bytes(b"png")
+        return PlotResult(({"relative_path": "figure.png", "format": "png"},))
+
+    recipe = PlotRecipe(
+        "reuse-extra.v1",
+        "1",
+        ("test",),
+        ("data",),
+        render,
+        lambda settings: settings,
+    )
+    monkeypatch.setattr("pol.plots.runtime.get_plot_recipe", lambda _: recipe)
+    task = PlotTaskSpec("reuse-extra.v1", {})
+    execute_plot_tasks(
+        experiment_kind="test",
+        input_dir=input_dir,
+        figures_dir=tmp_path / "figures",
+        tasks=(task,),
+    )
+    output = tmp_path / "figures/reuse-extra.v1"
+    (output / "extra.txt").write_text("tamper")
+    outcome = execute_plot_tasks(
+        experiment_kind="test",
+        input_dir=input_dir,
+        figures_dir=tmp_path / "figures",
+        tasks=(task,),
+    )
+    assert outcome[0]["executed_or_reused"] == "executed"
+    assert calls == 2
+    assert not (output / "extra.txt").exists()
+
+
+def test_plot_runtime_rejects_nested_symlink_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    input_dir = tmp_path / "compute"
+    input_dir.mkdir()
+    (input_dir / "data").write_text("ok")
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "figure.png").write_bytes(b"png")
+
+    def render(context):
+        try:
+            (context.output_dir / "nested").symlink_to(
+                victim, target_is_directory=True
+            )
+        except OSError as exc:
+            pytest.skip(f"symlink creation unavailable: {exc}")
+        return PlotResult(
+            ({"relative_path": "nested/figure.png", "format": "png"},)
+        )
+
+    recipe = PlotRecipe(
+        "nested-link.v1",
+        "1",
+        ("test",),
+        ("data",),
+        render,
+        lambda settings: settings,
+    )
+    monkeypatch.setattr("pol.plots.runtime.get_plot_recipe", lambda _: recipe)
+    with pytest.raises(ValueError, match="symlink"):
+        execute_plot_tasks(
+            experiment_kind="test",
+            input_dir=input_dir,
+            figures_dir=tmp_path / "figures",
+            tasks=(PlotTaskSpec("nested-link.v1", {}),),
+        )
+
+
+def test_malformed_plot_render_error_always_cleans_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    input_dir = tmp_path / "compute"
+    input_dir.mkdir()
+    (input_dir / "data").write_text("ok")
+
+    def render(context):
+        (context.output_dir / "partial.png").write_bytes(b"partial")
+        raise PlotRenderError(
+            "malformed",
+            outputs=({"relative_path": "../outside.png", "format": "png"},),
+        )
+
+    recipe = PlotRecipe(
+        "malformed.v1",
+        "1",
+        ("test",),
+        ("data",),
+        render,
+        lambda settings: settings,
+    )
+    monkeypatch.setattr("pol.plots.runtime.get_plot_recipe", lambda _: recipe)
+    with pytest.raises(ValueError, match="unsafe"):
+        execute_plot_tasks(
+            experiment_kind="test",
+            input_dir=input_dir,
+            figures_dir=tmp_path / "figures",
+            tasks=(PlotTaskSpec("malformed.v1", {}),),
+        )
+    assert not list((tmp_path / "figures").glob(".malformed.v1.*"))
+
+
+def test_plot_failure_preserves_previous_complete_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    input_dir = tmp_path / "compute"
+    input_dir.mkdir()
+    (input_dir / "data").write_text("ok")
+    failing = False
+
+    def render(context):
+        if failing:
+            (context.output_dir / "partial.png").write_bytes(b"partial")
+            raise PlotRenderError(
+                "new settings failed",
+                outputs=(
+                    {"relative_path": "partial.png", "format": "png"},
+                ),
+            )
+        (context.output_dir / "figure.png").write_bytes(b"complete")
+        return PlotResult(({"relative_path": "figure.png", "format": "png"},))
+
+    recipe = PlotRecipe(
+        "preserve.v1",
+        "1",
+        ("test",),
+        ("data",),
+        render,
+        lambda settings: settings,
+    )
+    monkeypatch.setattr("pol.plots.runtime.get_plot_recipe", lambda _: recipe)
+    figures = tmp_path / "figures"
+    execute_plot_tasks(
+        experiment_kind="test",
+        input_dir=input_dir,
+        figures_dir=figures,
+        tasks=(PlotTaskSpec("preserve.v1", {"dpi": 100}),),
+    )
+    before = {
+        path.name: path.read_bytes()
+        for path in (figures / "preserve.v1").iterdir()
+    }
+    failing = True
+    with pytest.raises(PlotRenderError, match="new settings failed"):
+        execute_plot_tasks(
+            experiment_kind="test",
+            input_dir=input_dir,
+            figures_dir=figures,
+            tasks=(PlotTaskSpec("preserve.v1", {"dpi": 200}),),
+        )
+    after = {
+        path.name: path.read_bytes()
+        for path in (figures / "preserve.v1").iterdir()
+    }
+    assert after == before

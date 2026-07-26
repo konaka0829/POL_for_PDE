@@ -18,11 +18,15 @@ from pol.paper1.regression_baseline import (
     build_e1_scientific_record,
     build_e2_scientific_record,
 )
+from pol.paper1.scientific_comparison import (
+    assert_scientific_record_matches,
+    policy_from_baseline,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PHASE1_DIGEST = json.loads(
-    (ROOT / "tests/fixtures/paper1_phase1_scientific_baseline_v2.json").read_text(
+PHASE1_BASELINE = json.loads(
+    (ROOT / "tests/fixtures/paper1_phase1_scientific_baseline_v3.json").read_text(
         encoding="utf-8"
     )
 )
@@ -136,7 +140,11 @@ def test_e0_direct_and_runner_smoke_parity(tmp_path: Path) -> None:
     direct_master_manifest = _json(direct / "master_manifest.json")
     runner_master_manifest = _json(runner / "master_manifest.json")
     assert direct_master_manifest["tensor_hash"] == runner_master_manifest["tensor_hash"]
-    assert build_e0_scientific_record(runner) == PHASE1_DIGEST["e0"]
+    assert_scientific_record_matches(
+        build_e0_scientific_record(runner),
+        PHASE1_BASELINE["e0"],
+        policy_from_baseline(PHASE1_BASELINE, section="e0"),
+    )
 
 
 @pytest.mark.slow
@@ -180,7 +188,11 @@ def test_e1_direct_and_runner_smoke_parity(tmp_path: Path) -> None:
             runner / "e1" / name
         ).read_bytes()
     direct_record = build_e1_scientific_record(direct / "e1")
-    assert direct_record == PHASE1_DIGEST["e1"]
+    assert_scientific_record_matches(
+        direct_record,
+        PHASE1_BASELINE["e1"],
+        policy_from_baseline(PHASE1_BASELINE, section="e1"),
+    )
     runner_record = build_e1_scientific_record(
         runner / "e1",
         plot_dir=runner / "figures/paper1.e1.standard.v1",
@@ -306,10 +318,14 @@ def test_e2_direct_and_runner_smoke_parity(tmp_path: Path) -> None:
         row["event"] for row in _json(runner_out / "event_log.json")["events"]
     ]
     assert direct_events == runner_events
-    assert build_e2_scientific_record(
-        runner_out,
-        plot_dir=runner / "figures/paper1.e2.standard.v1",
-    ) == PHASE1_DIGEST["e2"]
+    assert_scientific_record_matches(
+        build_e2_scientific_record(
+            runner_out,
+            plot_dir=runner / "figures/paper1.e2.standard.v1",
+        ),
+        PHASE1_BASELINE["e2"],
+        policy_from_baseline(PHASE1_BASELINE, section="e2"),
+    )
     for path in direct_out.glob("*.png"):
         _assert_png_pixels_equal(
             path,

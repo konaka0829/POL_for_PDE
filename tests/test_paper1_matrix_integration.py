@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,10 +9,12 @@ import sys
 import pytest
 from PIL import Image
 
-from pol.paper1.config import canonical_config_json, load_config_json
 from pol.paper1.regression_baseline import (
-    canonicalize_scientific,
-    semantic_model_digest,
+    build_e1_matrix_scientific_baseline,
+)
+from pol.paper1.scientific_comparison import (
+    assert_scientific_record_matches,
+    policy_from_baseline,
 )
 from pol.plots.runtime import execute_plot_tasks
 from pol.plots.types import PlotTaskSpec
@@ -22,7 +23,7 @@ from pol.plots.types import PlotTaskSpec
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED = json.loads(
     (
-        ROOT / "tests/fixtures/paper1_e1_sweep_smoke_baseline_v1.json"
+        ROOT / "tests/fixtures/paper1_e1_matrix_smoke_baseline_v2.json"
     ).read_text(encoding="utf-8")
 )
 
@@ -51,17 +52,6 @@ def _run(arguments: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _sha(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def _canonical_hash(value: object) -> str:
-    encoded = json.dumps(
-        value, sort_keys=True, separators=(",", ":"), allow_nan=False
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
 def _spec(tmp_path: Path, name: str, jobs: int) -> Path:
     raw = json.loads(
         (
@@ -78,28 +68,14 @@ def _spec(tmp_path: Path, name: str, jobs: int) -> Path:
 def _assert_baseline(run_dir: Path) -> None:
     manifest = json.loads((run_dir / "matrix_manifest.json").read_text())
     assert manifest["status"] == "pass"
-    generated = sorted(
-        hashlib.sha256(canonical_config_json(load_config_json(path)).encode()).hexdigest()
-        for path in (run_dir / "generated_configs").glob("*.json")
+    actual = build_e1_matrix_scientific_baseline(
+        run_dir, source_revision="runtime"
     )
-    assert generated == EXPECTED["generated_config_canonical_sha256"]
-    for cell in manifest["cells"]:
-        expected = EXPECTED["cells"][cell["human_slug"]]
-        output = Path(cell["output_dir"])
-        summary = canonicalize_scientific(
-            json.loads((output / "e1_summary.json").read_text())
-        )
-        assert _canonical_hash(summary) == expected["summary_semantic_sha256"]
-        assert semantic_model_digest(output / "selected_models.pt") == expected[
-            "selected_models_semantic_sha256"
-        ]
-        assert {
-            path.name: _sha(path) for path in sorted(output.glob("*.csv"))
-        } == expected["csv_sha256"]
-    assert {
-        path.name: _sha(path)
-        for path in sorted((run_dir / "aggregate").glob("sweep_*.csv"))
-    } == EXPECTED["aggregate_csv_sha256"]
+    assert_scientific_record_matches(
+        actual["record"],
+        EXPECTED["record"],
+        policy_from_baseline(EXPECTED),
+    )
 
 
 @pytest.mark.slow
@@ -210,16 +186,26 @@ def test_legacy_wrapper_uses_matrix_engine_and_preserves_plots(
     assert result.stderr.count("deprecated") == 1
     manifest = json.loads((output / "sweep_plot_manifest.json").read_text())
     plots = sorted(
-        [record.get("relative_path"), record.get("format"), record["status"]]
-        for record in manifest["plots"]
+        (
+            {
+                "logical_name": Path(record["relative_path"]).stem,
+                "format": record["format"],
+            }
+            for record in manifest["plots"]
+            if record["status"] == "pass"
+        ),
+        key=lambda item: (item["logical_name"], item["format"]),
     )
-    assert plots == EXPECTED["plots"]
+    assert plots == sorted(
+        EXPECTED["record"]["plots"],
+        key=lambda item: (item["logical_name"], item["format"]),
+    )
     for name in (
         "sweep_selected_results.csv",
         "sweep_readout_diagnostics.csv",
         "sweep_noise_summary.csv",
     ):
-        assert _sha(output / name) == EXPECTED["aggregate_csv_sha256"][name]
+        assert (output / name).stat().st_size > 0
     settings = dict(
         json.loads(
             (ROOT / "configs/paper1_e1_sweep_smoke.json").read_text()

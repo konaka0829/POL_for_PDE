@@ -190,7 +190,7 @@ class E1ResolutionPlugin:
                 "run_id": cell.human_slug,
                 **metadata,
                 "experiment_names": json.dumps(
-                    list(cell.experiment_memberships), separators=(",", ":")
+                    sorted(cell.experiment_memberships), separators=(",", ":")
                 ),
             }
             for name, rows in tables.items():
@@ -215,6 +215,28 @@ class E1ResolutionPlugin:
             counts[name] = len(rows)
         write_strict_json(aggregate_dir / "aggregate_summary.json", counts)
         return counts
+
+    def validate_aggregate(self, aggregate_dir: Path) -> None:
+        """Validate aggregate row counts and legacy-compatible CSV structure."""
+        summary = json.loads(
+            (aggregate_dir / "aggregate_summary.json").read_text(encoding="utf-8")
+        )
+        expected_keys = {
+            "selected_results",
+            "readout_diagnostics",
+            "noise_summary",
+        }
+        if not isinstance(summary, dict) or set(summary) != expected_keys:
+            raise ValueError("aggregate summary has an invalid contract")
+        for name in sorted(expected_keys):
+            path = aggregate_dir / f"sweep_{name}.csv"
+            with path.open(newline="", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                rows = list(reader)
+                if reader.fieldnames is None:
+                    raise ValueError(f"aggregate CSV lacks a header: {path}")
+            if len(rows) != summary[name]:
+                raise ValueError(f"aggregate row count mismatch: {path}")
 
     def aggregate_artifact_names(self) -> tuple[str, ...]:
         """Return the exact generic-matrix aggregate artifact contract."""

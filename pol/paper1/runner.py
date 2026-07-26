@@ -539,6 +539,33 @@ def _run_plots(
     )
 
 
+def _record_plot_request(
+    spec: Paper1RunSpec,
+    *,
+    run_dir: Path,
+    manifest: dict[str, Any],
+    request_mode: str,
+    status: str,
+    outcomes: list[dict[str, Any]],
+    failure: str | None,
+) -> None:
+    from pol.plots.provenance import build_plot_request, write_plot_request
+
+    request = build_plot_request(
+        source_spec_path=spec.source_path,
+        compute_fingerprint=science_fingerprint(spec),
+        tasks=spec.plot_tasks,
+        request_mode=request_mode,
+        status=status,
+        outcomes=outcomes,
+        failure=failure,
+    )
+    write_plot_request(run_dir, request)
+    if request_mode == "initial_run":
+        manifest["initial_plot_request"] = request
+    manifest["last_plot_request"] = request
+
+
 def execute_run(
     spec: Paper1RunSpec,
     *,
@@ -551,6 +578,8 @@ def execute_run(
     output_root, run_dir = resolve_run_directory(spec, repo_root=root)
     steps = build_plan(spec, repo_root=root)
     if plots_only:
+        if not spec.plots_enabled or not spec.plot_tasks:
+            raise ValueError("--plots-only requires at least one enabled plot task")
         if not (run_dir.exists() or run_dir.is_symlink()):
             raise FileNotFoundError(f"plots-only requires existing run directory: {run_dir}")
         _validate_owned_run_directory(run_dir, spec)
@@ -568,6 +597,15 @@ def execute_run(
             manifest["plot_tasks"] = []
             manifest["failure"] = f"{type(exc).__name__}: {exc}"
             manifest["ended_at"] = _now()
+            _record_plot_request(
+                spec,
+                run_dir=run_dir,
+                manifest=manifest,
+                request_mode="plots_only",
+                status="not_run",
+                outcomes=[],
+                failure=manifest["failure"],
+            )
             _atomic_json(manifest_path, manifest)
             return 1
         try:
@@ -577,6 +615,15 @@ def execute_run(
             manifest["status"] = "pass"
             manifest["failure"] = None
             manifest["ended_at"] = _now()
+            _record_plot_request(
+                spec,
+                run_dir=run_dir,
+                manifest=manifest,
+                request_mode="plots_only",
+                status=manifest["plot_status"],
+                outcomes=outcomes,
+                failure=None,
+            )
             _atomic_json(manifest_path, manifest)
             return 0
         except Exception as exc:
@@ -585,6 +632,15 @@ def execute_run(
             manifest["failure"] = f"{type(exc).__name__}: {exc}"
             manifest["status"] = "fail" if spec.plots_required else "pass"
             manifest["ended_at"] = _now()
+            _record_plot_request(
+                spec,
+                run_dir=run_dir,
+                manifest=manifest,
+                request_mode="plots_only",
+                status="fail",
+                outcomes=[],
+                failure=manifest["failure"],
+            )
             _atomic_json(manifest_path, manifest)
             return 1 if spec.plots_required else 0
     if run_dir.exists() or run_dir.is_symlink():
@@ -673,12 +729,30 @@ def execute_run(
             outcomes = _run_plots(spec, run_dir=run_dir)
             manifest["plot_tasks"] = outcomes
             manifest["plot_status"] = "pass" if outcomes else "disabled"
+            _record_plot_request(
+                spec,
+                run_dir=run_dir,
+                manifest=manifest,
+                request_mode="initial_run",
+                status=manifest["plot_status"],
+                outcomes=outcomes,
+                failure=None,
+            )
         except Exception as exc:
             manifest["plot_status"] = "fail"
             manifest["failure"] = f"{type(exc).__name__}: {exc}"
             manifest["status"] = "fail" if spec.plots_required else "pass"
             manifest["ended_at"] = _now()
             manifest["final_result_dir"] = str(run_dir / spec.kind)
+            _record_plot_request(
+                spec,
+                run_dir=run_dir,
+                manifest=manifest,
+                request_mode="initial_run",
+                status="fail",
+                outcomes=[],
+                failure=manifest["failure"],
+            )
             _atomic_json(manifest_path, manifest)
             return 1 if spec.plots_required else 0
         manifest["status"] = "pass"

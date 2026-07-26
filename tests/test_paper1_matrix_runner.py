@@ -1,7 +1,14 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
+import concurrent.futures
+import multiprocessing
+import time
+import csv
+
+from pol.workflow.types import MatrixCell
 
 import pytest
 
@@ -14,6 +21,10 @@ from pol.workflow.matrix_worker import execute_matrix_cell
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _blocking_worker() -> None:
+    time.sleep(60)
 
 
 def _spec(tmp_path: Path):
@@ -94,6 +105,156 @@ def test_matrix_fingerprint_mismatch_is_rejected_before_execution(
         execute_matrix_run(spec, repo_root=ROOT, force=False)
 
 
+def test_matrix_compute_fingerprint_tracks_threads_not_schedule_or_plots(
+    tmp_path: Path,
+) -> None:
+    spec = _spec(tmp_path)
+    _, cells, _, _ = matrix_module._prepare(spec)
+    binding = matrix_module._internal_e0_binding(spec)
+    baseline = matrix_module._compute_fingerprint(
+        spec, cells, e0_binding=binding
+    )
+    assert (
+        matrix_module._compute_fingerprint(
+            replace(spec, jobs=spec.jobs + 1), cells, e0_binding=binding
+        )
+        == baseline
+    )
+    assert (
+        matrix_module._compute_fingerprint(
+            replace(spec, resume=not spec.resume), cells, e0_binding=binding
+        )
+        == baseline
+    )
+    assert (
+        matrix_module._compute_fingerprint(
+            replace(spec, torch_threads_per_job=spec.torch_threads_per_job + 1),
+            cells,
+            e0_binding=binding,
+        )
+        != baseline
+    )
+    assert matrix_module._artifact_contract_fingerprint(
+        baseline, cell_plots=False
+    ) != matrix_module._artifact_contract_fingerprint(
+        baseline, cell_plots=True
+    )
+    external = {
+        "mode": "external",
+        "accepted_config_sha256": "a" * 64,
+        "master_tensor_hash": "b" * 64,
+    }
+    same_external = matrix_module._compute_fingerprint(
+        spec, cells, e0_binding=dict(external)
+    )
+    assert same_external == matrix_module._compute_fingerprint(
+        spec, cells, e0_binding=dict(external)
+    )
+    changed_external = dict(external)
+    changed_external["master_tensor_hash"] = "c" * 64
+    assert same_external != matrix_module._compute_fingerprint(
+        spec, cells, e0_binding=changed_external
+    )
+
+
+def test_aggregate_publish_is_exact_and_removes_stale_files(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    (run_dir / "cells").mkdir(parents=True)
+    aggregate = run_dir / "aggregate"
+    aggregate.mkdir()
+    (aggregate / "required.csv").write_text("old\n")
+    (aggregate / "stale.csv").write_text("stale\n")
+
+    class Plugin:
+        def aggregate_artifact_names(self):
+            return ("required.csv",)
+
+        def collect(self, output, cells_dir, cells):
+            (output / "required.csv").write_text("new\n")
+            return {"rows": 1}
+
+        def validate_aggregate(self, output):
+            assert (output / "required.csv").read_text() == "new\n"
+
+    counts, records = matrix_module._collect_and_publish_aggregate(
+        run_dir=run_dir, plugin=Plugin(), cells=[]
+    )
+    assert counts == {"rows": 1}
+    assert [item["relative_path"] for item in records] == ["required.csv"]
+    assert (aggregate / "required.csv").read_text() == "new\n"
+    assert not (aggregate / "stale.csv").exists()
+    assert not (run_dir / ".aggregate.staging").exists()
+    assert not (run_dir / ".aggregate.backup").exists()
+
+
+def test_aggregate_failure_preserves_previous_complete_output(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    (run_dir / "cells").mkdir(parents=True)
+    aggregate = run_dir / "aggregate"
+    aggregate.mkdir()
+    (aggregate / "required.csv").write_text("complete\n")
+
+    class Plugin:
+        def aggregate_artifact_names(self):
+            return ("required.csv",)
+
+        def collect(self, output, cells_dir, cells):
+            (output / "extra.csv").write_text("unexpected\n")
+            raise RuntimeError("collection failed")
+
+        def validate_aggregate(self, output):
+            raise AssertionError("must not validate")
+
+    with pytest.raises(RuntimeError, match="collection failed"):
+        matrix_module._collect_and_publish_aggregate(
+            run_dir=run_dir, plugin=Plugin(), cells=[]
+        )
+    assert (aggregate / "required.csv").read_text() == "complete\n"
+    assert not (run_dir / ".aggregate.staging").exists()
+    assert not (run_dir / ".aggregate.backup").exists()
+
+
+def test_legacy_aggregate_memberships_are_sorted(tmp_path: Path) -> None:
+    cells_dir = tmp_path / "cells"
+    output = cells_dir / "cell"
+    output.mkdir(parents=True)
+    tables = {
+        "selected_results": ["case_name", "q"],
+        "readout_diagnostics": ["case_name", "q"],
+        "noise_summary": ["case_name", "q", "noise_level"],
+    }
+    for name, fields in tables.items():
+        with (output / f"{name}.csv").open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            writer.writerow({field: 0 for field in fields})
+    cell = MatrixCell(
+        run_index=0,
+        cell_id="cell",
+        config_sha256="0" * 64,
+        canonical_config="{}",
+        human_slug="cell",
+        experiment_memberships=("z_experiment", "a_experiment"),
+        metadata={
+            "n_tar": 1,
+            "n_sur": 1,
+            "J": 1,
+            "full_observation": True,
+        },
+    )
+    aggregate = tmp_path / "aggregate"
+    aggregate.mkdir()
+    E1ResolutionPlugin().collect(aggregate, cells_dir, [cell])
+    with (aggregate / "sweep_selected_results.csv").open(newline="") as handle:
+        row = next(csv.DictReader(handle))
+    assert json.loads(row["experiment_names"]) == [
+        "a_experiment",
+        "z_experiment",
+    ]
+
+
 def test_force_rejects_non_owned_matrix_directory(tmp_path: Path) -> None:
     spec = _spec(tmp_path)
     spec.run_dir.mkdir()
@@ -152,6 +313,23 @@ def test_keyboard_interrupt_cancels_workers_and_records_manifest(
     assert pool.shutdown_call == (False, True)
     manifest = json.loads((spec.run_dir / "matrix_manifest.json").read_text())
     assert manifest["status"] == "interrupted"
+
+
+def test_process_pool_shutdown_is_bounded_for_blocking_worker() -> None:
+    pool = concurrent.futures.ProcessPoolExecutor(
+        max_workers=1, mp_context=multiprocessing.get_context("spawn")
+    )
+    future = pool.submit(_blocking_worker)
+    deadline = time.monotonic() + 5
+    while not getattr(pool, "_processes", {}) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    processes = list(getattr(pool, "_processes", {}).values())
+    started = time.monotonic()
+    matrix_module._shutdown_process_pool(
+        pool, [future], timeout_seconds=0.2
+    )
+    assert time.monotonic() - started < 3
+    assert processes and all(not process.is_alive() for process in processes)
 
 
 def test_force_removes_only_owned_matrix_run_and_keeps_sibling(

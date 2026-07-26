@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from pol.runtime.io import file_sha256
 
@@ -105,28 +105,171 @@ def _fingerprint(
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _safe_relative_path(raw: object) -> Path:
+    relative = Path(str(raw))
+    if (
+        not str(raw)
+        or relative.is_absolute()
+        or ".." in relative.parts
+        or relative == Path(".")
+    ):
+        raise ValueError(f"unsafe or duplicate plot output: {raw!r}")
+    return relative
+
+
+def _tree_files(root: Path) -> set[str]:
+    """Return an exact regular-file inventory while rejecting every symlink."""
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError(f"unsafe plot tree root: {root}")
+    files: set[str] = set()
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        for path in directory.iterdir():
+            if path.is_symlink():
+                raise ValueError(f"plot tree contains symlink: {path}")
+            if path.is_dir():
+                pending.append(path)
+            elif path.is_file():
+                files.add(path.relative_to(root).as_posix())
+            else:
+                raise ValueError(f"plot tree contains non-regular entry: {path}")
+    return files
+
+
+def _output_records(
+    root: Path, raw_records: Iterable[object]
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in raw_records:
+        if not isinstance(raw, dict):
+            raise ValueError("plot output record must be an object")
+        relative = _safe_relative_path(raw.get("relative_path")).as_posix()
+        if relative in seen:
+            raise ValueError(f"duplicate plot output: {relative}")
+        seen.add(relative)
+        path = root / relative
+        if path.is_symlink() or not path.is_file() or path.stat().st_size <= 0:
+            raise ValueError(f"plot renderer did not create {relative}")
+        records.append(
+            {
+                **raw,
+                "relative_path": relative,
+                "size_bytes": path.stat().st_size,
+                "sha256": file_sha256(path),
+            }
+        )
+    return records
+
+
+def _verify_exact_tree(
+    root: Path, records: Iterable[Mapping[str, Any]], *, include_manifest: bool
+) -> None:
+    declared = {str(record["relative_path"]) for record in records}
+    if include_manifest:
+        declared.add("plot_manifest.json")
+    actual = _tree_files(root)
+    if actual != declared:
+        raise ValueError(
+            "plot output set mismatch; "
+            f"missing={sorted(declared-actual)}, extra={sorted(actual-declared)}"
+        )
+
+
 def _reusable(path: Path, fingerprint: str) -> dict[str, Any] | None:
     manifest_path = path / "plot_manifest.json"
     try:
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            return None
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if (
-            manifest.get("schema_version") != PLOT_MANIFEST_SCHEMA
+            not isinstance(manifest, dict)
+            or manifest.get("schema_version") != PLOT_MANIFEST_SCHEMA
             or manifest.get("status") != "pass"
             or manifest.get("plot_fingerprint") != fingerprint
         ):
             return None
-        for output in manifest["outputs"]:
-            target = path / output["relative_path"]
+        outputs = manifest.get("outputs")
+        if not isinstance(outputs, list):
+            return None
+        records = _output_records(path, outputs)
+        _verify_exact_tree(path, records, include_manifest=True)
+        for raw, output in zip(outputs, records):
+            target = path / str(output["relative_path"])
             if (
-                target.is_symlink()
-                or not target.is_file()
-                or target.stat().st_size != output["size_bytes"]
-                or file_sha256(target) != output["sha256"]
+                target.stat().st_size != raw.get("size_bytes")
+                or file_sha256(target) != raw.get("sha256")
             ):
                 return None
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
         return None
     return manifest
+
+
+def _complete_output(path: Path) -> bool:
+    """Return whether an existing task directory is an intact pass output."""
+    try:
+        manifest_path = path / "plot_manifest.json"
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            return False
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        fingerprint = manifest.get("plot_fingerprint")
+        return isinstance(fingerprint, str) and _reusable(
+            path, fingerprint
+        ) is not None
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return False
+
+
+def _publish_plot_directory(
+    staging: Path, output_dir: Path, *, figures_dir: Path
+) -> None:
+    """Atomically replace one complete plot task directory with rollback."""
+    backup = _safe_directory(
+        figures_dir / f".{output_dir.name}.backup", parent=figures_dir
+    )
+    if backup.exists():
+        _remove_plot_directory(backup, parent=figures_dir)
+    moved_old = False
+    if output_dir.exists():
+        os.replace(output_dir, backup)
+        moved_old = True
+    try:
+        os.replace(staging, output_dir)
+    except BaseException:
+        if moved_old and backup.exists() and not output_dir.exists():
+            os.replace(backup, output_dir)
+        raise
+    if backup.exists():
+        _remove_plot_directory(backup, parent=figures_dir)
+
+
+def _failure_manifest(
+    *,
+    recipe_id: str,
+    recipe_version: str,
+    fingerprint: str,
+    inputs: list[dict[str, Any]],
+    settings: object,
+    outputs: list[dict[str, Any]],
+    failures: list[dict[str, Any]],
+    exc: BaseException,
+) -> dict[str, Any]:
+    return {
+        "schema_version": PLOT_MANIFEST_SCHEMA,
+        "status": "fail",
+        "recipe_id": recipe_id,
+        "recipe_version": recipe_version,
+        "plot_runtime_version": PLOT_RUNTIME_VERSION,
+        "plot_fingerprint": fingerprint,
+        "inputs": inputs,
+        "settings": settings,
+        "outputs": outputs,
+        "format_failures": failures,
+        "executed_or_reused": "executed",
+        "failure": f"{type(exc).__name__}: {exc}",
+    }
 
 
 def execute_plot_tasks(
@@ -156,6 +299,9 @@ def execute_plot_tasks(
         output_dir = _safe_directory(
             figures_dir / recipe.recipe_id, parent=figures_dir
         )
+        previous_complete = (
+            _complete_output(output_dir) if output_dir.is_dir() else False
+        )
         reused = _reusable(output_dir, fingerprint) if output_dir.is_dir() else None
         if reused is not None:
             outcomes.append(
@@ -175,34 +321,61 @@ def execute_plot_tasks(
             _remove_plot_directory(staging, parent=figures_dir)
         staging.mkdir(parents=True)
         try:
-            result = recipe.render(
-                PlotContext(input_dir=input_dir, output_dir=staging, settings=settings)
-            )
-            outputs = []
-            seen_outputs: set[str] = set()
-            for item in result.outputs:
-                relative = str(item["relative_path"])
-                relative_path = Path(relative)
-                if (
-                    relative_path.is_absolute()
-                    or ".." in relative_path.parts
-                    or relative in seen_outputs
-                ):
-                    raise ValueError(f"unsafe or duplicate plot output: {relative}")
-                seen_outputs.add(relative)
-                path = staging / relative
-                if path.is_symlink() or not path.is_file() or path.stat().st_size <= 0:
-                    raise ValueError(f"plot renderer did not create {relative}")
-                outputs.append(
-                    {
-                        **dict(item),
-                        "relative_path": relative,
-                        "size_bytes": path.stat().st_size,
-                        "sha256": file_sha256(path),
-                    }
+            try:
+                result = recipe.render(
+                    PlotContext(
+                        input_dir=input_dir,
+                        output_dir=staging,
+                        settings=settings,
+                    )
                 )
+                outputs = _output_records(staging, result.outputs)
+            except PlotRenderError as exc:
+                failures: list[dict[str, Any]] = []
+                for raw in exc.failures:
+                    if not isinstance(raw, dict):
+                        raise ValueError(
+                            "plot failure record must be an object"
+                        ) from exc
+                    record = dict(raw)
+                    relative = _safe_relative_path(
+                        record.get("relative_path")
+                    ).as_posix()
+                    failed_path = staging / relative
+                    if failed_path.is_symlink():
+                        raise ValueError(
+                            f"failed plot output is a symlink: {relative}"
+                        ) from exc
+                    if failed_path.exists():
+                        if not failed_path.is_file():
+                            raise ValueError(
+                                f"failed plot output is not regular: {relative}"
+                            ) from exc
+                        failed_path.unlink()
+                    record["relative_path"] = relative
+                    failures.append(record)
+                outputs = _output_records(staging, exc.outputs)
+                _verify_exact_tree(staging, outputs, include_manifest=False)
+                manifest = _failure_manifest(
+                    recipe_id=recipe.recipe_id,
+                    recipe_version=recipe.version,
+                    fingerprint=fingerprint,
+                    inputs=inputs,
+                    settings=settings,
+                    outputs=outputs,
+                    failures=failures,
+                    exc=exc,
+                )
+                _atomic_json(staging / "plot_manifest.json", manifest)
+                _verify_exact_tree(staging, outputs, include_manifest=True)
+                if not previous_complete:
+                    _publish_plot_directory(
+                        staging, output_dir, figures_dir=figures_dir
+                    )
+                raise
             if not outputs:
                 raise ValueError("plot renderer produced no outputs")
+            _verify_exact_tree(staging, outputs, include_manifest=False)
             manifest = {
                 "schema_version": PLOT_MANIFEST_SCHEMA,
                 "status": "pass",
@@ -217,9 +390,8 @@ def execute_plot_tasks(
                 "failure": None,
             }
             _atomic_json(staging / "plot_manifest.json", manifest)
-            if output_dir.exists():
-                _remove_plot_directory(output_dir, parent=figures_dir)
-            os.replace(staging, output_dir)
+            _verify_exact_tree(staging, outputs, include_manifest=True)
+            _publish_plot_directory(staging, output_dir, figures_dir=figures_dir)
             outcomes.append(
                 {
                     "recipe_id": recipe.recipe_id,
@@ -229,84 +401,7 @@ def execute_plot_tasks(
                     "output_dir": str(output_dir),
                 }
             )
-        except Exception as exc:
-            partial_outputs: list[dict[str, Any]] = []
-            format_failures: list[dict[str, Any]] = []
-            if isinstance(exc, PlotRenderError):
-                for item in exc.failures:
-                    record = dict(item)
-                    relative = str(record.get("relative_path", ""))
-                    relative_path = Path(relative)
-                    if (
-                        not relative
-                        or relative_path.is_absolute()
-                        or ".." in relative_path.parts
-                    ):
-                        raise ValueError(
-                            f"unsafe failed plot output: {relative}"
-                        ) from exc
-                    failed_path = staging / relative
-                    if failed_path.exists() and not failed_path.is_symlink():
-                        failed_path.unlink()
-                    format_failures.append(record)
-                for item in exc.outputs:
-                    record = dict(item)
-                    relative = str(record["relative_path"])
-                    relative_path = Path(relative)
-                    path = staging / relative
-                    if (
-                        relative_path.is_absolute()
-                        or ".." in relative_path.parts
-                        or path.is_symlink()
-                        or not path.is_file()
-                        or path.stat().st_size <= 0
-                    ):
-                        raise ValueError(
-                            f"invalid partial plot output: {relative}"
-                        ) from exc
-                    partial_outputs.append(
-                        {
-                            **record,
-                            "relative_path": relative,
-                            "size_bytes": path.stat().st_size,
-                            "sha256": file_sha256(path),
-                        }
-                    )
-            elif staging.exists():
-                _remove_plot_directory(staging, parent=figures_dir)
-            failure_dir = _safe_directory(
-                figures_dir / f".{recipe.recipe_id}.failure",
-                parent=figures_dir,
-            )
-            if failure_dir.exists():
-                _remove_plot_directory(failure_dir, parent=figures_dir)
-            if isinstance(exc, PlotRenderError):
-                os.replace(staging, failure_dir)
-            else:
-                failure_dir.mkdir()
-            _atomic_json(
-                failure_dir / "plot_manifest.json",
-                {
-                    "schema_version": PLOT_MANIFEST_SCHEMA,
-                    "status": "fail",
-                    "recipe_id": recipe.recipe_id,
-                    "recipe_version": recipe.version,
-                    "plot_runtime_version": PLOT_RUNTIME_VERSION,
-                    "plot_fingerprint": fingerprint,
-                    "inputs": inputs,
-                    "settings": settings,
-                    "outputs": partial_outputs,
-                    "format_failures": format_failures,
-                    "executed_or_reused": "executed",
-                    "failure": f"{type(exc).__name__}: {exc}",
-                },
-            )
-            if output_dir.exists():
-                _remove_plot_directory(output_dir, parent=figures_dir)
-            os.replace(failure_dir, output_dir)
-            raise
-        except BaseException:
+        finally:
             if staging.exists():
                 _remove_plot_directory(staging, parent=figures_dir)
-            raise
     return outcomes

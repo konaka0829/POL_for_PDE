@@ -414,6 +414,25 @@ def test_plots_only_never_calls_compute_and_records_reuse(
     assert saved["compute_status"] == "pass"
     assert saved["plot_status"] == "pass"
     assert saved["plot_tasks"][0]["executed_or_reused"] == "reused"
+    request = json.loads((run_dir / "resolved_plot_spec.json").read_text())
+    assert request["request_mode"] == "plots_only"
+    assert request["compute_fingerprint"] == runner_module.science_fingerprint(spec)
+    assert request["requested_tasks"][0]["settings"] == dict(
+        spec.plot_tasks[0].settings
+    )
+    assert saved["last_plot_request"] == request
+
+
+def test_plots_only_rejects_disabled_or_empty_plot_request(
+    tmp_path: Path,
+) -> None:
+    spec = replace(
+        _temp_spec(tmp_path, "e1"),
+        plots_enabled=False,
+        plot_tasks=(),
+    )
+    with pytest.raises(ValueError, match="enabled plot task"):
+        execute_run(spec, repo_root=ROOT, force=False, plots_only=True)
 
 
 @pytest.mark.parametrize(("required", "expected"), [(True, 1), (False, 0)])
@@ -447,6 +466,9 @@ def test_plot_failure_does_not_change_compute_status(
     saved = json.loads((run_dir / "run_manifest.json").read_text())
     assert saved["compute_status"] == "pass"
     assert saved["plot_status"] == "fail"
+    request = json.loads((run_dir / "resolved_plot_spec.json").read_text())
+    assert request["status"] == "fail"
+    assert request["failure"] == "RuntimeError: plot failed"
 
 
 def test_plots_only_rejects_compute_tamper_before_plotting(

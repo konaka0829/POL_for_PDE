@@ -9,6 +9,7 @@ import multiprocessing
 import os
 from pathlib import Path
 import shutil
+import time
 from typing import Any
 
 from pol.runtime.io import file_sha256
@@ -64,16 +65,22 @@ def _prepare(spec: MatrixRunSpec) -> tuple[Any, list[MatrixCell], list[dict[str,
     return plugin, cells, invalid, raw_counts
 
 
-def _fingerprint(spec: MatrixRunSpec, cells: list[MatrixCell]) -> str:
+def _compute_fingerprint(
+    spec: MatrixRunSpec,
+    cells: list[MatrixCell],
+    *,
+    e0_binding: dict[str, Any],
+) -> str:
     payload = {
         "schema_version": spec.schema_version,
         "base_config_sha256": _canonical_config_sha256(spec.base_config),
         "e0_config_sha256": _canonical_config_sha256(spec.e0_config),
+        "e0_binding": e0_binding,
         "aggregation_kind": spec.aggregation_kind,
         "aggregation_protocol": "paper1-e1-resolution-matrix-v1",
         "recipe_protocols": ("paper1-e0-v2", "paper1-e1-v2"),
         "invalid_run_policy": spec.invalid_run_policy,
-        "cell_plots": spec.cell_plots,
+        "torch_threads_per_job": spec.torch_threads_per_job,
         "cells": [
             {
                 "config_sha256": cell.config_sha256,
@@ -86,6 +93,60 @@ def _fingerprint(spec: MatrixRunSpec, cells: list[MatrixCell]) -> str:
         payload, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _artifact_contract_fingerprint(
+    compute_fingerprint: str, *, cell_plots: bool
+) -> str:
+    payload = {
+        "compute_fingerprint": compute_fingerprint,
+        "cell_plots": cell_plots,
+    }
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _internal_e0_binding(spec: MatrixRunSpec) -> dict[str, Any]:
+    return {
+        "mode": "matrix_managed",
+        "e0_config_sha256": _canonical_config_sha256(spec.e0_config),
+    }
+
+
+def _external_e0_binding(
+    e0_dir: Path, *, plugin: Any, base_config: Path
+) -> dict[str, Any]:
+    """Validate and identify an externally managed E0 prerequisite."""
+    plugin.validate_e0(e0_dir, base_config)
+    import torch
+
+    from pol.paper1.datasets import tensor_hash
+
+    archive = torch.load(
+        e0_dir / "master_initial_conditions.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+    manifest = json.loads(
+        (e0_dir / "master_manifest.json").read_text(encoding="utf-8")
+    )
+    if not isinstance(archive, dict) or not isinstance(
+        archive.get("values"), torch.Tensor
+    ):
+        raise ValueError("external E0 master archive is invalid")
+    actual_hash = tensor_hash(archive["values"])
+    metadata_hash = archive.get("metadata", {}).get("tensor_hash")
+    if actual_hash != metadata_hash or actual_hash != manifest.get("tensor_hash"):
+        raise ValueError("external E0 master tensor identity mismatch")
+    return {
+        "mode": "external",
+        "accepted_config_sha256": _canonical_config_sha256(
+            e0_dir / "accepted_production_config.json"
+        ),
+        "master_tensor_hash": actual_hash,
+    }
 
 
 def matrix_plan_to_dict(
@@ -155,6 +216,113 @@ def _write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> Non
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _validate_aggregate(
+    aggregate_dir: Path, *, plugin: Any
+) -> list[dict[str, Any]]:
+    """Validate the exact aggregate contract and return integrity records."""
+    if aggregate_dir.is_symlink() or not aggregate_dir.is_dir():
+        raise ValueError(f"unsafe or missing aggregate directory: {aggregate_dir}")
+    expected = set(plugin.aggregate_artifact_names())
+    actual: set[str] = set()
+    for path in aggregate_dir.iterdir():
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"aggregate contains non-regular artifact: {path}")
+        actual.add(path.name)
+    if actual != expected:
+        raise ValueError(
+            "matrix aggregate artifact set does not match its contract; "
+            f"missing={sorted(expected-actual)}, extra={sorted(actual-expected)}"
+        )
+    plugin.validate_aggregate(aggregate_dir)
+    records = []
+    for name in sorted(expected):
+        path = aggregate_dir / name
+        if path.stat().st_size <= 0:
+            raise ValueError(f"aggregate artifact is empty: {path}")
+        records.append(
+            {
+                "relative_path": name,
+                "size_bytes": path.stat().st_size,
+                "sha256": file_sha256(path),
+            }
+        )
+    return records
+
+
+def _remove_matrix_child(path: Path, *, run_dir: Path) -> None:
+    if path.parent != run_dir or path.is_symlink():
+        raise ValueError(f"unsafe matrix-owned directory: {path}")
+    if path.exists():
+        if not path.is_dir():
+            raise ValueError(f"matrix-owned path is not a directory: {path}")
+        shutil.rmtree(path)
+
+
+def _collect_and_publish_aggregate(
+    *,
+    run_dir: Path,
+    plugin: Any,
+    cells: list[MatrixCell],
+) -> tuple[dict[str, int], list[dict[str, Any]]]:
+    """Collect into staging and atomically publish with rollback."""
+    aggregate = run_dir / "aggregate"
+    staging = run_dir / ".aggregate.staging"
+    backup = run_dir / ".aggregate.backup"
+    for temporary in (staging, backup):
+        if temporary.exists() or temporary.is_symlink():
+            _remove_matrix_child(temporary, run_dir=run_dir)
+    staging.mkdir()
+    moved_old = False
+    try:
+        counts = plugin.collect(staging, run_dir / "cells", cells)
+        records = _validate_aggregate(staging, plugin=plugin)
+        if aggregate.exists() or aggregate.is_symlink():
+            if aggregate.is_symlink() or not aggregate.is_dir():
+                raise ValueError(f"unsafe aggregate publish target: {aggregate}")
+            os.replace(aggregate, backup)
+            moved_old = True
+        try:
+            os.replace(staging, aggregate)
+        except BaseException:
+            if moved_old and backup.exists() and not aggregate.exists():
+                os.replace(backup, aggregate)
+            raise
+        if backup.exists():
+            _remove_matrix_child(backup, run_dir=run_dir)
+        return counts, records
+    finally:
+        if staging.exists() or staging.is_symlink():
+            _remove_matrix_child(staging, run_dir=run_dir)
+
+
+def _shutdown_process_pool(
+    pool: concurrent.futures.ProcessPoolExecutor,
+    futures: list[concurrent.futures.Future[Any]],
+    *,
+    timeout_seconds: float = 2.0,
+) -> None:
+    """Cancel pending work and bound termination of spawned worker processes."""
+    for future in futures:
+        future.cancel()
+    processes = list((getattr(pool, "_processes", None) or {}).values())
+    pool.shutdown(wait=False, cancel_futures=True)
+    deadline = time.monotonic() + timeout_seconds
+    for process in processes:
+        remaining = max(0.0, deadline - time.monotonic())
+        process.join(remaining)
+    for process in processes:
+        if process.is_alive():
+            process.terminate()
+    deadline = time.monotonic() + timeout_seconds
+    for process in processes:
+        remaining = max(0.0, deadline - time.monotonic())
+        process.join(remaining)
+    for process in processes:
+        if process.is_alive() and hasattr(process, "kill"):
+            process.kill()
+            process.join(timeout_seconds)
 
 
 def _run_e0(
@@ -228,6 +396,34 @@ def _run_matrix_plots(
     )
 
 
+def _record_matrix_plot_request(
+    spec: MatrixRunSpec,
+    *,
+    run_dir: Path,
+    manifest: dict[str, Any],
+    compute_fingerprint: str,
+    request_mode: str,
+    status: str,
+    outcomes: list[dict[str, Any]],
+    failure: str | None,
+) -> None:
+    from pol.plots.provenance import build_plot_request, write_plot_request
+
+    request = build_plot_request(
+        source_spec_path=spec.source_path,
+        compute_fingerprint=compute_fingerprint,
+        tasks=spec.plot_tasks,
+        request_mode=request_mode,
+        status=status,
+        outcomes=outcomes,
+        failure=failure,
+    )
+    write_plot_request(run_dir, request)
+    if request_mode == "initial_run":
+        manifest["initial_plot_request"] = request
+    manifest["last_plot_request"] = request
+
+
 def execute_matrix_run(
     spec: MatrixRunSpec,
     *,
@@ -246,17 +442,43 @@ def execute_matrix_run(
         ),
     )
     plugin, cells, invalid, raw_counts = _prepare(spec)
-    fingerprint = _fingerprint(spec, cells)
+    e0_binding = (
+        _internal_e0_binding(spec)
+        if existing_e0_dir is None
+        else _external_e0_binding(
+            existing_e0_dir, plugin=plugin, base_config=spec.base_config
+        )
+    )
+    compute_fingerprint = _compute_fingerprint(
+        spec, cells, e0_binding=e0_binding
+    )
+    artifact_fingerprint = _artifact_contract_fingerprint(
+        compute_fingerprint, cell_plots=spec.cell_plots
+    )
     if plots_only:
+        if not spec.plots_enabled or not spec.plot_tasks:
+            raise ValueError("--plots-only requires at least one enabled plot task")
         if not (run_dir.exists() or run_dir.is_symlink()):
             raise FileNotFoundError(
                 f"plots-only requires existing matrix run directory: {run_dir}"
             )
         manifest = _validate_owned_matrix(run_dir, spec)
         try:
-            if manifest.get("matrix_fingerprint") != fingerprint:
-                raise ValueError("science fingerprint mismatch for --plots-only")
-            plugin.validate_e0(run_dir / "e0", spec.base_config)
+            if manifest.get("compute_fingerprint") != compute_fingerprint:
+                raise ValueError("compute fingerprint mismatch for --plots-only")
+            if (
+                manifest.get("artifact_contract_fingerprint")
+                != artifact_fingerprint
+            ):
+                raise ValueError(
+                    "artifact contract fingerprint mismatch for --plots-only"
+                )
+            recorded_e0 = manifest.get("e0", {}).get("output_dir")
+            e0_validation_dir = (
+                Path(recorded_e0) if isinstance(recorded_e0, str)
+                else run_dir / "e0"
+            )
+            plugin.validate_e0(e0_validation_dir, spec.base_config)
             for cell in cells:
                 plugin.validate_cell(
                     run_dir / "cells" / cell.cell_id,
@@ -266,18 +488,11 @@ def execute_matrix_run(
                         run_dir / "generated_configs" / f"{cell.cell_id}.json"
                     ),
                 )
-            records = manifest.get("aggregate_artifacts", [])
-            recorded_names = {record["relative_path"] for record in records}
-            actual_names = {
-                path.name
-                for path in (run_dir / "aggregate").iterdir()
-            }
-            expected_names = set(plugin.aggregate_artifact_names())
-            if recorded_names != expected_names or actual_names != expected_names:
-                raise ValueError(
-                    "matrix aggregate artifact set does not match its contract"
-                )
-            for record in records:
+            records = _validate_aggregate(run_dir / "aggregate", plugin=plugin)
+            recorded = manifest.get("aggregate_artifacts", [])
+            if records != recorded:
+                raise ValueError("matrix aggregate integrity records mismatch")
+            for record in recorded:
                 path = run_dir / "aggregate" / record["relative_path"]
                 if (
                     path.is_symlink()
@@ -292,6 +507,16 @@ def execute_matrix_run(
             manifest["plot_status"] = "not_run"
             manifest["plot_tasks"] = []
             manifest["failure"] = f"{type(exc).__name__}: {exc}"
+            _record_matrix_plot_request(
+                spec,
+                run_dir=run_dir,
+                manifest=manifest,
+                compute_fingerprint=compute_fingerprint,
+                request_mode="plots_only",
+                status="not_run",
+                outcomes=[],
+                failure=manifest["failure"],
+            )
             _atomic_json(run_dir / "matrix_manifest.json", manifest)
             return 1
         try:
@@ -300,6 +525,16 @@ def execute_matrix_run(
             manifest["plot_status"] = "pass" if outcomes else "disabled"
             manifest["status"] = "pass"
             manifest["failure"] = None
+            _record_matrix_plot_request(
+                spec,
+                run_dir=run_dir,
+                manifest=manifest,
+                compute_fingerprint=compute_fingerprint,
+                request_mode="plots_only",
+                status=manifest["plot_status"],
+                outcomes=outcomes,
+                failure=None,
+            )
             _atomic_json(run_dir / "matrix_manifest.json", manifest)
             return 0
         except Exception as exc:
@@ -307,6 +542,16 @@ def execute_matrix_run(
             manifest["plot_tasks"] = []
             manifest["failure"] = f"{type(exc).__name__}: {exc}"
             manifest["status"] = "fail" if spec.plots_required else "pass"
+            _record_matrix_plot_request(
+                spec,
+                run_dir=run_dir,
+                manifest=manifest,
+                compute_fingerprint=compute_fingerprint,
+                request_mode="plots_only",
+                status="fail",
+                outcomes=[],
+                failure=manifest["failure"],
+            )
             _atomic_json(run_dir / "matrix_manifest.json", manifest)
             return 1 if spec.plots_required else 0
     old_manifest: dict[str, Any] | None = None
@@ -319,7 +564,10 @@ def execute_matrix_run(
             raise FileExistsError(
                 f"matrix run directory exists and resume=false: {run_dir}"
             )
-        elif old_manifest.get("matrix_fingerprint") != fingerprint:
+        elif (
+            old_manifest.get("artifact_contract_fingerprint")
+            != artifact_fingerprint
+        ):
             raise ValueError("matrix fingerprint mismatch; use a new run name or --force")
     output_root.mkdir(parents=True, exist_ok=True)
     for directory in (
@@ -327,7 +575,6 @@ def execute_matrix_run(
         run_dir / "generated_configs",
         run_dir / "cells",
         run_dir / "logs",
-        run_dir / "aggregate",
     ):
         directory.mkdir(parents=True, exist_ok=True)
 
@@ -342,7 +589,10 @@ def execute_matrix_run(
         "e0_config": str(spec.e0_config),
         "e0_config_sha256": file_sha256(spec.e0_config),
         "run_dir": str(run_dir),
-        "matrix_fingerprint": fingerprint,
+        "matrix_fingerprint": artifact_fingerprint,
+        "compute_fingerprint": compute_fingerprint,
+        "artifact_contract_fingerprint": artifact_fingerprint,
+        "e0_binding": e0_binding,
         "execution": {
             "jobs": spec.jobs,
             "torch_threads_per_job": spec.torch_threads_per_job,
@@ -356,8 +606,11 @@ def execute_matrix_run(
         "status": "running",
         "run_name": spec.name,
         "run_dir": str(run_dir),
-        "matrix_fingerprint": fingerprint,
-        "science_fingerprint": fingerprint,
+        "matrix_fingerprint": artifact_fingerprint,
+        "compute_fingerprint": compute_fingerprint,
+        "artifact_contract_fingerprint": artifact_fingerprint,
+        "science_fingerprint": compute_fingerprint,
+        "e0_binding": e0_binding,
         "compute_status": "running",
         "plot_status": "pending" if spec.plots_enabled else "disabled",
         "plot_tasks": [],
@@ -365,6 +618,12 @@ def execute_matrix_run(
         "raw_run_counts": raw_counts,
         "e0": {"status": "pending", "executed_or_reused": None},
         "cells": [_cell_plan_record(cell, run_dir) | {"status": "pending"} for cell in cells],
+        "aggregate_counts": (
+            old_manifest.get("aggregate_counts") if old_manifest else None
+        ),
+        "aggregate_artifacts": (
+            old_manifest.get("aggregate_artifacts", []) if old_manifest else []
+        ),
         "failure": None,
     }
     _atomic_json(run_dir / "matrix_manifest.json", manifest)
@@ -443,24 +702,27 @@ def execute_matrix_run(
 
         if requests:
             context = multiprocessing.get_context("spawn")
-            with concurrent.futures.ProcessPoolExecutor(
+            pool = concurrent.futures.ProcessPoolExecutor(
                 max_workers=spec.jobs, mp_context=context
-            ) as pool:
-                future_map = {
-                    pool.submit(execute_matrix_cell, request): request
-                    for request in requests
-                }
-                try:
-                    for future in concurrent.futures.as_completed(future_map):
-                        result = future.result()
-                        results[int(result["run_index"])] = result
-                        manifest["cells"][int(result["run_index"])].update(result)
-                        _atomic_json(run_dir / "matrix_manifest.json", manifest)
-                except KeyboardInterrupt:
-                    for future in future_map:
-                        future.cancel()
-                    pool.shutdown(wait=False, cancel_futures=True)
-                    raise
+            )
+            future_map = {
+                pool.submit(execute_matrix_cell, request): request
+                for request in requests
+            }
+            try:
+                for future in concurrent.futures.as_completed(future_map):
+                    result = future.result()
+                    results[int(result["run_index"])] = result
+                    manifest["cells"][int(result["run_index"])].update(result)
+                    _atomic_json(run_dir / "matrix_manifest.json", manifest)
+            except KeyboardInterrupt:
+                _shutdown_process_pool(pool, list(future_map))
+                raise
+            except BaseException:
+                pool.shutdown(wait=True, cancel_futures=True)
+                raise
+            else:
+                pool.shutdown(wait=True)
 
         ordered = [results[cell.run_index] for cell in cells]
         for result in ordered:
@@ -510,36 +772,63 @@ def execute_matrix_run(
             for cell, result in zip(cells, ordered)
             if result["status"] == "pass"
         ]
-        aggregate_counts = plugin.collect(
-            run_dir / "aggregate", run_dir / "cells", passed_cells
-        )
-        aggregate_artifacts = []
-        for path in sorted((run_dir / "aggregate").iterdir()):
-            if path.is_file():
-                aggregate_artifacts.append(
-                    {
-                        "relative_path": path.name,
-                        "size_bytes": path.stat().st_size,
-                        "sha256": file_sha256(path),
-                    }
-                )
         failures = [result for result in ordered if result["status"] != "pass"]
-        manifest["aggregate_counts"] = aggregate_counts
-        manifest["aggregate_artifacts"] = aggregate_artifacts
+        if not failures:
+            aggregate_counts, aggregate_artifacts = (
+                _collect_and_publish_aggregate(
+                    run_dir=run_dir,
+                    plugin=plugin,
+                    cells=passed_cells,
+                )
+            )
+            manifest["aggregate_counts"] = aggregate_counts
+            manifest["aggregate_artifacts"] = aggregate_artifacts
         manifest["compute_status"] = "fail" if failures else "pass"
         manifest["status"] = "fail" if failures else "pass"
         manifest["failure"] = (
             f"{len(failures)} matrix cell(s) failed" if failures else None
         )
+        if failures:
+            manifest["plot_status"] = "not_run"
+            _record_matrix_plot_request(
+                spec,
+                run_dir=run_dir,
+                manifest=manifest,
+                compute_fingerprint=compute_fingerprint,
+                request_mode="initial_run",
+                status="not_run",
+                outcomes=[],
+                failure=manifest["failure"],
+            )
         if not failures:
             try:
                 outcomes = _run_matrix_plots(spec, run_dir)
                 manifest["plot_tasks"] = outcomes
                 manifest["plot_status"] = "pass" if outcomes else "disabled"
+                _record_matrix_plot_request(
+                    spec,
+                    run_dir=run_dir,
+                    manifest=manifest,
+                    compute_fingerprint=compute_fingerprint,
+                    request_mode="initial_run",
+                    status=manifest["plot_status"],
+                    outcomes=outcomes,
+                    failure=None,
+                )
             except Exception as exc:
                 manifest["plot_status"] = "fail"
                 manifest["failure"] = f"{type(exc).__name__}: {exc}"
                 manifest["status"] = "fail" if spec.plots_required else "pass"
+                _record_matrix_plot_request(
+                    spec,
+                    run_dir=run_dir,
+                    manifest=manifest,
+                    compute_fingerprint=compute_fingerprint,
+                    request_mode="initial_run",
+                    status="fail",
+                    outcomes=[],
+                    failure=manifest["failure"],
+                )
         _atomic_json(run_dir / "matrix_manifest.json", manifest)
         return 1 if failures or (
             manifest["plot_status"] == "fail" and spec.plots_required

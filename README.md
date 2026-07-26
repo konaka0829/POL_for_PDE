@@ -62,9 +62,12 @@ pol run configs/runs/paper1_e1_resolution_sweep_smoke.json
 
 The second invocation validates and reuses complete cells. Missing or
 hash-tampered E1 artifacts rerun only their owning cell; aggregate CSV files
-are rebuilt from verified passing cells on every invocation. The older
+are rebuilt from verified passing cells in a sibling staging directory and
+atomically published with an exact file contract. The matrix compute
+fingerprint includes `torch_threads_per_job`, but excludes scheduling
+(`jobs`), resume, and aggregate plot settings. The older
 `scripts/paper1/run_e1_sweep.py` entry remains as a deprecated compatibility
-wrapper and temporarily retains aggregate plotting until Phase 3B.
+wrapper and delegates aggregate plotting to the Phase 3B plot recipe.
 
 ## Artifact-only plots (Phase 3B)
 
@@ -84,7 +87,9 @@ calls a compute recipe. Plot fingerprints contain the recipe/version,
 canonical plot settings, and required input hashes; plot settings are excluded
 from the scientific compute fingerprint. Unchanged plots are reused, missing
 or modified plot outputs are regenerated, and modified compute inputs are
-rejected.
+rejected. The latest request and outcomes are recorded separately in
+`resolved_plot_spec.json` and `last_plot_request`; the immutable compute spec
+and compute fingerprint are not rewritten when only plot settings change.
 
 ## Phase 1 scientific regression baseline
 
@@ -96,16 +101,22 @@ python scripts/dev/generate_paper1_phase1_scientific_baseline.py \
   --e0-dir /absolute/path/to/e0 \
   --e1-dir /absolute/path/to/e1 \
   --e2-dir /absolute/path/to/e2 \
-  --source-revision 59076f9 \
-  --output tests/fixtures/paper1_phase1_scientific_baseline_v2.json
+  --source-revision c038537 \
+  --output tests/fixtures/paper1_phase1_scientific_baseline_v3.json
 ```
 
 Regeneration requires an explicit source revision and `--overwrite` when
 replacing an existing expectation. Review the scientific-core diff and verify
 legacy-wrapper versus unified-runner exact parity before accepting an update.
-Floats and tensors use the documented 12-significant-digit semantic
-canonicalization; execution paths, timestamps, binding hashes, and raw
-PyTorch/PDF bytes are not scientific baseline identities.
+Regression has two deliberately separate layers: same-runtime wrapper/runner
+and matrix scheduling parity remains byte/tensor/pixel exact, while the v3
+saved baseline uses explicit field-aware tolerances for cross-runtime
+BLAS/FFT/LAPACK drift. Discrete selections, row keys, dimensions, dtypes, and
+event order remain exact. Execution paths, timestamps, cache/binding hashes,
+raw CSV/PyTorch/plot hashes, and selected-model weight digests are not
+cross-runtime scientific identities. The generator re-hashes the actual E0
+master tensor and strictly validates manifests, paths, symlinks, and exact
+artifact sets; pytest never updates fixtures automatically.
 
 ## Legacy time-scaled experiments
 
