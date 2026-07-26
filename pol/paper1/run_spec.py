@@ -1,7 +1,7 @@
 """Strict Phase 1 orchestration manifests for Paper 1 runs."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
 import re
@@ -66,6 +66,64 @@ def _positive_int(value: object, path: str) -> int:
 def _resolve_repo_path(value: object, path: str, repo_root: Path) -> Path:
     raw = Path(_string(value, path))
     return (raw if raw.is_absolute() else repo_root / raw).resolve()
+
+
+def _validate_e2_prerequisite_config(e2_config: object, e0_config: object) -> None:
+    """Reject only statically certain E2/E0 prerequisite mismatches."""
+    e2 = e2_config
+    e0 = e0_config
+    for section_name in ("domain", "data"):
+        e2_values = asdict(getattr(e2, section_name))
+        e0_values = asdict(getattr(e0, section_name))
+        for field_name, e2_value in e2_values.items():
+            e0_value = e0_values[field_name]
+            if e2_value != e0_value:
+                raise ValueError(
+                    "E2 prerequisite config mismatch: "
+                    f"{section_name}.{field_name}={e2_value!r} "
+                    f"!= e0.{section_name}.{field_name}={e0_value!r}"
+                )
+    for field_name in ("equation", "nu", "T", "solver", "dealias"):
+        e2_value = getattr(e2.target, field_name)
+        e0_value = getattr(e0.target, field_name)
+        if e2_value != e0_value:
+            raise ValueError(
+                "E2 prerequisite config mismatch: "
+                f"target.{field_name}={e2_value!r} "
+                f"!= e0.target.{field_name}={e0_value!r}"
+            )
+
+    requested_time = (e2.target.dt, e2.target.fine_dt)
+    candidates = {
+        (candidate.dt, candidate.fine_dt)
+        for candidate in e0.e0.time_candidates
+    }
+    if requested_time not in candidates:
+        raise ValueError(
+            "E2 prerequisite config mismatch: "
+            f"target.(dt, fine_dt)={requested_time!r} is not present in "
+            f"e0.time_candidates={list(candidates)!r}"
+        )
+    max_reference = max(e0.e0.reference_nx_candidates)
+    if max_reference < e2.spatial.reference_nx:
+        raise ValueError(
+            "E2 prerequisite config mismatch: "
+            f"max(e0.reference_nx_candidates)={max_reference} "
+            f"< e2.spatial.reference_nx={e2.spatial.reference_nx}"
+        )
+    if e0.e0.q_reference_check < e2.spatial.target_output_dim:
+        raise ValueError(
+            "E2 prerequisite config mismatch: "
+            f"e0.q_reference_check={e0.e0.q_reference_check} "
+            f"< e2.spatial.target_output_dim={e2.spatial.target_output_dim}"
+        )
+    identity_q = e0.e0.model1_identity.target_output_dim
+    if identity_q < e2.spatial.target_output_dim:
+        raise ValueError(
+            "E2 prerequisite config mismatch: "
+            f"e0.model1_identity.target_output_dim={identity_q} "
+            f"< e2.spatial.target_output_dim={e2.spatial.target_output_dim}"
+        )
 
 
 def load_run_spec(path: str | Path, *, repo_root: Path) -> Paper1RunSpec:
@@ -151,8 +209,12 @@ def load_run_spec(path: str | Path, *, repo_root: Path) -> Paper1RunSpec:
         raise ValueError(
             f"config at $.experiment.config does not contain section {kind}"
         )
-    if e0_config is not None and load_config_json(e0_config).e0 is None:
+    prerequisite_config = load_config_json(e0_config) if e0_config else None
+    if prerequisite_config is not None and prerequisite_config.e0 is None:
         raise ValueError("config at $.prerequisites.e0_config does not contain section e0")
+    if kind == "e2":
+        assert prerequisite_config is not None
+        _validate_e2_prerequisite_config(config, prerequisite_config)
 
     return Paper1RunSpec(
         schema_version=schema,
@@ -168,7 +230,9 @@ def load_run_spec(path: str | Path, *, repo_root: Path) -> Paper1RunSpec:
     )
 
 
-def run_spec_to_resolved_dict(spec: Paper1RunSpec) -> dict[str, object]:
+def run_spec_to_resolved_dict(
+    spec: Paper1RunSpec, *, run_dir: Path
+) -> dict[str, object]:
     """Return the resolved public fields of a run spec."""
     return {
         "schema_version": spec.schema_version,
@@ -176,7 +240,7 @@ def run_spec_to_resolved_dict(spec: Paper1RunSpec) -> dict[str, object]:
         "run": {
             "name": spec.name,
             "output_root": str(spec.output_root),
-            "run_dir": str(spec.run_dir.resolve()),
+            "run_dir": str(run_dir),
         },
         "experiment": {
             "kind": spec.kind,

@@ -1,4 +1,4 @@
-"""Thin subprocess orchestration for existing Paper 1 scripts."""
+"""Direct recipe orchestration for Paper 1 experiments."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -11,19 +11,24 @@ import shutil
 import subprocess
 import sys
 import time
-from typing import Any
+import traceback
+from typing import Any, Literal
 
-from .datasets import load_master_dataset
+from pol.runtime.recipe import (
+    RecipeInvocation,
+    RecipeResult,
+    RecipeUsageError,
+    numerical_thread_scope,
+)
+
 from .run_spec import Paper1RunSpec, run_spec_to_resolved_dict
-
-
-_CHILD_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
 class PlannedStep:
-    """One existing child script invocation."""
+    """One recipe invocation with its legacy-equivalent command."""
 
+    recipe_id: Literal["e0", "master_dataset", "e1", "e2"]
     name: str
     command: tuple[str, ...]
     output_dir: Path
@@ -73,6 +78,19 @@ def resolve_run_directory(
     resolved_target = run_dir.resolve(strict=False)
     if resolved_target != run_dir or resolved_target.parent != output_root:
         raise ValueError(f"run directory escapes output root: {run_dir}")
+    protected_paths = {
+        root,
+        Path.home().resolve(),
+        spec.source_path.resolve(),
+        spec.experiment_config.resolve(),
+    }
+    if spec.e0_config is not None:
+        protected_paths.add(spec.e0_config.resolve())
+    for protected in protected_paths:
+        if protected == run_dir or protected.is_relative_to(run_dir):
+            raise ValueError(
+                f"run directory contains protected path {protected}: {run_dir}"
+            )
     return output_root, run_dir
 
 
@@ -84,6 +102,7 @@ def build_plan(spec: Paper1RunSpec, *, repo_root: Path) -> list[PlannedStep]:
     assert e0_config is not None
     steps = [
         PlannedStep(
+            "e0",
             "e0",
             (
                 sys.executable,
@@ -103,6 +122,7 @@ def build_plan(spec: Paper1RunSpec, *, repo_root: Path) -> list[PlannedStep]:
         accepted = run_dir / "e0/accepted_production_config.json"
         steps.append(
             PlannedStep(
+                "master_dataset",
                 "master_dataset",
                 (
                     sys.executable,
@@ -150,6 +170,7 @@ def build_plan(spec: Paper1RunSpec, *, repo_root: Path) -> list[PlannedStep]:
         steps.append(
             PlannedStep(
                 spec.kind,
+                spec.kind,
                 tuple(command),
                 output,
                 run_dir / f"logs/{number}_{spec.kind}.log",
@@ -193,20 +214,6 @@ def _git(root: Path, arguments: list[str]) -> str:
         return "unknown"
 
 
-def _terminate_child(process: subprocess.Popen[str]) -> tuple[int | None, str | None]:
-    """Terminate a running child and report any cleanup failure."""
-    try:
-        if process.poll() is None:
-            process.terminate()
-        try:
-            return process.wait(timeout=_CHILD_CLEANUP_TIMEOUT_SECONDS), None
-        except subprocess.TimeoutExpired:
-            process.kill()
-            return process.wait(timeout=_CHILD_CLEANUP_TIMEOUT_SECONDS), None
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return process.returncode, f"{type(exc).__name__}: {exc}"
-
-
 def _validate_owned_run_directory(run_dir: Path, spec: Paper1RunSpec) -> None:
     """Require an existing replacement target to be owned by this runner."""
     if run_dir.is_symlink():
@@ -234,6 +241,8 @@ def _validate_owned_run_directory(run_dir: Path, spec: Paper1RunSpec) -> None:
 
 def _verify_step(step: PlannedStep) -> None:
     if step.name == "master_dataset":
+        from .datasets import load_master_dataset
+
         load_master_dataset(step.output_dir)
         return
     summary_path = step.output_dir / f"{step.name}_summary.json"
@@ -278,7 +287,13 @@ def _verify_step(step: PlannedStep) -> None:
             raise ValueError("E2 freeze/test event order is invalid")
 
 
-def _manifest(spec: Paper1RunSpec, steps: list[PlannedStep], root: Path) -> dict[str, Any]:
+def _manifest(
+    spec: Paper1RunSpec,
+    steps: list[PlannedStep],
+    root: Path,
+    *,
+    run_dir: Path,
+) -> dict[str, Any]:
     return {
         "schema_version": "paper1-run-manifest-v1",
         "status": "running",
@@ -290,7 +305,7 @@ def _manifest(spec: Paper1RunSpec, steps: list[PlannedStep], root: Path) -> dict
         "python_executable": sys.executable,
         "started_at": _now(),
         "ended_at": None,
-        "run_dir": str(spec.run_dir.resolve()),
+        "run_dir": str(run_dir),
         "steps": [
             {
                 "name": step.name,
@@ -315,8 +330,72 @@ def _manifest(spec: Paper1RunSpec, steps: list[PlannedStep], root: Path) -> dict
     }
 
 
+def _execute_recipe(
+    step: PlannedStep,
+    spec: Paper1RunSpec,
+    *,
+    repo_root: Path,
+    run_dir: Path,
+) -> RecipeResult:
+    """Lazy-import and execute one planned recipe in the current process."""
+    threads = spec.torch_threads if step.recipe_id in {"e1", "e2"} else 1
+    assert threads is not None
+    invocation = RecipeInvocation(
+        repo_root=repo_root,
+        working_directory=repo_root,
+        command=step.command,
+        torch_threads=threads,
+    )
+    with numerical_thread_scope(threads):
+        if step.recipe_id == "e0":
+            from .recipes.foundation_validation import run_foundation_validation
+
+            return run_foundation_validation(
+                step.config_path,
+                step.output_dir,
+                overwrite=True,
+                invocation=invocation,
+            )
+        if step.recipe_id == "master_dataset":
+            from .recipes.master_dataset import run_master_dataset_generation
+
+            return run_master_dataset_generation(
+                step.config_path,
+                step.output_dir,
+                overwrite=True,
+                generate_target=True,
+                master_initial_conditions=run_dir / "e0/master_initial_conditions.pt",
+                invocation=invocation,
+            )
+        if step.recipe_id == "e1":
+            from .recipes.heat_calibration import run_heat_calibration
+
+            return run_heat_calibration(
+                step.config_path,
+                run_dir / "e0",
+                step.output_dir,
+                overwrite=True,
+                skip_plots=spec.skip_plots,
+                invocation=invocation,
+            )
+        from .recipes.surrogate_parameter_time import run_surrogate_parameter_time
+
+        assert spec.batch_size is not None
+        return run_surrogate_parameter_time(
+            step.config_path,
+            run_dir / "e0",
+            run_dir / "master_dataset",
+            step.output_dir,
+            overwrite=True,
+            resume=False,
+            skip_plots=spec.skip_plots,
+            batch_size=spec.batch_size,
+            invocation=invocation,
+        )
+
+
 def execute_run(spec: Paper1RunSpec, *, repo_root: Path, force: bool) -> int:
-    """Execute the planned existing scripts and maintain an atomic manifest."""
+    """Execute recipes directly and maintain an atomic run manifest."""
     root = repo_root.resolve()
     output_root, run_dir = resolve_run_directory(spec, repo_root=root)
     steps = build_plan(spec, repo_root=root)
@@ -327,7 +406,7 @@ def execute_run(spec: Paper1RunSpec, *, repo_root: Path, force: bool) -> int:
         shutil.rmtree(run_dir)
     output_root.mkdir(parents=True, exist_ok=True)
     (run_dir / "logs").mkdir(parents=True)
-    resolved = run_spec_to_resolved_dict(spec)
+    resolved = run_spec_to_resolved_dict(spec, run_dir=run_dir)
     resolved.update(
         {
             "source_run_spec_sha256": _sha256(spec.source_path),
@@ -345,13 +424,12 @@ def execute_run(spec: Paper1RunSpec, *, repo_root: Path, force: bool) -> int:
         }
     )
     _atomic_json(run_dir / "resolved_run_spec.json", resolved)
-    manifest = _manifest(spec, steps, root)
+    manifest = _manifest(spec, steps, root, run_dir=run_dir)
     manifest_path = run_dir / "run_manifest.json"
     _atomic_json(manifest_path, manifest)
 
     current_step_index: int | None = None
     current_started_monotonic: float | None = None
-    process: subprocess.Popen[str] | None = None
     try:
         for index, step in enumerate(steps):
             current_step_index = index
@@ -362,36 +440,29 @@ def execute_run(spec: Paper1RunSpec, *, repo_root: Path, force: bool) -> int:
             if step.config_path.is_file():
                 record["config_sha256"] = _sha256(step.config_path)
             _atomic_json(manifest_path, manifest)
-            environment = os.environ.copy()
-            threads = str(spec.torch_threads if step.name in {"e1", "e2"} else 1)
-            for variable in (
-                "OMP_NUM_THREADS",
-                "MKL_NUM_THREADS",
-                "OPENBLAS_NUM_THREADS",
-                "NUMEXPR_NUM_THREADS",
-            ):
-                environment[variable] = threads
             with step.log_path.open("w", encoding="utf-8") as log:
-                process = subprocess.Popen(
-                    list(step.command),
-                    cwd=root,
-                    env=environment,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                )
-                assert process.stdout is not None
-                for line in process.stdout:
-                    log.write(line)
+                try:
+                    result = _execute_recipe(
+                        step, spec, repo_root=root, run_dir=run_dir)
+                    payload = json.dumps(
+                        result.console_payload,
+                        sort_keys=True,
+                        allow_nan=False,
+                    )
+                    log.write(payload + "\n")
                     log.flush()
-                    print(f"[{step.name}] {line}", end="", flush=True)
-                returncode = process.wait()
-            process = None
-            record["returncode"] = returncode
-            if returncode != 0:
-                raise RuntimeError(f"step {step.name} exited with code {returncode}")
-            _verify_step(step)
+                    print(f"[{step.name}] {payload}", flush=True)
+                    record["returncode"] = result.exit_code
+                    if result.exit_code != 0:
+                        raise RuntimeError(
+                            f"step {step.name} exited with code {result.exit_code}")
+                    _verify_step(step)
+                except BaseException as exc:
+                    if isinstance(exc, RecipeUsageError):
+                        record["returncode"] = 2
+                    log.write(traceback.format_exc())
+                    log.flush()
+                    raise
             record["status"] = "pass"
             record["ended_at"] = _now()
             record["duration_seconds"] = (
@@ -406,19 +477,13 @@ def execute_run(spec: Paper1RunSpec, *, repo_root: Path, force: bool) -> int:
         _atomic_json(manifest_path, manifest)
         return 0
     except KeyboardInterrupt:
-        cleanup_failure = None
-        if process is not None:
-            _, cleanup_failure = _terminate_child(process)
         manifest["status"] = "interrupted"
         manifest["failure"] = "KeyboardInterrupt"
-        if cleanup_failure is not None:
-            manifest["failure"] += f"; child cleanup failed: {cleanup_failure}"
         manifest["ended_at"] = _now()
         if current_step_index is not None:
             record = manifest["steps"][current_step_index]
             if record["status"] == "running":
                 record["status"] = "interrupted"
-                record["returncode"] = process.returncode if process else None
                 record["failure"] = manifest["failure"]
                 record["ended_at"] = _now()
             if current_started_monotonic is not None:
@@ -428,21 +493,13 @@ def execute_run(spec: Paper1RunSpec, *, repo_root: Path, force: bool) -> int:
         _atomic_json(manifest_path, manifest)
         return 130
     except Exception as exc:
-        cleanup_failure = None
-        if process is not None:
-            _, cleanup_failure = _terminate_child(process)
         manifest["status"] = "fail"
         manifest["failure"] = f"{type(exc).__name__}: {exc}"
-        if cleanup_failure is not None:
-            manifest["failure"] += f"; child cleanup failed: {cleanup_failure}"
         manifest["ended_at"] = _now()
         if current_step_index is not None:
             record = manifest["steps"][current_step_index]
             if record["status"] == "running":
                 record["status"] = "fail"
-                record["returncode"] = (
-                    process.returncode if process else record["returncode"]
-                )
                 record["failure"] = manifest["failure"]
                 record["ended_at"] = _now()
                 if current_started_monotonic is not None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,9 +13,15 @@ import torch
 
 from pol.paper1.config import canonical_config_json, load_config_json
 from pol.paper1.datasets import load_master_dataset
+from pol.paper1.e1_qa import model_content_hash, scan_models
 
 
 ROOT = Path(__file__).resolve().parents[1]
+PHASE1_DIGEST = json.loads(
+    (ROOT / "tests/fixtures/paper1_phase1_smoke_scientific_digest.json").read_text(
+        encoding="utf-8"
+    )
+)
 _THREAD_ENV_VARS = (
     "OMP_NUM_THREADS",
     "MKL_NUM_THREADS",
@@ -92,6 +99,17 @@ def _drop(value, excluded: set[str]):
     return value
 
 
+def _canonical_sha256(value: object) -> str:
+    payload = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 @pytest.mark.slow
 def test_e0_direct_and_runner_smoke_parity(tmp_path: Path) -> None:
     env = _thread_env(1)
@@ -106,6 +124,22 @@ def test_e0_direct_and_runner_smoke_parity(tmp_path: Path) -> None:
     direct_master_manifest = _json(direct / "master_manifest.json")
     runner_master_manifest = _json(runner / "master_manifest.json")
     assert direct_master_manifest["tensor_hash"] == runner_master_manifest["tensor_hash"]
+    expected = PHASE1_DIGEST["e0"]
+    assert _canonical_sha256(_json(runner / "e0_summary.json")) == expected[
+        "summary_sha256"
+    ]
+    assert hashlib.sha256(
+        canonical_config_json(runner_config).encode("utf-8")
+    ).hexdigest() == expected["accepted_config_sha256"]
+    assert runner_master_manifest["tensor_hash"] == expected["master_tensor_hash"]
+    for name in (
+        "reference_convergence.csv",
+        "reference_convergence.json",
+        "resampling_checks.json",
+        "input_interface_checks.json",
+        "model1_identity.json",
+    ):
+        assert _file_sha256(runner / name) == expected[name]
 
 
 @pytest.mark.slow
@@ -148,6 +182,26 @@ def test_e1_direct_and_runner_smoke_parity(tmp_path: Path) -> None:
         assert (direct / "e1" / name).read_bytes() == (
             runner / "e1" / name
         ).read_bytes()
+    expected = PHASE1_DIGEST["e1"]
+    assert _canonical_sha256(_json(runner / "e1/e1_summary.json")) == expected[
+        "summary_sha256"
+    ]
+    for name in (
+        "ridge_selection.csv",
+        "selected_results.csv",
+        "readout_diagnostics.csv",
+        "mode_comparison.csv",
+        "noise_results.csv",
+        "noise_summary.csv",
+    ):
+        assert _file_sha256(runner / "e1" / name) == expected[name]
+    effective = load_config_json(runner / "e1/resolved_config.json")
+    assert scan_models(runner / "e1/selected_models.pt", effective) == expected[
+        "selected_models_content_hash"
+    ]
+    assert sorted(path.name for path in (runner / "e1").glob("*.png")) == expected[
+        "plot_files"
+    ]
 
 
 @pytest.mark.slow
@@ -258,6 +312,44 @@ def test_e2_direct_and_runner_smoke_parity(tmp_path: Path) -> None:
         row["event"] for row in _json(runner_out / "event_log.json")["events"]
     ]
     assert direct_events == runner_events
+    expected = PHASE1_DIGEST["e2"]
+    assert runner_summary["schema_version"] == expected["schema_version"]
+    for name in ("model_specific_optima.json", "shared_representatives.json"):
+        assert _canonical_sha256(_drop(_json(runner_out / name), provenance)) == (
+            expected[name]
+        )
+    for name in ("coordinate_history.json", "convergence_summary.json"):
+        assert _canonical_sha256(_drop(_json(runner_out / name), provenance)) == (
+            expected[name]
+        )
+    selection = _json(runner_out / "selection_record.json")
+    selection.pop("bindings", None)
+    assert _canonical_sha256(_drop(selection, provenance)) == expected[
+        "selection_record.json"
+    ]
+    for name in (
+        "validation_sweep.csv",
+        "model3_validation_by_seed.csv",
+        "convergence_results.csv",
+        "solver_metadata.csv",
+        "physical_point_aliases.csv",
+    ):
+        assert _file_sha256(runner_out / name) == expected[name]
+    for name in (
+        "test_sweep.csv",
+        "model3_test_by_seed.csv",
+        "model3_test_aggregate.csv",
+    ):
+        assert _canonical_sha256(_csv_without(runner_out / name, provenance)) == (
+            expected[name]
+        )
+    selected_payload = torch.load(
+        runner_out / "selected_models.pt", map_location="cpu", weights_only=False
+    )
+    assert model_content_hash(selected_payload["models"]) == expected[
+        "selected_models_content_hash"
+    ]
+    assert runner_events == expected["event_names"]
     for names in (direct_events, runner_events):
         assert names.index("freeze_read_back") < names.index("first_test_state_solve")
         assert names.index("first_test_state_solve") < names.index(

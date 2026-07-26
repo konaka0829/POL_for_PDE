@@ -22,4 +22,4 @@ pol = "pol.cli:main"
 test = ["pytest>=7.0"]
 
 [tool.setuptools]
-packages = ["pol", "pol.model123_1d", "pol.paper1"]
+packages = ["pol", "pol.model123_1d", "pol.paper1", "pol.runtime", "pol.paper1.recipes"]

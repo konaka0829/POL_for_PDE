@@ -84,3 +84,51 @@ def test_non_object_and_missing_key(tmp_path: Path) -> None:
     del value["run"]["name"]
     with pytest.raises(ValueError, match=r"\$\.run\.name"):
         _load(tmp_path, value)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda e0, e2: e2["domain"].update({"length": 2.0}),
+            r"domain\.length=2\.0",
+        ),
+        (
+            lambda e0, e2: e2["target"].update({"fine_dt": 0.001}),
+            r"target\.\(dt, fine_dt\).+not present",
+        ),
+        (
+            lambda e0, e2: (
+                e0["e0"].update({"q_reference_check": 15}),
+                e0["e0"]["model1_identity"].update({"target_output_dim": 15}),
+            ),
+            r"e0\.q_reference_check=15.+target_output_dim=17",
+        ),
+    ],
+)
+def test_e2_static_prerequisite_mismatch_is_rejected(
+    tmp_path: Path, mutation, message: str
+) -> None:
+    e0 = json.loads(
+        (ROOT / "configs/paper1_e0_smoke.json").read_text(encoding="utf-8")
+    )
+    e2 = json.loads(
+        (ROOT / "configs/paper1_e2_smoke.json").read_text(encoding="utf-8")
+    )
+    mutation(e0, e2)
+    e0_path = tmp_path / "e0.json"
+    e2_path = tmp_path / "e2.json"
+    e0_path.write_text(json.dumps(e0), encoding="utf-8")
+    e2_path.write_text(json.dumps(e2), encoding="utf-8")
+    run = _raw("e2")
+    run["experiment"]["config"] = str(e2_path)
+    run["prerequisites"]["e0_config"] = str(e0_path)
+    with pytest.raises(ValueError, match=message):
+        _load(tmp_path, run)
+
+
+def test_repository_e2_main_static_prerequisite_is_compatible() -> None:
+    spec = load_run_spec(
+        ROOT / "configs/runs/paper1_e2_main.json", repo_root=ROOT
+    )
+    assert spec.kind == "e2"
