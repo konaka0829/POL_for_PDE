@@ -66,6 +66,26 @@ are rebuilt from verified passing cells on every invocation. The older
 `scripts/paper1/run_e1_sweep.py` entry remains as a deprecated compatibility
 wrapper and temporarily retains aggregate plotting until Phase 3B.
 
+## Artifact-only plots (Phase 3B)
+
+Unified E1, E2, and E1 matrix runs execute compute recipes with inline plots
+disabled, then render registered plot tasks under
+`<run-dir>/figures/<plot-recipe-id>/`. Compute artifact directories remain
+unchanged. Legacy E1/E2 scripts retain their inline-plot behavior.
+
+```bash
+pol run configs/runs/paper1_e1_smoke.json --plots-only
+pol run configs/runs/paper1_e2_smoke.json --plots-only
+pol run configs/runs/paper1_e1_resolution_sweep_smoke.json --plots-only
+```
+
+`--plots-only` verifies the existing runner-owned compute artifacts and never
+calls a compute recipe. Plot fingerprints contain the recipe/version,
+canonical plot settings, and required input hashes; plot settings are excluded
+from the scientific compute fingerprint. Unchanged plots are reused, missing
+or modified plot outputs are regenerated, and modified compute inputs are
+rejected.
+
 ## Phase 1 scientific regression baseline
 
 The checked-in semantic baseline is generated only from already completed,

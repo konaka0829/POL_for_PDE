@@ -99,6 +99,9 @@ def _compatibility_spec(args: argparse.Namespace) -> tuple[MatrixRunSpec, dict]:
         not args.no_resume,
         args.with_per_run_plots,
         "paper1_e1_resolution_v1",
+        False,
+        False,
+        (),
         source,
         old,
     )

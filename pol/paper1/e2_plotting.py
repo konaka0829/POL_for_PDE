@@ -10,7 +10,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-def create_e2_plots(output_dir: Path, result: dict[str, Any], config: Any) -> list[dict[str, Any]]:
+def create_e2_plots(
+    output_dir: Path,
+    result: dict[str, Any],
+    config: Any,
+    *,
+    formats: tuple[str, ...] = ("png", "pdf"),
+    dpi: int = 180,
+) -> list[dict[str, Any]]:
     e2 = config.e2
     assert e2 is not None
     rows = result["test_sweep"]
@@ -58,8 +65,8 @@ def create_e2_plots(output_dir: Path, result: dict[str, Any], config: Any) -> li
     fig.supylabel("test full-reference relative L2")
     fig.tight_layout()
     outputs = []
-    for fmt in ("png", "pdf"):
-        path = output_dir / f"e2_parameter_sweeps.{fmt}"; fig.savefig(path, dpi=180, bbox_inches="tight")
+    for fmt in formats:
+        path = output_dir / f"e2_parameter_sweeps.{fmt}"; fig.savefig(path, dpi=dpi, bbox_inches="tight")
         outputs.append({"status": "created", "relative_path": path.name,
                         "size_bytes": path.stat().st_size,
                         "format": fmt, "kind": "parameter_sweeps",
@@ -91,8 +98,8 @@ def create_e2_plots(output_dir: Path, result: dict[str, Any], config: Any) -> li
                        label=f"reference={x[-1]}")
         ax.set_yscale("log"); ax.set_xlabel("n_sur"); ax.set_title(family); ax.grid(True, which="both", alpha=.25)
     axes[0].set_ylabel("relative L2 discrepancy"); axes[0].legend(fontsize=8); fig.tight_layout()
-    for fmt in ("png", "pdf"):
-        path = output_dir / f"e2_nsur_convergence.{fmt}"; fig.savefig(path, dpi=180, bbox_inches="tight")
+    for fmt in formats:
+        path = output_dir / f"e2_nsur_convergence.{fmt}"; fig.savefig(path, dpi=dpi, bbox_inches="tight")
         outputs.append({"status": "created", "relative_path": path.name,
                         "size_bytes": path.stat().st_size,
                         "format": fmt, "kind": "n_sur_convergence",

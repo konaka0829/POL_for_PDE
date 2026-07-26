@@ -274,7 +274,8 @@ def _plot_inventory(directory: Path) -> list[dict[str, str]]:
     if manifest.get("status") != "pass":
         raise ValueError(f"plot manifest is not pass: {directory}")
     inventory = []
-    for record in manifest.get("plots", []):
+    records = manifest.get("plots", manifest.get("outputs", []))
+    for record in records:
         relative = record["relative_path"]
         path = directory / relative
         if not path.is_file() or path.stat().st_size <= 0:
@@ -333,7 +334,9 @@ def build_e0_scientific_record(e0_dir: Path) -> dict[str, Any]:
     }
 
 
-def build_e1_scientific_record(e1_dir: Path) -> dict[str, Any]:
+def build_e1_scientific_record(
+    e1_dir: Path, *, plot_dir: Path | None = None
+) -> dict[str, Any]:
     """Build the semantic E1 portion after manifest verification."""
     e1_summary = _require_pass(e1_dir, "e1_summary.json")
     _verify_artifact_manifest(e1_dir)
@@ -341,11 +344,13 @@ def build_e1_scientific_record(e1_dir: Path) -> dict[str, Any]:
         "summary": canonicalize_scientific(e1_summary),
         "tables": {name: canonical_csv(e1_dir / name) for name in E1_TABLES},
         "selected_models": semantic_model_digest(e1_dir / "selected_models.pt"),
-        "plots": _plot_inventory(e1_dir),
+        "plots": _plot_inventory(e1_dir if plot_dir is None else plot_dir),
     }
 
 
-def build_e2_scientific_record(e2_dir: Path) -> dict[str, Any]:
+def build_e2_scientific_record(
+    e2_dir: Path, *, plot_dir: Path | None = None
+) -> dict[str, Any]:
     """Build the semantic E2 portion after contract and event verification."""
     e2_summary = _require_pass(e2_dir, "e2_summary.json")
     _verify_artifact_manifest(e2_dir)
@@ -374,7 +379,7 @@ def build_e2_scientific_record(e2_dir: Path) -> dict[str, Any]:
         },
         "tables": {name: canonical_csv(e2_dir / name) for name in E2_TABLES},
         "selected_models": semantic_model_digest(e2_dir / "selected_models.pt"),
-        "plots": _plot_inventory(e2_dir),
+        "plots": _plot_inventory(e2_dir if plot_dir is None else plot_dir),
         "event_sequence": events,
     }
 

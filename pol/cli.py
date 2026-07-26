@@ -79,6 +79,11 @@ def _build_main_parser() -> argparse.ArgumentParser:
     modes = run.add_mutually_exclusive_group()
     modes.add_argument("--plan", action="store_true", help="print the plan without side effects")
     modes.add_argument("--force", action="store_true", help="replace only this run directory")
+    modes.add_argument(
+        "--plots-only",
+        action="store_true",
+        help="verify compute artifacts and execute only plot tasks",
+    )
     return parser
 
 
@@ -106,7 +111,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return 0
             return execute_matrix_run(
-                matrix_spec, repo_root=repo_root, force=args.force
+                matrix_spec,
+                repo_root=repo_root,
+                force=args.force,
+                plots_only=args.plots_only,
             )
         from .paper1.run_spec import load_run_spec
         from .paper1.runner import execute_run, plan_to_dict
@@ -121,7 +129,12 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
             return 0
-        return execute_run(spec, repo_root=repo_root, force=args.force)
+        return execute_run(
+            spec,
+            repo_root=repo_root,
+            force=args.force,
+            plots_only=args.plots_only,
+        )
     except (OSError, ValueError) as exc:
         print(f"pol: error: {exc}", file=sys.stderr)
         return 2

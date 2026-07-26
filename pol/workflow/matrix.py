@@ -97,6 +97,14 @@ def matrix_plan_to_dict(
         "raw_run_counts": raw_counts,
         "unique_valid_cells": len(cells),
         "invalid_runs": invalid,
+        "plots": {
+            "enabled": spec.plots_enabled,
+            "required": spec.plots_required,
+            "tasks": [
+                {"recipe_id": task.recipe_id, "settings": dict(task.settings)}
+                for task in spec.plot_tasks
+            ],
+        },
         **plugin.plan_summary(cells),
         "cells": [_cell_plan_record(cell, run_dir) for cell in cells],
     }
@@ -188,12 +196,28 @@ def _reuse_result(
     }
 
 
+def _run_matrix_plots(
+    spec: MatrixRunSpec, run_dir: Path
+) -> list[dict[str, Any]]:
+    if not spec.plots_enabled:
+        return []
+    from pol.plots.runtime import execute_plot_tasks
+
+    return execute_plot_tasks(
+        experiment_kind="e1_matrix",
+        input_dir=run_dir / "aggregate",
+        figures_dir=run_dir / "figures",
+        tasks=spec.plot_tasks,
+    )
+
+
 def execute_matrix_run(
     spec: MatrixRunSpec,
     *,
     repo_root: Path,
     force: bool,
     existing_e0_dir: Path | None = None,
+    plots_only: bool = False,
 ) -> int:
     """Execute a matrix with spawned workers, strict resume, and fresh aggregation."""
     root = repo_root.resolve()
@@ -206,6 +230,44 @@ def execute_matrix_run(
     )
     plugin, cells, invalid, raw_counts = _prepare(spec)
     fingerprint = _fingerprint(spec, cells)
+    if plots_only:
+        if not (run_dir.exists() or run_dir.is_symlink()):
+            raise FileNotFoundError(
+                f"plots-only requires existing matrix run directory: {run_dir}"
+            )
+        manifest = _validate_owned_matrix(run_dir, spec)
+        if manifest.get("matrix_fingerprint") != fingerprint:
+            raise ValueError("science fingerprint mismatch for --plots-only")
+        plugin.validate_e0(run_dir / "e0", spec.base_config)
+        for cell in cells:
+            plugin.validate_cell(
+                run_dir / "cells" / cell.cell_id,
+                cell_plots=spec.cell_plots,
+            )
+        for record in manifest.get("aggregate_artifacts", []):
+            path = run_dir / "aggregate" / record["relative_path"]
+            if (
+                not path.is_file()
+                or path.stat().st_size != record["size_bytes"]
+                or file_sha256(path) != record["sha256"]
+            ):
+                raise ValueError(f"matrix aggregate artifact tampered: {path}")
+        if spec.plots_enabled and not manifest.get("aggregate_artifacts"):
+            raise ValueError("matrix aggregate integrity records are missing")
+        try:
+            outcomes = _run_matrix_plots(spec, run_dir)
+            manifest["plot_tasks"] = outcomes
+            manifest["plot_status"] = "pass" if outcomes else "disabled"
+            manifest["status"] = "pass"
+            manifest["failure"] = None
+            _atomic_json(run_dir / "matrix_manifest.json", manifest)
+            return 0
+        except Exception as exc:
+            manifest["plot_status"] = "fail"
+            manifest["failure"] = f"{type(exc).__name__}: {exc}"
+            manifest["status"] = "fail" if spec.plots_required else "pass"
+            _atomic_json(run_dir / "matrix_manifest.json", manifest)
+            return 1 if spec.plots_required else 0
     old_manifest: dict[str, Any] | None = None
     if run_dir.exists() or run_dir.is_symlink():
         old_manifest = _validate_owned_matrix(run_dir, spec)
@@ -240,6 +302,10 @@ def execute_matrix_run(
         "e0_config_sha256": file_sha256(spec.e0_config),
         "run_dir": str(run_dir),
         "matrix_fingerprint": fingerprint,
+        "science_fingerprint": fingerprint,
+        "compute_status": "running",
+        "plot_status": "pending" if spec.plots_enabled else "disabled",
+        "plot_tasks": [],
         "execution": {
             "jobs": spec.jobs,
             "torch_threads_per_job": spec.torch_threads_per_job,
@@ -405,21 +471,46 @@ def execute_matrix_run(
         aggregate_counts = plugin.collect(
             run_dir / "aggregate", run_dir / "cells", passed_cells
         )
+        aggregate_artifacts = []
+        for path in sorted((run_dir / "aggregate").iterdir()):
+            if path.is_file():
+                aggregate_artifacts.append(
+                    {
+                        "relative_path": path.name,
+                        "size_bytes": path.stat().st_size,
+                        "sha256": file_sha256(path),
+                    }
+                )
         failures = [result for result in ordered if result["status"] != "pass"]
         manifest["aggregate_counts"] = aggregate_counts
+        manifest["aggregate_artifacts"] = aggregate_artifacts
+        manifest["compute_status"] = "fail" if failures else "pass"
         manifest["status"] = "fail" if failures else "pass"
         manifest["failure"] = (
             f"{len(failures)} matrix cell(s) failed" if failures else None
         )
+        if not failures:
+            try:
+                outcomes = _run_matrix_plots(spec, run_dir)
+                manifest["plot_tasks"] = outcomes
+                manifest["plot_status"] = "pass" if outcomes else "disabled"
+            except Exception as exc:
+                manifest["plot_status"] = "fail"
+                manifest["failure"] = f"{type(exc).__name__}: {exc}"
+                manifest["status"] = "fail" if spec.plots_required else "pass"
         _atomic_json(run_dir / "matrix_manifest.json", manifest)
-        return 1 if failures else 0
+        return 1 if failures or (
+            manifest["plot_status"] == "fail" and spec.plots_required
+        ) else 0
     except KeyboardInterrupt:
         manifest["status"] = "interrupted"
+        manifest["compute_status"] = "interrupted"
         manifest["failure"] = "KeyboardInterrupt"
         _atomic_json(run_dir / "matrix_manifest.json", manifest)
         return 130
     except Exception as exc:
         manifest["status"] = "fail"
+        manifest["compute_status"] = "fail"
         manifest["failure"] = f"{type(exc).__name__}: {exc}"
         _atomic_json(run_dir / "matrix_manifest.json", manifest)
         return 1

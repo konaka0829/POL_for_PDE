@@ -40,9 +40,9 @@ def test_plans_describe_direct_recipes(kind: str, names: list[str]) -> None:
 
 
 @pytest.mark.parametrize("kind", ["e1", "e2"])
-def test_skip_plots_is_conditional(kind: str) -> None:
+def test_unified_compute_always_skips_inline_plots(kind: str) -> None:
     spec = _spec(kind)
-    assert build_plan(spec, repo_root=ROOT)[-1].parameters["skip_plots"] is False
+    assert build_plan(spec, repo_root=ROOT)[-1].parameters["skip_plots"] is True
     enabled = spec.__class__(**{**spec.__dict__, "skip_plots": True})
     assert build_plan(enabled, repo_root=ROOT)[-1].parameters["skip_plots"] is True
 
@@ -362,12 +362,126 @@ def test_recipe_thread_scope_matches_step_policy(
         capture,
     )
     monkeypatch.setattr(runner_module, "_verify_step", lambda step: None)
+    monkeypatch.setattr(runner_module, "_run_plots", lambda *args, **kwargs: [])
     assert execute_run(spec, repo_root=ROOT, force=False) == 0
     assert observed == [
         ("e0", 1, 1, ("1",) * 4),
         ("master_dataset", 1, 1, ("1",) * 4),
         ("e2", 3, 3, ("3",) * 4),
     ]
+
+
+def test_plots_only_never_calls_compute_and_records_reuse(
+    tmp_path: Path, monkeypatch
+) -> None:
+    spec = _temp_spec(tmp_path, "e1")
+    run_dir = spec.run_dir
+    run_dir.mkdir(parents=True)
+    manifest = {
+        "schema_version": "paper1-run-manifest-v1",
+        "status": "pass",
+        "run_name": spec.name,
+        "run_dir": str(run_dir),
+        "science_fingerprint": runner_module.science_fingerprint(spec),
+        "compute_status": "pass",
+        "steps": [],
+    }
+    (run_dir / "run_manifest.json").write_text(json.dumps(manifest))
+    monkeypatch.setattr(
+        runner_module,
+        "_execute_recipe",
+        lambda *args, **kwargs: pytest.fail("compute recipe called"),
+    )
+    monkeypatch.setattr(
+        runner_module, "_verify_compute_for_plots", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "_run_plots",
+        lambda *args, **kwargs: [
+            {
+                "recipe_id": "paper1.e1.standard.v1",
+                "status": "pass",
+                "executed_or_reused": "reused",
+                "plot_fingerprint": "abc",
+            }
+        ],
+    )
+    assert execute_run(
+        spec, repo_root=ROOT, force=False, plots_only=True
+    ) == 0
+    saved = json.loads((run_dir / "run_manifest.json").read_text())
+    assert saved["compute_status"] == "pass"
+    assert saved["plot_status"] == "pass"
+    assert saved["plot_tasks"][0]["executed_or_reused"] == "reused"
+
+
+@pytest.mark.parametrize(("required", "expected"), [(True, 1), (False, 0)])
+def test_plot_failure_does_not_change_compute_status(
+    tmp_path: Path, monkeypatch, required: bool, expected: int
+) -> None:
+    spec = replace(_temp_spec(tmp_path, "e1"), plots_required=required)
+    run_dir = spec.run_dir
+    run_dir.mkdir(parents=True)
+    manifest = {
+        "schema_version": "paper1-run-manifest-v1",
+        "status": "pass",
+        "run_name": spec.name,
+        "run_dir": str(run_dir),
+        "science_fingerprint": runner_module.science_fingerprint(spec),
+        "compute_status": "pass",
+        "steps": [],
+    }
+    (run_dir / "run_manifest.json").write_text(json.dumps(manifest))
+    monkeypatch.setattr(
+        runner_module, "_verify_compute_for_plots", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "_run_plots",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("plot failed")),
+    )
+    assert execute_run(
+        spec, repo_root=ROOT, force=False, plots_only=True
+    ) == expected
+    saved = json.loads((run_dir / "run_manifest.json").read_text())
+    assert saved["compute_status"] == "pass"
+    assert saved["plot_status"] == "fail"
+
+
+def test_plots_only_rejects_compute_tamper_before_plotting(
+    tmp_path: Path, monkeypatch
+) -> None:
+    spec = _temp_spec(tmp_path, "e1")
+    run_dir = spec.run_dir
+    run_dir.mkdir(parents=True)
+    (run_dir / "run_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "paper1-run-manifest-v1",
+                "status": "pass",
+                "run_name": spec.name,
+                "run_dir": str(run_dir),
+                "science_fingerprint": runner_module.science_fingerprint(spec),
+                "compute_status": "pass",
+                "steps": [],
+            }
+        )
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "_verify_compute_for_plots",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ValueError("compute artifact tampered")
+        ),
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "_run_plots",
+        lambda *args, **kwargs: pytest.fail("plot task called"),
+    )
+    with pytest.raises(ValueError, match="compute artifact tampered"):
+        execute_run(spec, repo_root=ROOT, force=False, plots_only=True)
 
 
 def test_keyboard_interrupt_records_and_returns_130(tmp_path: Path, monkeypatch) -> None:

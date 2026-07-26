@@ -48,6 +48,26 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def science_fingerprint(spec: Paper1RunSpec) -> str:
+    """Hash only scientific inputs and compute-affecting execution settings."""
+    payload = {
+        "kind": spec.kind,
+        "experiment_config_sha256": _sha256(spec.experiment_config),
+        "e0_config_sha256": _sha256(spec.e0_config) if spec.e0_config else None,
+        "recipe_protocol": {
+            "e0": "paper1-e0-v2",
+            "e1": "paper1-e1-v2",
+            "e2": "paper1-e2-v3",
+        }[spec.kind],
+        "torch_threads": spec.torch_threads,
+        "batch_size": spec.batch_size,
+    }
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -165,8 +185,7 @@ def build_plan(spec: Paper1RunSpec, *, repo_root: Path) -> list[PlannedStep]:
         )
         if spec.kind == "e2":
             command.extend(["--batch-size", str(spec.batch_size)])
-        if spec.skip_plots:
-            command.append("--skip-plots")
+        command.append("--skip-plots")
         steps.append(
             PlannedStep(
                 spec.kind,
@@ -193,7 +212,7 @@ def build_plan(spec: Paper1RunSpec, *, repo_root: Path) -> list[PlannedStep]:
                     "output_dir": str(output),
                     "overwrite": True,
                     **({"resume": False} if spec.kind == "e2" else {}),
-                    "skip_plots": spec.skip_plots,
+                    "skip_plots": True,
                     "torch_threads": spec.torch_threads,
                     **(
                         {"batch_size": spec.batch_size}
@@ -215,6 +234,15 @@ def plan_to_dict(spec: Paper1RunSpec, *, repo_root: Path) -> dict[str, object]:
         "run_name": spec.name,
         "experiment_kind": spec.kind,
         "run_dir": str(run_dir),
+        "science_fingerprint": science_fingerprint(spec),
+        "plots": {
+            "enabled": spec.plots_enabled,
+            "required": spec.plots_required,
+            "tasks": [
+                {"recipe_id": task.recipe_id, "settings": dict(task.settings)}
+                for task in spec.plot_tasks
+            ],
+        },
         "steps": [
             {
                 "name": step.name,
@@ -337,6 +365,18 @@ def _manifest(
         "started_at": _now(),
         "ended_at": None,
         "run_dir": str(run_dir),
+        "science_fingerprint": science_fingerprint(spec),
+        "compute_status": "running",
+        "plot_status": "pending" if spec.plots_enabled else "disabled",
+        "plot_tasks": [],
+        "plots": {
+            "enabled": spec.plots_enabled,
+            "required": spec.plots_required,
+            "tasks": [
+                {"recipe_id": task.recipe_id, "settings": dict(task.settings)}
+                for task in spec.plot_tasks
+            ],
+        },
         "steps": [
             {
                 "name": step.name,
@@ -415,7 +455,9 @@ def _execute_recipe(
                 run_dir / "e0",
                 step.output_dir,
                 overwrite=True,
-                skip_plots=spec.skip_plots,
+                skip_plots=True,
+                # Unified execution keeps compute artifacts immutable; plotting
+                # is a separate artifact-only task.
                 invocation=invocation,
             )
         if step.recipe_id == "e2":
@@ -431,7 +473,7 @@ def _execute_recipe(
                 step.output_dir,
                 overwrite=True,
                 resume=False,
-                skip_plots=spec.skip_plots,
+                skip_plots=True,
                 batch_size=spec.batch_size,
                 invocation=invocation,
             )
@@ -453,11 +495,73 @@ def _validate_recipe_result(step: PlannedStep, result: RecipeResult) -> None:
         )
 
 
-def execute_run(spec: Paper1RunSpec, *, repo_root: Path, force: bool) -> int:
+def _verify_compute_for_plots(spec: Paper1RunSpec, steps: list[PlannedStep]) -> None:
+    for step in steps:
+        _verify_step(step)
+    output = steps[-1].output_dir
+    if spec.kind == "e1":
+        from .matrix_plugins.e1_resolution import E1ResolutionPlugin
+
+        E1ResolutionPlugin().validate_cell(output, cell_plots=False)
+    elif spec.kind == "e2":
+        from .e2_qa import validate_resume_output
+
+        if not validate_resume_output(output):
+            raise ValueError("E2 compute output is not a reusable pass output")
+
+
+def _run_plots(
+    spec: Paper1RunSpec, *, run_dir: Path
+) -> list[dict[str, Any]]:
+    if not spec.plots_enabled:
+        return []
+    from pol.plots.runtime import execute_plot_tasks
+
+    return execute_plot_tasks(
+        experiment_kind=spec.kind,
+        input_dir=run_dir / spec.kind,
+        figures_dir=run_dir / "figures",
+        tasks=spec.plot_tasks,
+    )
+
+
+def execute_run(
+    spec: Paper1RunSpec,
+    *,
+    repo_root: Path,
+    force: bool,
+    plots_only: bool = False,
+) -> int:
     """Execute recipes directly and maintain an atomic run manifest."""
     root = repo_root.resolve()
     output_root, run_dir = resolve_run_directory(spec, repo_root=root)
     steps = build_plan(spec, repo_root=root)
+    if plots_only:
+        if not (run_dir.exists() or run_dir.is_symlink()):
+            raise FileNotFoundError(f"plots-only requires existing run directory: {run_dir}")
+        _validate_owned_run_directory(run_dir, spec)
+        manifest_path = run_dir / "run_manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        expected_fingerprint = science_fingerprint(spec)
+        if manifest.get("science_fingerprint") != expected_fingerprint:
+            raise ValueError("science fingerprint mismatch for --plots-only")
+        _verify_compute_for_plots(spec, steps)
+        try:
+            outcomes = _run_plots(spec, run_dir=run_dir)
+            manifest["plot_tasks"] = outcomes
+            manifest["plot_status"] = "pass" if outcomes else "disabled"
+            manifest["status"] = "pass"
+            manifest["failure"] = None
+            manifest["ended_at"] = _now()
+            _atomic_json(manifest_path, manifest)
+            return 0
+        except Exception as exc:
+            manifest["plot_status"] = "fail"
+            manifest["failure"] = f"{type(exc).__name__}: {exc}"
+            manifest["status"] = "fail" if spec.plots_required else "pass"
+            manifest["ended_at"] = _now()
+            _atomic_json(manifest_path, manifest)
+            return 1 if spec.plots_required else 0
     if run_dir.exists() or run_dir.is_symlink():
         if not force:
             raise FileExistsError(f"run directory already exists: {run_dir}; pass --force")
@@ -539,6 +643,19 @@ def execute_run(spec: Paper1RunSpec, *, repo_root: Path, force: bool) -> int:
             _atomic_json(manifest_path, manifest)
             current_step_index = None
             current_started_monotonic = None
+        manifest["compute_status"] = "pass"
+        try:
+            outcomes = _run_plots(spec, run_dir=run_dir)
+            manifest["plot_tasks"] = outcomes
+            manifest["plot_status"] = "pass" if outcomes else "disabled"
+        except Exception as exc:
+            manifest["plot_status"] = "fail"
+            manifest["failure"] = f"{type(exc).__name__}: {exc}"
+            manifest["status"] = "fail" if spec.plots_required else "pass"
+            manifest["ended_at"] = _now()
+            manifest["final_result_dir"] = str(run_dir / spec.kind)
+            _atomic_json(manifest_path, manifest)
+            return 1 if spec.plots_required else 0
         manifest["status"] = "pass"
         manifest["ended_at"] = _now()
         manifest["final_result_dir"] = str(run_dir / spec.kind)
@@ -546,6 +663,7 @@ def execute_run(spec: Paper1RunSpec, *, repo_root: Path, force: bool) -> int:
         return 0
     except KeyboardInterrupt:
         manifest["status"] = "interrupted"
+        manifest["compute_status"] = "interrupted"
         manifest["failure"] = "KeyboardInterrupt"
         manifest["ended_at"] = _now()
         if current_step_index is not None:
@@ -562,6 +680,7 @@ def execute_run(spec: Paper1RunSpec, *, repo_root: Path, force: bool) -> int:
         return 130
     except Exception as exc:
         manifest["status"] = "fail"
+        manifest["compute_status"] = "fail"
         manifest["failure"] = f"{type(exc).__name__}: {exc}"
         manifest["ended_at"] = _now()
         if current_step_index is not None:

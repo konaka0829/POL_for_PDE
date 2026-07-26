@@ -39,6 +39,8 @@ def test_wheel_contains_all_pol_packages(tmp_path: Path) -> None:
         "pol/paper1",
         "pol/paper1/recipes",
         "pol/paper1/matrix_plugins",
+        "pol/paper1/plot_recipes",
+        "pol/plots",
         "pol/runtime",
         "pol/workflow",
     ):

@@ -8,12 +8,15 @@ import subprocess
 import sys
 
 import pytest
+from PIL import Image
 
 from pol.paper1.config import canonical_config_json, load_config_json
 from pol.paper1.regression_baseline import (
     canonicalize_scientific,
     semantic_model_digest,
 )
+from pol.plots.runtime import execute_plot_tasks
+from pol.plots.types import PlotTaskSpec
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -108,10 +111,17 @@ def test_matrix_jobs_are_deterministic_and_match_legacy_baseline(
     for spec in (first_spec, second_spec):
         result = _run(["-m", "pol", "run", str(spec)])
         assert result.returncode == 0, result.stdout + result.stderr
+        result = _run(["-m", "pol", "run", str(spec), "--plots-only"])
+        assert result.returncode == 0, result.stdout + result.stderr
     first = tmp_path / "jobs1"
     second = tmp_path / "jobs2"
     _assert_baseline(first)
     _assert_baseline(second)
+    for run_dir in (first, second):
+        manifest = json.loads((run_dir / "matrix_manifest.json").read_text())
+        assert manifest["compute_status"] == "pass"
+        assert manifest["plot_status"] == "pass"
+        assert manifest["plot_tasks"][0]["executed_or_reused"] == "reused"
     for name in (
         "sweep_selected_results.csv",
         "sweep_readout_diagnostics.csv",
@@ -210,3 +220,23 @@ def test_legacy_wrapper_uses_matrix_engine_and_preserves_plots(
         "sweep_noise_summary.csv",
     ):
         assert _sha(output / name) == EXPECTED["aggregate_csv_sha256"][name]
+    settings = dict(
+        json.loads(
+            (ROOT / "configs/paper1_e1_sweep_smoke.json").read_text()
+        )["aggregate_plots"]
+    )
+    settings.pop("enabled")
+    task = PlotTaskSpec("paper1.e1.resolution_sweep.v1", settings)
+    figures = tmp_path / "artifact_only_figures"
+    execute_plot_tasks(
+        experiment_kind="e1_matrix",
+        input_dir=output,
+        figures_dir=figures,
+        tasks=(task,),
+    )
+    rendered = figures / task.recipe_id
+    for legacy in output.glob("*.png"):
+        left = Image.open(legacy).convert("RGBA")
+        right = Image.open(rendered / legacy.name).convert("RGBA")
+        assert left.size == right.size
+        assert left.tobytes() == right.tobytes()

@@ -7,6 +7,8 @@ from pathlib import Path
 import re
 from typing import Literal
 
+from pol.plots.types import PlotTaskSpec
+
 from .config import load_config_json
 
 
@@ -26,6 +28,9 @@ class Paper1RunSpec:
     torch_threads: int | None
     batch_size: int | None
     skip_plots: bool
+    plots_enabled: bool
+    plots_required: bool
+    plot_tasks: tuple[PlotTaskSpec, ...]
     source_path: Path
 
     @property
@@ -61,6 +66,70 @@ def _positive_int(value: object, path: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"expected positive integer at {path}")
     return value
+
+
+def _plot_block(
+    value: object, *, kind: str
+) -> tuple[bool, bool, tuple[PlotTaskSpec, ...]]:
+    plots = _object(value, "$.plots")
+    _keys(
+        plots,
+        "$.plots",
+        required={"enabled", "required", "recipes"},
+        allowed={"enabled", "required", "recipes"},
+    )
+    enabled = plots["enabled"]
+    required = plots["required"]
+    recipes = plots["recipes"]
+    if not isinstance(enabled, bool):
+        raise ValueError("expected boolean at $.plots.enabled")
+    if not isinstance(required, bool):
+        raise ValueError("expected boolean at $.plots.required")
+    if not isinstance(recipes, list):
+        raise ValueError("expected array at $.plots.recipes")
+    if not enabled and recipes:
+        raise ValueError("$.plots.recipes must be empty when plots are disabled")
+    if required and not enabled:
+        raise ValueError("$.plots.required cannot be true when plots are disabled")
+    if enabled and not recipes:
+        raise ValueError("$.plots.recipes must be non-empty when plots are enabled")
+    supported = {
+        "e1": {"paper1.e1.standard.v1"},
+        "e2": {"paper1.e2.standard.v1"},
+    }.get(kind, set())
+    tasks: list[PlotTaskSpec] = []
+    seen: set[str] = set()
+    for index, item in enumerate(recipes):
+        path = f"$.plots.recipes[{index}]"
+        recipe = _object(item, path)
+        _keys(
+            recipe,
+            path,
+            required={"id", "formats", "dpi"},
+            allowed={"id", "formats", "dpi"},
+        )
+        recipe_id = _string(recipe["id"], f"{path}.id")
+        if recipe_id not in supported:
+            raise ValueError(f"unsupported plot recipe at {path}.id: {recipe_id}")
+        if recipe_id in seen:
+            raise ValueError(f"duplicate plot recipe at {path}.id: {recipe_id}")
+        seen.add(recipe_id)
+        formats = recipe["formats"]
+        if (
+            not isinstance(formats, list)
+            or not formats
+            or any(item not in {"png", "pdf", "svg"} for item in formats)
+            or len(formats) != len(set(formats))
+        ):
+            raise ValueError(f"expected unique png/pdf/svg array at {path}.formats")
+        dpi = _positive_int(recipe["dpi"], f"{path}.dpi")
+        tasks.append(
+            PlotTaskSpec(
+                recipe_id,
+                {"formats": list(formats), "dpi": dpi},
+            )
+        )
+    return enabled, required, tuple(tasks)
 
 
 def _resolve_repo_path(value: object, path: str, repo_root: Path) -> Path:
@@ -134,11 +203,14 @@ def load_run_spec(path: str | Path, *, repo_root: Path) -> Paper1RunSpec:
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"cannot load run spec {source}: {exc}") from exc
     top = _object(raw, "$")
-    top_keys = {"schema_version", "run", "experiment", "prerequisites", "execution"}
-    _keys(top, "$", required=top_keys, allowed=top_keys)
+    base_keys = {"schema_version", "run", "experiment", "prerequisites", "execution"}
+    if "schema_version" not in top:
+        raise ValueError("missing required key at $.schema_version")
     schema = _string(top["schema_version"], "$.schema_version")
-    if schema != "paper1-run-v1":
+    if schema not in {"paper1-run-v1", "paper1-run-v2"}:
         raise ValueError(f"unsupported value at $.schema_version: {schema}")
+    top_keys = base_keys | ({"plots"} if schema == "paper1-run-v2" else set())
+    _keys(top, "$", required=top_keys, allowed=top_keys)
 
     run = _object(top["run"], "$.run")
     _keys(run, "$.run", required={"name", "output_root"}, allowed={"name", "output_root"})
@@ -182,12 +254,17 @@ def load_run_spec(path: str | Path, *, repo_root: Path) -> Paper1RunSpec:
         raise ValueError(f"config file does not exist at $.prerequisites.e0_config: {e0_config}")
 
     execution = _object(top["execution"], "$.execution")
-    allowed_execution = (
+    v1_execution = (
         set()
         if kind == "e0"
         else {"torch_threads", "skip_plots"}
         if kind == "e1"
         else {"torch_threads", "batch_size", "skip_plots"}
+    )
+    allowed_execution = (
+        v1_execution
+        if schema == "paper1-run-v1"
+        else v1_execution - {"skip_plots"}
     )
     _keys(execution, "$.execution", required=allowed_execution, allowed=allowed_execution)
     torch_threads = (
@@ -203,6 +280,34 @@ def load_run_spec(path: str | Path, *, repo_root: Path) -> Paper1RunSpec:
     skip_plots_value = execution.get("skip_plots", False)
     if not isinstance(skip_plots_value, bool):
         raise ValueError("expected boolean at $.execution.skip_plots")
+    if schema == "paper1-run-v2":
+        if kind == "e0":
+            plots_enabled, plots_required, plot_tasks = _plot_block(
+                top["plots"], kind=kind
+            )
+            if plots_enabled:
+                raise ValueError("E0 does not support plots")
+        else:
+            plots_enabled, plots_required, plot_tasks = _plot_block(
+                top["plots"], kind=kind
+            )
+        skip_plots_value = not plots_enabled
+    else:
+        plots_enabled = kind in {"e1", "e2"} and not skip_plots_value
+        plots_required = plots_enabled
+        plot_tasks = (
+            (
+                PlotTaskSpec(
+                    f"paper1.{kind}.standard.v1",
+                    {
+                        "formats": ["png"] if kind == "e1" else ["png", "pdf"],
+                        "dpi": 160 if kind == "e1" else 180,
+                    },
+                ),
+            )
+            if plots_enabled
+            else ()
+        )
 
     config = load_config_json(experiment_config)
     if getattr(config, kind) is None:
@@ -226,6 +331,9 @@ def load_run_spec(path: str | Path, *, repo_root: Path) -> Paper1RunSpec:
         torch_threads=torch_threads,
         batch_size=batch_size,
         skip_plots=skip_plots_value,
+        plots_enabled=plots_enabled,
+        plots_required=plots_required,
+        plot_tasks=plot_tasks,
         source_path=source,
     )
 
@@ -256,5 +364,13 @@ def run_spec_to_resolved_dict(
                 else {}
             ),
             **({"batch_size": spec.batch_size} if spec.kind == "e2" else {}),
+        },
+        "plots": {
+            "enabled": spec.plots_enabled,
+            "required": spec.plots_required,
+            "recipes": [
+                {"id": task.recipe_id, **dict(task.settings)}
+                for task in spec.plot_tasks
+            ],
         },
     }

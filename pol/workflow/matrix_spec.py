@@ -10,6 +10,8 @@ from pathlib import Path
 import re
 from typing import Any, Literal, Mapping
 
+from pol.plots.types import PlotTaskSpec
+
 from .types import MatrixCell
 
 
@@ -22,7 +24,9 @@ _TOP_KEYS = {
     "matrix",
     "execution",
     "aggregation",
+    "plots",
 }
+_REQUIRED_TOP_KEYS = _TOP_KEYS - {"plots"}
 
 
 @dataclass(frozen=True)
@@ -43,6 +47,9 @@ class MatrixRunSpec:
     resume: bool
     cell_plots: bool
     aggregation_kind: str
+    plots_enabled: bool
+    plots_required: bool
+    plot_tasks: tuple[PlotTaskSpec, ...]
     source_path: Path
     raw: Mapping[str, Any]
 
@@ -88,6 +95,50 @@ def _boolean(value: object, path: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"expected boolean at {path}")
     return value
+
+
+def _plot_block(value: object) -> tuple[bool, bool, tuple[PlotTaskSpec, ...]]:
+    plots = _object(value, "$.plots")
+    _keys(
+        plots,
+        "$.plots",
+        required={"enabled", "required", "recipes"},
+        allowed={"enabled", "required", "recipes"},
+    )
+    enabled = _boolean(plots["enabled"], "$.plots.enabled")
+    required = _boolean(plots["required"], "$.plots.required")
+    raw_recipes = plots["recipes"]
+    if not isinstance(raw_recipes, list):
+        raise ValueError("expected array at $.plots.recipes")
+    if enabled != bool(raw_recipes):
+        raise ValueError("$.plots.enabled must match whether recipes are present")
+    if required and not enabled:
+        raise ValueError("$.plots.required cannot be true when plots are disabled")
+    tasks: list[PlotTaskSpec] = []
+    for index, raw in enumerate(raw_recipes):
+        path = f"$.plots.recipes[{index}]"
+        recipe = _object(raw, path)
+        _keys(
+            recipe,
+            path,
+            required={"id", "settings"},
+            allowed={"id", "settings"},
+        )
+        recipe_id = _string(recipe["id"], f"{path}.id")
+        settings = _object(recipe["settings"], f"{path}.settings")
+        from pol.plots.registry import get_plot_recipe
+
+        registered = get_plot_recipe(recipe_id)
+        if "e1_matrix" not in registered.supported_experiment_kinds:
+            raise ValueError(f"unsupported plot recipe at {path}.id: {recipe_id}")
+        try:
+            validated = registered.validate_settings(dict(settings))
+        except ValueError as exc:
+            raise ValueError(f"invalid settings at {path}.settings: {exc}") from exc
+        tasks.append(PlotTaskSpec(recipe_id, validated))
+    if len({task.recipe_id for task in tasks}) != len(tasks):
+        raise ValueError("duplicate plot recipe at $.plots.recipes")
+    return enabled, required, tuple(tasks)
 
 
 def _repo_path(value: object, path: str, root: Path) -> Path:
@@ -165,7 +216,7 @@ def load_matrix_spec(path: str | Path, *, repo_root: Path) -> MatrixRunSpec:
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"cannot load matrix spec {source}: {exc}") from exc
     raw = _object(raw_value, "$")
-    _keys(raw, "$", required=_TOP_KEYS, allowed=_TOP_KEYS)
+    _keys(raw, "$", required=_REQUIRED_TOP_KEYS, allowed=_TOP_KEYS)
     if raw["schema_version"] != "paper1-matrix-run-v1":
         raise ValueError("unsupported value at $.schema_version")
     root = repo_root.resolve()
@@ -247,6 +298,10 @@ def load_matrix_spec(path: str | Path, *, repo_root: Path) -> MatrixRunSpec:
         allowed={"kind"},
     )
     aggregation_kind = _string(aggregation["kind"], "$.aggregation.kind")
+    if "plots" in raw:
+        plots_enabled, plots_required, plot_tasks = _plot_block(raw["plots"])
+    else:
+        plots_enabled, plots_required, plot_tasks = False, False, ()
     return MatrixRunSpec(
         "paper1-matrix-run-v1",
         name,
@@ -262,6 +317,9 @@ def load_matrix_spec(path: str | Path, *, repo_root: Path) -> MatrixRunSpec:
         resume,
         cell_plots,
         aggregation_kind,
+        plots_enabled,
+        plots_required,
+        plot_tasks,
         source,
         raw,
     )

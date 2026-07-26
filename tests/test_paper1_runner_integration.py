@@ -9,6 +9,7 @@ import sys
 
 import pytest
 import torch
+from PIL import Image
 
 from pol.paper1.config import canonical_config_json, load_config_json
 from pol.paper1.datasets import load_master_dataset
@@ -102,6 +103,25 @@ def _drop(value, excluded: set[str]):
     return value
 
 
+def _without_inline_plot_contract(summary: dict) -> dict:
+    normalized = json.loads(json.dumps(summary))
+    checks = normalized.get("required_checks", {})
+    for name in (
+        "all_required_artifacts_present",
+        "artifact_manifest_verified",
+        "plots_completed_or_explicitly_skipped",
+    ):
+        checks.pop(name, None)
+    return normalized
+
+
+def _assert_png_pixels_equal(first: Path, second: Path) -> None:
+    left = Image.open(first).convert("RGBA")
+    right = Image.open(second).convert("RGBA")
+    assert left.size == right.size
+    assert left.tobytes() == right.tobytes()
+
+
 @pytest.mark.slow
 def test_e0_direct_and_runner_smoke_parity(tmp_path: Path) -> None:
     env = _thread_env(1)
@@ -145,9 +165,9 @@ def test_e1_direct_and_runner_smoke_parity(tmp_path: Path) -> None:
     )
     runner = _runner(tmp_path, "e1", env=env)
 
-    assert _json(direct / "e1/e1_summary.json") == _json(
-        runner / "e1/e1_summary.json"
-    )
+    assert _without_inline_plot_contract(
+        _json(direct / "e1/e1_summary.json")
+    ) == _without_inline_plot_contract(_json(runner / "e1/e1_summary.json"))
     for name in (
         "ridge_selection.csv",
         "selected_results.csv",
@@ -159,7 +179,23 @@ def test_e1_direct_and_runner_smoke_parity(tmp_path: Path) -> None:
         assert (direct / "e1" / name).read_bytes() == (
             runner / "e1" / name
         ).read_bytes()
-    assert build_e1_scientific_record(runner / "e1") == PHASE1_DIGEST["e1"]
+    direct_record = build_e1_scientific_record(direct / "e1")
+    assert direct_record == PHASE1_DIGEST["e1"]
+    runner_record = build_e1_scientific_record(
+        runner / "e1",
+        plot_dir=runner / "figures/paper1.e1.standard.v1",
+    )
+    assert _without_inline_plot_contract(
+        runner_record["summary"]
+    ) == _without_inline_plot_contract(direct_record["summary"])
+    assert {
+        key: value for key, value in runner_record.items() if key != "summary"
+    } == {key: value for key, value in direct_record.items() if key != "summary"}
+    for path in (direct / "e1").glob("*.png"):
+        _assert_png_pixels_equal(
+            path,
+            runner / "figures/paper1.e1.standard.v1" / path.name,
+        )
 
 
 @pytest.mark.slow
@@ -270,7 +306,15 @@ def test_e2_direct_and_runner_smoke_parity(tmp_path: Path) -> None:
         row["event"] for row in _json(runner_out / "event_log.json")["events"]
     ]
     assert direct_events == runner_events
-    assert build_e2_scientific_record(runner_out) == PHASE1_DIGEST["e2"]
+    assert build_e2_scientific_record(
+        runner_out,
+        plot_dir=runner / "figures/paper1.e2.standard.v1",
+    ) == PHASE1_DIGEST["e2"]
+    for path in direct_out.glob("*.png"):
+        _assert_png_pixels_equal(
+            path,
+            runner / "figures/paper1.e2.standard.v1" / path.name,
+        )
     for names in (direct_events, runner_events):
         assert names.index("freeze_read_back") < names.index("first_test_state_solve")
         assert names.index("first_test_state_solve") < names.index(

@@ -115,7 +115,13 @@ def _lines(
     return fig, {"series": axis_data}
 
 
-def generate_aggregate_plots(output_dir: Path, settings: dict[str, Any]) -> dict[str, Any]:
+def generate_aggregate_plots(
+    output_dir: Path,
+    settings: dict[str, Any],
+    *,
+    input_dir: Path | None = None,
+    write_manifest: bool = True,
+) -> dict[str, Any]:
     """Generate all aggregate figures and a hash-addressed manifest."""
     q = int(settings["q"])
     noise_level = float(settings.get("noise_level", .01))
@@ -127,8 +133,9 @@ def generate_aggregate_plots(output_dir: Path, settings: dict[str, Any]) -> dict
     n_sur_Js = tuple(int(value) for value in settings.get("surrogate_line_observation_dims", [65, 96]))
     formats = settings.get("formats", ["png", "pdf"])
     dpi = int(settings.get("dpi", 180))
-    inputs = {name: hashlib.sha256((output_dir / name).read_bytes()).hexdigest() for name in CSV_NAMES}
-    selected, diagnostics, noise = (_read(output_dir / name) for name in CSV_NAMES)
+    source_dir = output_dir if input_dir is None else input_dir
+    inputs = {name: hashlib.sha256((source_dir / name).read_bytes()).hexdigest() for name in CSV_NAMES}
+    selected, diagnostics, noise = (_read(source_dir / name) for name in CSV_NAMES)
     full_s = _select(selected, q, full_observation=True)
     full_d = _select(diagnostics, q, full_observation=True)
     grid_s = _select(selected, q, n_sur=target_observation_n_sur)
@@ -214,8 +221,9 @@ def generate_aggregate_plots(output_dir: Path, settings: dict[str, Any]) -> dict
     manifest = {"schema_version": "paper1-e1-sweep-plots-v2", "status":
                 "pass" if all(x["status"] == "pass" for x in entries) else "fail",
                 "q": q, "noise_level": noise_level, "inputs": inputs, "plots": entries}
-    (output_dir / "sweep_plot_manifest.json").write_text(
-        json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
+    if write_manifest:
+        (output_dir / "sweep_plot_manifest.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
     return manifest
 
 

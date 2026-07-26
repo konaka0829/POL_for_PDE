@@ -40,5 +40,27 @@
   },
   "aggregation": {
     "kind": "paper1_e1_resolution_v1"
+  },
+  "plots": {
+    "enabled": true,
+    "required": true,
+    "recipes": [
+      {
+        "id": "paper1.e1.resolution_sweep.v1",
+        "settings": {
+          "q": 9,
+          "noise_level": 0.01,
+          "line_slice": {
+            "target_data_nx": 32,
+            "surrogate_internal_nx": 32
+          },
+          "target_observation_surrogate_nx": 32,
+          "surrogate_line_target_data_nx": 32,
+          "surrogate_line_observation_dims": [16, 32],
+          "formats": ["png", "pdf"],
+          "dpi": 80
+        }
+      }
+    ]
   }
 }
