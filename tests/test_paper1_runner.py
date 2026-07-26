@@ -360,6 +360,52 @@ def test_direct_runner_does_not_use_popen(tmp_path: Path, monkeypatch) -> None:
     assert execute_run(spec, repo_root=ROOT, force=False) == 0
 
 
+def test_unknown_recipe_id_is_rejected(tmp_path: Path) -> None:
+    spec = _temp_spec(tmp_path)
+    step = replace(build_plan(spec, repo_root=ROOT)[0], recipe_id="unknown")
+    with pytest.raises(ValueError, match="unknown recipe_id"):
+        runner_module._execute_recipe(
+            step,
+            spec,
+            repo_root=ROOT,
+            run_dir=spec.run_dir,
+        )
+
+
+@pytest.mark.parametrize(
+    "result",
+    (
+        RecipeResult("fail", 0, Path("output"), {}),
+        RecipeResult("pass", 1, Path("output"), {}),
+    ),
+)
+def test_recipe_result_status_must_match_exit_code(result: RecipeResult) -> None:
+    step = runner_module.PlannedStep(
+        "e0",
+        "e0",
+        ("python", "run_e0.py"),
+        Path("output"),
+        Path("e0.log"),
+        Path("config.json"),
+    )
+    with pytest.raises(ValueError, match="status/exit_code mismatch"):
+        runner_module._validate_recipe_result(step, result)
+
+
+def test_recipe_result_output_dir_must_match_plan() -> None:
+    step = runner_module.PlannedStep(
+        "e0",
+        "e0",
+        ("python", "run_e0.py"),
+        Path("expected"),
+        Path("e0.log"),
+        Path("config.json"),
+    )
+    result = RecipeResult("pass", 0, Path("other"), {})
+    with pytest.raises(ValueError, match="output_dir mismatch"):
+        runner_module._validate_recipe_result(step, result)
+
+
 @pytest.mark.parametrize(
     "arguments", [["--help"], ["run", "--help"]]
 )

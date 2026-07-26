@@ -36,7 +36,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if args.torch_threads <= 0 or args.batch_size <= 0:
         parser().error("--torch-threads and --batch-size must be positive")
-    command = (sys.executable, sys.argv[0], *(argv if argv is not None else sys.argv[1:]))
+    invocation_arguments = sys.argv[1:] if argv is None else argv
+    script_name = sys.argv[0] if argv is None else str(Path(__file__))
+    command = (sys.executable, script_name, *invocation_arguments)
     invocation = RecipeInvocation(
         repo_root=ROOT,
         working_directory=Path.cwd(),

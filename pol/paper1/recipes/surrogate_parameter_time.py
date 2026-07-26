@@ -77,7 +77,9 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     for row in rows:
         fields.extend(key for key in row if key not in fields)
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def sha(path: Path) -> str:

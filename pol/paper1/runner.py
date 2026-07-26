@@ -378,19 +378,38 @@ def _execute_recipe(
                 skip_plots=spec.skip_plots,
                 invocation=invocation,
             )
-        from .recipes.surrogate_parameter_time import run_surrogate_parameter_time
+        if step.recipe_id == "e2":
+            from .recipes.surrogate_parameter_time import (
+                run_surrogate_parameter_time,
+            )
 
-        assert spec.batch_size is not None
-        return run_surrogate_parameter_time(
-            step.config_path,
-            run_dir / "e0",
-            run_dir / "master_dataset",
-            step.output_dir,
-            overwrite=True,
-            resume=False,
-            skip_plots=spec.skip_plots,
-            batch_size=spec.batch_size,
-            invocation=invocation,
+            assert spec.batch_size is not None
+            return run_surrogate_parameter_time(
+                step.config_path,
+                run_dir / "e0",
+                run_dir / "master_dataset",
+                step.output_dir,
+                overwrite=True,
+                resume=False,
+                skip_plots=spec.skip_plots,
+                batch_size=spec.batch_size,
+                invocation=invocation,
+            )
+        raise ValueError(f"unknown recipe_id: {step.recipe_id}")
+
+
+def _validate_recipe_result(step: PlannedStep, result: RecipeResult) -> None:
+    """Reject internally inconsistent or misdirected recipe results."""
+    expected_status = "pass" if result.exit_code == 0 else "fail"
+    if result.status != expected_status:
+        raise ValueError(
+            "recipe result status/exit_code mismatch: "
+            f"status={result.status!r}, exit_code={result.exit_code}"
+        )
+    if result.output_dir != step.output_dir:
+        raise ValueError(
+            "recipe result output_dir mismatch: "
+            f"expected {step.output_dir}, got {result.output_dir}"
         )
 
 
@@ -453,6 +472,7 @@ def execute_run(spec: Paper1RunSpec, *, repo_root: Path, force: bool) -> int:
                     log.flush()
                     print(f"[{step.name}] {payload}", flush=True)
                     record["returncode"] = result.exit_code
+                    _validate_recipe_result(step, result)
                     if result.exit_code != 0:
                         raise RuntimeError(
                             f"step {step.name} exited with code {result.exit_code}")
