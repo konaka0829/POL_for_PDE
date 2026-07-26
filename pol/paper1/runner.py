@@ -17,6 +17,9 @@ from .datasets import load_master_dataset
 from .run_spec import Paper1RunSpec, run_spec_to_resolved_dict
 
 
+_CHILD_CLEANUP_TIMEOUT_SECONDS = 5.0
+
+
 @dataclass(frozen=True)
 class PlannedStep:
     """One existing child script invocation."""
@@ -45,10 +48,38 @@ def _atomic_json(path: Path, value: object) -> None:
     os.replace(temporary, path)
 
 
+def resolve_run_directory(
+    spec: Paper1RunSpec, *, repo_root: Path
+) -> tuple[Path, Path]:
+    """Validate and return the resolved output root and lexical run directory."""
+    root = repo_root.resolve()
+    output_root = spec.output_root.resolve()
+    filesystem_root = Path(output_root.anchor).resolve()
+    forbidden_roots = {
+        filesystem_root,
+        Path.home().resolve(),
+        root,
+        root.parent,
+    }
+    if output_root in forbidden_roots:
+        raise ValueError(f"unsafe output root: {output_root}")
+
+    run_dir = output_root / spec.name
+    forbidden_run_dirs = {*forbidden_roots, output_root}
+    if run_dir.parent != output_root or run_dir in forbidden_run_dirs:
+        raise ValueError(f"unsafe run directory: {run_dir}")
+    if run_dir.is_symlink():
+        raise ValueError(f"run directory must not be a symlink: {run_dir}")
+    resolved_target = run_dir.resolve(strict=False)
+    if resolved_target != run_dir or resolved_target.parent != output_root:
+        raise ValueError(f"run directory escapes output root: {run_dir}")
+    return output_root, run_dir
+
+
 def build_plan(spec: Paper1RunSpec, *, repo_root: Path) -> list[PlannedStep]:
     """Build exact child commands without mutating the filesystem."""
     root = repo_root.resolve()
-    run_dir = spec.run_dir.resolve()
+    _, run_dir = resolve_run_directory(spec, repo_root=root)
     e0_config = spec.experiment_config if spec.kind == "e0" else spec.e0_config
     assert e0_config is not None
     steps = [
@@ -125,16 +156,22 @@ def build_plan(spec: Paper1RunSpec, *, repo_root: Path) -> list[PlannedStep]:
                 spec.experiment_config,
             )
         )
+    missing_scripts = [
+        step.command[1] for step in steps if not Path(step.command[1]).is_file()
+    ]
+    if missing_scripts:
+        raise ValueError(f"runner child script does not exist: {missing_scripts[0]}")
     return steps
 
 
 def plan_to_dict(spec: Paper1RunSpec, *, repo_root: Path) -> dict[str, object]:
     """Return the machine-readable, side-effect-free execution plan."""
+    _, run_dir = resolve_run_directory(spec, repo_root=repo_root)
     return {
         "schema_version": "paper1-run-plan-v1",
         "run_name": spec.name,
         "experiment_kind": spec.kind,
-        "run_dir": str(spec.run_dir.resolve()),
+        "run_dir": str(run_dir),
         "steps": [
             {
                 "name": step.name,
@@ -144,21 +181,6 @@ def plan_to_dict(spec: Paper1RunSpec, *, repo_root: Path) -> dict[str, object]:
             for step in build_plan(spec, repo_root=repo_root)
         ],
     }
-
-
-def _safe_run_dir(spec: Paper1RunSpec, repo_root: Path) -> tuple[Path, Path]:
-    output_root = spec.output_root.resolve()
-    run_dir = (output_root / spec.name).resolve()
-    forbidden = {
-        Path("/").resolve(),
-        Path.home().resolve(),
-        repo_root.resolve(),
-        repo_root.resolve().parent,
-        output_root,
-    }
-    if run_dir in forbidden or run_dir.parent != output_root:
-        raise ValueError(f"unsafe run directory: {run_dir}")
-    return output_root, run_dir
 
 
 def _git(root: Path, arguments: list[str]) -> str:
@@ -176,9 +198,38 @@ def _terminate_child(process: subprocess.Popen[str]) -> tuple[int | None, str | 
     try:
         if process.poll() is None:
             process.terminate()
-        return process.wait(), None
-    except OSError as exc:
+        try:
+            return process.wait(timeout=_CHILD_CLEANUP_TIMEOUT_SECONDS), None
+        except subprocess.TimeoutExpired:
+            process.kill()
+            return process.wait(timeout=_CHILD_CLEANUP_TIMEOUT_SECONDS), None
+    except (OSError, subprocess.TimeoutExpired) as exc:
         return process.returncode, f"{type(exc).__name__}: {exc}"
+
+
+def _validate_owned_run_directory(run_dir: Path, spec: Paper1RunSpec) -> None:
+    """Require an existing replacement target to be owned by this runner."""
+    if run_dir.is_symlink():
+        raise ValueError(f"run directory must not be a symlink: {run_dir}")
+    if not run_dir.is_dir():
+        raise ValueError(f"existing run path is not a directory: {run_dir}")
+    manifest_path = run_dir / "run_manifest.json"
+    if manifest_path.is_symlink():
+        raise ValueError(f"run manifest must not be a symlink: {manifest_path}")
+    if not manifest_path.is_file():
+        raise ValueError(f"existing run directory is not runner-owned: {run_dir}")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid runner ownership manifest: {manifest_path}: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise ValueError(f"runner ownership manifest must be an object: {manifest_path}")
+    if manifest.get("schema_version") != "paper1-run-manifest-v1":
+        raise ValueError(f"runner ownership manifest schema mismatch: {manifest_path}")
+    if manifest.get("run_name") != spec.name:
+        raise ValueError(f"runner ownership manifest run_name mismatch: {manifest_path}")
+    if manifest.get("run_dir") != str(run_dir):
+        raise ValueError(f"runner ownership manifest run_dir mismatch: {manifest_path}")
 
 
 def _verify_step(step: PlannedStep) -> None:
@@ -267,14 +318,15 @@ def _manifest(spec: Paper1RunSpec, steps: list[PlannedStep], root: Path) -> dict
 def execute_run(spec: Paper1RunSpec, *, repo_root: Path, force: bool) -> int:
     """Execute the planned existing scripts and maintain an atomic manifest."""
     root = repo_root.resolve()
-    output_root, run_dir = _safe_run_dir(spec, root)
-    if run_dir.exists():
+    output_root, run_dir = resolve_run_directory(spec, repo_root=root)
+    steps = build_plan(spec, repo_root=root)
+    if run_dir.exists() or run_dir.is_symlink():
         if not force:
             raise FileExistsError(f"run directory already exists: {run_dir}; pass --force")
+        _validate_owned_run_directory(run_dir, spec)
         shutil.rmtree(run_dir)
     output_root.mkdir(parents=True, exist_ok=True)
     (run_dir / "logs").mkdir(parents=True)
-    steps = build_plan(spec, repo_root=root)
     resolved = run_spec_to_resolved_dict(spec)
     resolved.update(
         {
@@ -297,13 +349,16 @@ def execute_run(spec: Paper1RunSpec, *, repo_root: Path, force: bool) -> int:
     manifest_path = run_dir / "run_manifest.json"
     _atomic_json(manifest_path, manifest)
 
+    current_step_index: int | None = None
+    current_started_monotonic: float | None = None
     process: subprocess.Popen[str] | None = None
     try:
         for index, step in enumerate(steps):
+            current_step_index = index
             record = manifest["steps"][index]
             record["status"] = "running"
             record["started_at"] = _now()
-            started = time.monotonic()
+            current_started_monotonic = time.monotonic()
             if step.config_path.is_file():
                 record["config_sha256"] = _sha256(step.config_path)
             _atomic_json(manifest_path, manifest)
@@ -339,8 +394,12 @@ def execute_run(spec: Paper1RunSpec, *, repo_root: Path, force: bool) -> int:
             _verify_step(step)
             record["status"] = "pass"
             record["ended_at"] = _now()
-            record["duration_seconds"] = time.monotonic() - started
+            record["duration_seconds"] = (
+                time.monotonic() - current_started_monotonic
+            )
             _atomic_json(manifest_path, manifest)
+            current_step_index = None
+            current_started_monotonic = None
         manifest["status"] = "pass"
         manifest["ended_at"] = _now()
         manifest["final_result_dir"] = str(run_dir / spec.kind)
@@ -355,13 +414,17 @@ def execute_run(spec: Paper1RunSpec, *, repo_root: Path, force: bool) -> int:
         if cleanup_failure is not None:
             manifest["failure"] += f"; child cleanup failed: {cleanup_failure}"
         manifest["ended_at"] = _now()
-        for record in manifest["steps"]:
+        if current_step_index is not None:
+            record = manifest["steps"][current_step_index]
             if record["status"] == "running":
                 record["status"] = "interrupted"
                 record["returncode"] = process.returncode if process else None
                 record["failure"] = manifest["failure"]
                 record["ended_at"] = _now()
-                record["duration_seconds"] = time.monotonic() - started
+            if current_started_monotonic is not None:
+                record["duration_seconds"] = (
+                    time.monotonic() - current_started_monotonic
+                )
         _atomic_json(manifest_path, manifest)
         return 130
     except Exception as exc:
@@ -373,12 +436,18 @@ def execute_run(spec: Paper1RunSpec, *, repo_root: Path, force: bool) -> int:
         if cleanup_failure is not None:
             manifest["failure"] += f"; child cleanup failed: {cleanup_failure}"
         manifest["ended_at"] = _now()
-        for record in manifest["steps"]:
+        if current_step_index is not None:
+            record = manifest["steps"][current_step_index]
             if record["status"] == "running":
                 record["status"] = "fail"
-                record["returncode"] = process.returncode if process else record["returncode"]
+                record["returncode"] = (
+                    process.returncode if process else record["returncode"]
+                )
                 record["failure"] = manifest["failure"]
                 record["ended_at"] = _now()
-                record["duration_seconds"] = time.monotonic() - started
+                if current_started_monotonic is not None:
+                    record["duration_seconds"] = (
+                        time.monotonic() - current_started_monotonic
+                    )
         _atomic_json(manifest_path, manifest)
         return 1

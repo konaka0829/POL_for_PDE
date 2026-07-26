@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -14,12 +15,31 @@ from pol.paper1.datasets import load_master_dataset
 
 
 ROOT = Path(__file__).resolve().parents[1]
+_THREAD_ENV_VARS = (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+)
 
 
-def _run(arguments: list[str]) -> None:
+def _thread_env(threads: int = 1) -> dict[str, str]:
+    env = os.environ.copy()
+    for name in _THREAD_ENV_VARS:
+        env[name] = str(threads)
+    return env
+
+
+def _run(arguments: list[str], *, env: dict[str, str]) -> None:
     subprocess.run(
-        [sys.executable, *arguments], cwd=ROOT, check=True,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        [sys.executable, *arguments],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=env,
+        timeout=600,
     )
 
 
@@ -27,20 +47,29 @@ def _json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _runner(tmp_path: Path, kind: str) -> Path:
+def _runner(tmp_path: Path, kind: str, *, env: dict[str, str]) -> Path:
     raw = _json(ROOT / f"configs/runs/paper1_{kind}_smoke.json")
     raw["run"]["output_root"] = str(tmp_path / "runner")
     source = tmp_path / f"{kind}.json"
     source.write_text(json.dumps(raw), encoding="utf-8")
-    _run(["-m", "pol", "run", str(source)])
-    return tmp_path / "runner" / raw["run"]["name"]
+    _run(["-m", "pol", "run", str(source)], env=env)
+    run_dir = tmp_path / "runner" / raw["run"]["name"]
+    assert _json(run_dir / "run_manifest.json")["status"] == "pass"
+    return run_dir
 
 
-def _direct_e0(config: Path, output: Path) -> None:
-    _run([
-        "scripts/paper1/run_e0.py", "--config", str(config),
-        "--output-dir", str(output), "--overwrite",
-    ])
+def _direct_e0(config: Path, output: Path, *, env: dict[str, str]) -> None:
+    _run(
+        [
+            "scripts/paper1/run_e0.py",
+            "--config",
+            str(config),
+            "--output-dir",
+            str(output),
+            "--overwrite",
+        ],
+        env=env,
+    )
 
 
 def _csv_without(path: Path, excluded: set[str]) -> list[dict[str, str]]:
@@ -64,72 +93,156 @@ def _drop(value, excluded: set[str]):
 
 
 @pytest.mark.slow
-def test_direct_and_runner_smoke_scientific_parity(tmp_path: Path) -> None:
-    direct = tmp_path / "direct"
+def test_e0_direct_and_runner_smoke_parity(tmp_path: Path) -> None:
+    env = _thread_env(1)
+    direct = tmp_path / "direct/e0"
+    _direct_e0(ROOT / "configs/paper1_e0_smoke.json", direct, env=env)
+    runner = _runner(tmp_path, "e0", env=env) / "e0"
 
-    # E2 direct chain and unified chain.
-    direct_e2 = direct / "e2"
-    _direct_e0(ROOT / "configs/paper1_e0_smoke.json", direct_e2 / "e0")
-    _run([
-        "scripts/paper1/generate_master_dataset.py",
-        "--config", str(direct_e2 / "e0/accepted_production_config.json"),
-        "--master-initial-conditions", str(direct_e2 / "e0/master_initial_conditions.pt"),
-        "--output-dir", str(direct_e2 / "master_dataset"), "--overwrite",
-    ])
-    _run([
-        "scripts/paper1/run_e2.py",
-        "--config", str(ROOT / "configs/paper1_e2_smoke.json"),
-        "--e0-dir", str(direct_e2 / "e0"),
-        "--dataset-dir", str(direct_e2 / "master_dataset"),
-        "--output-dir", str(direct_e2 / "e2"), "--overwrite",
-        "--torch-threads", "1", "--batch-size", "64",
-    ])
-    runner_e2 = _runner(tmp_path, "e2")
-
-    assert _json(direct_e2 / "e0/e0_summary.json") == _json(
-        runner_e2 / "e0/e0_summary.json"
-    )
-    direct_config = load_config_json(direct_e2 / "e0/accepted_production_config.json")
-    runner_config = load_config_json(runner_e2 / "e0/accepted_production_config.json")
+    assert _json(direct / "e0_summary.json") == _json(runner / "e0_summary.json")
+    direct_config = load_config_json(direct / "accepted_production_config.json")
+    runner_config = load_config_json(runner / "accepted_production_config.json")
     assert canonical_config_json(direct_config) == canonical_config_json(runner_config)
-    assert _json(direct_e2 / "e0/master_manifest.json")["tensor_hash"] == _json(
-        runner_e2 / "e0/master_manifest.json"
-    )["tensor_hash"]
+    direct_master_manifest = _json(direct / "master_manifest.json")
+    runner_master_manifest = _json(runner / "master_manifest.json")
+    assert direct_master_manifest["tensor_hash"] == runner_master_manifest["tensor_hash"]
 
-    first = load_master_dataset(direct_e2 / "master_dataset")
-    second = load_master_dataset(runner_e2 / "master_dataset")
+
+@pytest.mark.slow
+def test_e1_direct_and_runner_smoke_parity(tmp_path: Path) -> None:
+    env = _thread_env(1)
+    direct = tmp_path / "direct"
+    _direct_e0(
+        ROOT / "configs/paper1_e0_for_e1_smoke.json",
+        direct / "e0",
+        env=env,
+    )
+    _run(
+        [
+            "scripts/paper1/run_e1.py",
+            "--config",
+            str(ROOT / "configs/paper1_e1_smoke.json"),
+            "--e0-dir",
+            str(direct / "e0"),
+            "--output-dir",
+            str(direct / "e1"),
+            "--overwrite",
+            "--torch-threads",
+            "1",
+        ],
+        env=env,
+    )
+    runner = _runner(tmp_path, "e1", env=env)
+
+    assert _json(direct / "e1/e1_summary.json") == _json(
+        runner / "e1/e1_summary.json"
+    )
+    for name in (
+        "ridge_selection.csv",
+        "selected_results.csv",
+        "readout_diagnostics.csv",
+        "mode_comparison.csv",
+        "noise_results.csv",
+        "noise_summary.csv",
+    ):
+        assert (direct / "e1" / name).read_bytes() == (
+            runner / "e1" / name
+        ).read_bytes()
+
+
+@pytest.mark.slow
+def test_e2_direct_and_runner_smoke_parity(tmp_path: Path) -> None:
+    env = _thread_env(1)
+    direct = tmp_path / "direct"
+    _direct_e0(ROOT / "configs/paper1_e0_smoke.json", direct / "e0", env=env)
+    _run(
+        [
+            "scripts/paper1/generate_master_dataset.py",
+            "--config",
+            str(direct / "e0/accepted_production_config.json"),
+            "--master-initial-conditions",
+            str(direct / "e0/master_initial_conditions.pt"),
+            "--output-dir",
+            str(direct / "master_dataset"),
+            "--overwrite",
+        ],
+        env=env,
+    )
+    _run(
+        [
+            "scripts/paper1/run_e2.py",
+            "--config",
+            str(ROOT / "configs/paper1_e2_smoke.json"),
+            "--e0-dir",
+            str(direct / "e0"),
+            "--dataset-dir",
+            str(direct / "master_dataset"),
+            "--output-dir",
+            str(direct / "e2"),
+            "--overwrite",
+            "--torch-threads",
+            "1",
+            "--batch-size",
+            "64",
+        ],
+        env=env,
+    )
+    runner = _runner(tmp_path, "e2", env=env)
+
+    direct_master_manifest = _json(direct / "e0/master_manifest.json")
+    runner_master_manifest = _json(runner / "e0/master_manifest.json")
+    assert direct_master_manifest["tensor_hash"] == runner_master_manifest["tensor_hash"]
+
+    first = load_master_dataset(direct / "master_dataset")
+    second = load_master_dataset(runner / "master_dataset")
     for key in ("dataset_hash", "split_hash", "tensor_hashes"):
         assert first.metadata[key] == second.metadata[key]
     for name in (
-        "sample_ids", "train_indices", "val_indices", "test_indices",
-        "u0_master", "y_target_master",
+        "sample_ids",
+        "train_indices",
+        "val_indices",
+        "test_indices",
+        "u0_master",
+        "y_target_master",
     ):
         assert torch.equal(getattr(first, name), getattr(second, name))
 
-    direct_out, runner_out = direct_e2 / "e2", runner_e2 / "e2"
+    direct_out, runner_out = direct / "e2", runner / "e2"
     for name in ("model_specific_optima.json", "shared_representatives.json"):
         assert _json(direct_out / name) == _json(runner_out / name)
     provenance = {
-        "selection_record_hash", "frozen_plan_hash", "attempt_history_hash",
-        "e0_prerequisite_hash", "dataset_prerequisite_hash",
+        "selection_record_hash",
+        "frozen_plan_hash",
+        "attempt_history_hash",
+        "e0_prerequisite_hash",
+        "dataset_prerequisite_hash",
     }
     for name in ("coordinate_history.json", "convergence_summary.json"):
         assert _drop(_json(direct_out / name), provenance) == _drop(
             _json(runner_out / name), provenance
         )
     assert {
-        key: value for key, value in _json(direct_out / "selection_record.json").items()
+        key: value
+        for key, value in _json(direct_out / "selection_record.json").items()
         if key != "bindings"
     } == {
-        key: value for key, value in _json(runner_out / "selection_record.json").items()
+        key: value
+        for key, value in _json(runner_out / "selection_record.json").items()
         if key != "bindings"
     }
     for name in (
-        "validation_sweep.csv", "model3_validation_by_seed.csv",
-        "convergence_results.csv", "solver_metadata.csv", "physical_point_aliases.csv",
+        "validation_sweep.csv",
+        "model3_validation_by_seed.csv",
+        "convergence_results.csv",
+        "solver_metadata.csv",
+        "physical_point_aliases.csv",
     ):
         assert (direct_out / name).read_bytes() == (runner_out / name).read_bytes()
-    for name in ("test_sweep.csv", "model3_test_by_seed.csv", "model3_test_aggregate.csv"):
+    for name in (
+        "test_sweep.csv",
+        "model3_test_by_seed.csv",
+        "model3_test_aggregate.csv",
+    ):
         assert _csv_without(direct_out / name, provenance) == _csv_without(
             runner_out / name, provenance
         )
@@ -138,30 +251,15 @@ def test_direct_and_runner_smoke_scientific_parity(tmp_path: Path) -> None:
     direct_summary["required_checks"]["test_rows_bound_to_frozen_plan"].pop("value")
     runner_summary["required_checks"]["test_rows_bound_to_frozen_plan"].pop("value")
     assert _drop(direct_summary, provenance) == _drop(runner_summary, provenance)
-    direct_events = [row["event"] for row in _json(direct_out / "event_log.json")["events"]]
-    runner_events = [row["event"] for row in _json(runner_out / "event_log.json")["events"]]
+    direct_events = [
+        row["event"] for row in _json(direct_out / "event_log.json")["events"]
+    ]
+    runner_events = [
+        row["event"] for row in _json(runner_out / "event_log.json")["events"]
+    ]
     assert direct_events == runner_events
     for names in (direct_events, runner_events):
         assert names.index("freeze_read_back") < names.index("first_test_state_solve")
-        assert names.index("first_test_state_solve") < names.index("first_test_metric")
-
-    # E1 direct chain and unified chain.
-    direct_e1 = direct / "e1"
-    _direct_e0(ROOT / "configs/paper1_e0_for_e1_smoke.json", direct_e1 / "e0")
-    _run([
-        "scripts/paper1/run_e1.py",
-        "--config", str(ROOT / "configs/paper1_e1_smoke.json"),
-        "--e0-dir", str(direct_e1 / "e0"), "--output-dir", str(direct_e1 / "e1"),
-        "--overwrite", "--torch-threads", "1",
-    ])
-    runner_e1 = _runner(tmp_path, "e1")
-    assert _json(direct_e1 / "e1/e1_summary.json") == _json(
-        runner_e1 / "e1/e1_summary.json"
-    )
-    for name in (
-        "ridge_selection.csv", "selected_results.csv", "readout_diagnostics.csv",
-        "mode_comparison.csv", "noise_results.csv", "noise_summary.csv",
-    ):
-        assert (direct_e1 / "e1" / name).read_bytes() == (
-            runner_e1 / "e1" / name
-        ).read_bytes()
+        assert names.index("first_test_state_solve") < names.index(
+            "first_test_metric"
+        )
