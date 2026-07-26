@@ -13,6 +13,7 @@ from typing import Any
 
 from pol.runtime.io import file_sha256
 from pol.runtime.path_safety import resolve_safe_run_directory
+from pol.paper1.config import canonical_config_json, load_config_json
 
 from .matrix_spec import MatrixRunSpec, expand_matrix
 from .matrix_worker import execute_matrix_cell
@@ -21,6 +22,11 @@ from .types import MatrixCell
 
 
 MATRIX_MANIFEST_SCHEMA = "paper1-matrix-manifest-v1"
+
+
+def _canonical_config_sha256(path: Path) -> str:
+    canonical = canonical_config_json(load_config_json(path))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _atomic_json(path: Path, value: object) -> None:
@@ -61,9 +67,11 @@ def _prepare(spec: MatrixRunSpec) -> tuple[Any, list[MatrixCell], list[dict[str,
 def _fingerprint(spec: MatrixRunSpec, cells: list[MatrixCell]) -> str:
     payload = {
         "schema_version": spec.schema_version,
-        "base_config_sha256": file_sha256(spec.base_config),
-        "e0_config_sha256": file_sha256(spec.e0_config),
+        "base_config_sha256": _canonical_config_sha256(spec.base_config),
+        "e0_config_sha256": _canonical_config_sha256(spec.e0_config),
         "aggregation_kind": spec.aggregation_kind,
+        "aggregation_protocol": "paper1-e1-resolution-matrix-v1",
+        "recipe_protocols": ("paper1-e0-v2", "paper1-e1-v2"),
         "invalid_run_policy": spec.invalid_run_policy,
         "cell_plots": spec.cell_plots,
         "cells": [
@@ -180,7 +188,16 @@ def _reuse_result(
     cell_plots: bool,
 ) -> dict[str, Any] | None:
     try:
-        manifest_hash = plugin.validate_cell(output_dir, cell_plots=cell_plots)
+        manifest_hash = plugin.validate_cell(
+            output_dir,
+            cell_plots=cell_plots,
+            expected_config_sha256=cell.config_sha256,
+            expected_config_path=(
+                output_dir.parents[1]
+                / "generated_configs"
+                / f"{cell.cell_id}.json"
+            ),
+        )
     except Exception:
         return None
     return {
@@ -236,24 +253,47 @@ def execute_matrix_run(
                 f"plots-only requires existing matrix run directory: {run_dir}"
             )
         manifest = _validate_owned_matrix(run_dir, spec)
-        if manifest.get("matrix_fingerprint") != fingerprint:
-            raise ValueError("science fingerprint mismatch for --plots-only")
-        plugin.validate_e0(run_dir / "e0", spec.base_config)
-        for cell in cells:
-            plugin.validate_cell(
-                run_dir / "cells" / cell.cell_id,
-                cell_plots=spec.cell_plots,
-            )
-        for record in manifest.get("aggregate_artifacts", []):
-            path = run_dir / "aggregate" / record["relative_path"]
-            if (
-                not path.is_file()
-                or path.stat().st_size != record["size_bytes"]
-                or file_sha256(path) != record["sha256"]
-            ):
-                raise ValueError(f"matrix aggregate artifact tampered: {path}")
-        if spec.plots_enabled and not manifest.get("aggregate_artifacts"):
-            raise ValueError("matrix aggregate integrity records are missing")
+        try:
+            if manifest.get("matrix_fingerprint") != fingerprint:
+                raise ValueError("science fingerprint mismatch for --plots-only")
+            plugin.validate_e0(run_dir / "e0", spec.base_config)
+            for cell in cells:
+                plugin.validate_cell(
+                    run_dir / "cells" / cell.cell_id,
+                    cell_plots=spec.cell_plots,
+                    expected_config_sha256=cell.config_sha256,
+                    expected_config_path=(
+                        run_dir / "generated_configs" / f"{cell.cell_id}.json"
+                    ),
+                )
+            records = manifest.get("aggregate_artifacts", [])
+            recorded_names = {record["relative_path"] for record in records}
+            actual_names = {
+                path.name
+                for path in (run_dir / "aggregate").iterdir()
+            }
+            expected_names = set(plugin.aggregate_artifact_names())
+            if recorded_names != expected_names or actual_names != expected_names:
+                raise ValueError(
+                    "matrix aggregate artifact set does not match its contract"
+                )
+            for record in records:
+                path = run_dir / "aggregate" / record["relative_path"]
+                if (
+                    path.is_symlink()
+                    or not path.is_file()
+                    or path.stat().st_size != record["size_bytes"]
+                    or file_sha256(path) != record["sha256"]
+                ):
+                    raise ValueError(f"matrix aggregate artifact tampered: {path}")
+        except Exception as exc:
+            manifest["status"] = "fail"
+            manifest["compute_status"] = "fail"
+            manifest["plot_status"] = "not_run"
+            manifest["plot_tasks"] = []
+            manifest["failure"] = f"{type(exc).__name__}: {exc}"
+            _atomic_json(run_dir / "matrix_manifest.json", manifest)
+            return 1
         try:
             outcomes = _run_matrix_plots(spec, run_dir)
             manifest["plot_tasks"] = outcomes
@@ -264,6 +304,7 @@ def execute_matrix_run(
             return 0
         except Exception as exc:
             manifest["plot_status"] = "fail"
+            manifest["plot_tasks"] = []
             manifest["failure"] = f"{type(exc).__name__}: {exc}"
             manifest["status"] = "fail" if spec.plots_required else "pass"
             _atomic_json(run_dir / "matrix_manifest.json", manifest)
@@ -302,10 +343,6 @@ def execute_matrix_run(
         "e0_config_sha256": file_sha256(spec.e0_config),
         "run_dir": str(run_dir),
         "matrix_fingerprint": fingerprint,
-        "science_fingerprint": fingerprint,
-        "compute_status": "running",
-        "plot_status": "pending" if spec.plots_enabled else "disabled",
-        "plot_tasks": [],
         "execution": {
             "jobs": spec.jobs,
             "torch_threads_per_job": spec.torch_threads_per_job,
@@ -320,6 +357,10 @@ def execute_matrix_run(
         "run_name": spec.name,
         "run_dir": str(run_dir),
         "matrix_fingerprint": fingerprint,
+        "science_fingerprint": fingerprint,
+        "compute_status": "running",
+        "plot_status": "pending" if spec.plots_enabled else "disabled",
+        "plot_tasks": [],
         "aggregation_kind": spec.aggregation_kind,
         "raw_run_counts": raw_counts,
         "e0": {"status": "pending", "executed_or_reused": None},
@@ -389,6 +430,7 @@ def execute_matrix_run(
                     "plugin_id": spec.aggregation_kind,
                     "run_index": cell.run_index,
                     "cell_id": cell.cell_id,
+                    "config_sha256": cell.config_sha256,
                     "config_path": str(config_path),
                     "e0_dir": str(e0_dir),
                     "output_dir": str(output_dir),

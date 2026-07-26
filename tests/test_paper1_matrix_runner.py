@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 import pol.workflow.matrix as matrix_module
+from pol.paper1.config import canonical_config_json, load_config_json
+from pol.paper1.matrix_plugins.e1_resolution import E1ResolutionPlugin
 from pol.workflow.matrix import execute_matrix_run
 from pol.workflow.matrix_spec import load_matrix_spec
 from pol.workflow.matrix_worker import execute_matrix_cell
@@ -180,3 +182,52 @@ def test_force_removes_only_owned_matrix_run_and_keeps_sibling(
     )
     assert execute_matrix_run(spec, repo_root=ROOT, force=True) == 1
     assert marker.read_text() == "important"
+
+
+def test_cell_validation_binds_saved_config_to_expected_matrix_cell(
+    tmp_path: Path, monkeypatch
+) -> None:
+    output = tmp_path / "cell"
+    output.mkdir()
+    source = ROOT / "configs/paper1_e1_smoke.json"
+    (output / "resolved_config.json").write_bytes(source.read_bytes())
+    (output / "e1_summary.json").write_text(
+        json.dumps({"status": "pass"}), encoding="utf-8"
+    )
+    (output / "artifact_manifest.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        "pol.paper1.e1_qa.validate_plots",
+        lambda *args, **kwargs: set(),
+    )
+    monkeypatch.setattr(
+        "pol.paper1.e1_qa.expected_artifacts",
+        lambda *args: set(),
+    )
+    monkeypatch.setattr(
+        "pol.paper1.e1_qa.validate_saved_numeric_artifacts",
+        lambda *args: None,
+    )
+    monkeypatch.setattr(
+        "pol.paper1.e1_qa.verify_artifact_manifest",
+        lambda *args: None,
+    )
+    monkeypatch.setattr(
+        "pol.paper1.e1_qa.validate_artifact_set",
+        lambda *args: None,
+    )
+    expected = matrix_module.hashlib.sha256(
+        canonical_config_json(load_config_json(source)).encode("utf-8")
+    ).hexdigest()
+    E1ResolutionPlugin().validate_cell(
+        output,
+        cell_plots=False,
+        expected_config_sha256=expected,
+        expected_config_path=source,
+    )
+    with pytest.raises(ValueError, match="does not match its matrix cell"):
+        E1ResolutionPlugin().validate_cell(
+            output,
+            cell_plots=False,
+            expected_config_sha256="0" * 64,
+            expected_config_path=source,
+        )

@@ -1,7 +1,7 @@
 """Artifact-only renderer for E1 matrix aggregate figures."""
 from __future__ import annotations
 
-from pol.plots.types import PlotContext, PlotRecipe, PlotResult
+from pol.plots.types import PlotContext, PlotRecipe, PlotRenderError, PlotResult
 
 
 def _positive(value: object, name: str) -> int:
@@ -51,10 +51,13 @@ def _validate(settings: dict) -> dict:
     for value in dimensions:
         _positive(value, "surrogate_line_observation_dims")
     formats = settings["formats"]
-    if not isinstance(formats, list) or not formats or any(
-        item not in {"png", "pdf", "svg"} for item in formats
+    if (
+        not isinstance(formats, list)
+        or not formats
+        or any(item not in {"png", "pdf", "svg"} for item in formats)
+        or len(set(formats)) != len(formats)
     ):
-        raise ValueError("formats must be a non-empty png/pdf/svg array")
+        raise ValueError("formats must be a unique non-empty png/pdf/svg array")
     return dict(settings)
 
 
@@ -71,12 +74,14 @@ def _render(context: PlotContext) -> PlotResult:
         item for item in manifest["plots"] if item.get("status") == "pass"
     )
     if manifest["status"] != "pass":
-        reasons = [
-            str(item.get("reason"))
-            for item in manifest["plots"]
-            if item.get("status") != "pass"
-        ]
-        raise ValueError(f"aggregate plot generation failed: {reasons}")
+        failures = tuple(
+            item for item in manifest["plots"] if item.get("status") != "pass"
+        )
+        raise PlotRenderError(
+            "aggregate plot generation failed",
+            outputs=outputs,
+            failures=failures,
+        )
     return PlotResult(outputs)
 
 

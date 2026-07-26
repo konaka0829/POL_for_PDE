@@ -12,14 +12,6 @@ from pol.paper1.config import (
     config_from_dict,
     load_config_json,
 )
-from pol.paper1.e1 import validate_e0_prerequisite
-from pol.paper1.e1_qa import (
-    expected_artifacts,
-    validate_artifact_set,
-    validate_plots,
-    validate_saved_numeric_artifacts,
-    verify_artifact_manifest,
-)
 from pol.runtime.io import write_strict_json
 from pol.runtime.recipe import RecipeInvocation, numerical_thread_scope
 from pol.workflow.types import MatrixCell
@@ -70,6 +62,8 @@ class E1ResolutionPlugin:
 
     def validate_e0(self, e0_dir: Path, base_config: Path) -> None:
         """Strictly validate the shared E0 prerequisite against E1."""
+        from pol.paper1.e1 import validate_e0_prerequisite
+
         validate_e0_prerequisite(e0_dir, load_config_json(base_config))
 
     def execute_e0(
@@ -122,12 +116,44 @@ class E1ResolutionPlugin:
             ),
         }
 
-    def validate_cell(self, output_dir: Path, *, cell_plots: bool) -> str:
+    def validate_cell(
+        self,
+        output_dir: Path,
+        *,
+        cell_plots: bool,
+        expected_config_sha256: str | None = None,
+        expected_config_path: Path | None = None,
+    ) -> str:
         """Verify the complete E1 artifact contract and return manifest hash."""
+        from pol.paper1.e1_qa import (
+            expected_artifacts,
+            validate_artifact_set,
+            validate_plots,
+            validate_saved_numeric_artifacts,
+            verify_artifact_manifest,
+        )
+
         summary = json.loads((output_dir / "e1_summary.json").read_text())
         if summary.get("status") != "pass":
             raise ValueError("E1 cell summary is not pass")
         config = load_config_json(output_dir / "resolved_config.json")
+        if expected_config_sha256 is not None:
+            if expected_config_path is None:
+                raise ValueError("expected matrix config path is required")
+            expected = load_config_json(expected_config_path)
+            saved_raw = config.to_dict()
+            # E0 prerequisite validation intentionally replaces only reference_nx
+            # with its accepted resolution before E1 writes resolved_config.json.
+            saved_raw["spatial"]["reference_nx"] = (
+                expected.spatial.reference_nx
+            )
+            saved_hash = hashlib.sha256(
+                canonical_config_json(config_from_dict(saved_raw)).encode("utf-8")
+            ).hexdigest()
+            if saved_hash != expected_config_sha256:
+                raise ValueError(
+                    "E1 cell resolved config does not match its matrix cell"
+                )
         plot_names = validate_plots(output_dir, skip_plots=not cell_plots)
         expected = expected_artifacts(plot_names)
         validate_saved_numeric_artifacts(output_dir, config)
@@ -189,3 +215,12 @@ class E1ResolutionPlugin:
             counts[name] = len(rows)
         write_strict_json(aggregate_dir / "aggregate_summary.json", counts)
         return counts
+
+    def aggregate_artifact_names(self) -> tuple[str, ...]:
+        """Return the exact generic-matrix aggregate artifact contract."""
+        return (
+            "aggregate_summary.json",
+            "sweep_noise_summary.csv",
+            "sweep_readout_diagnostics.csv",
+            "sweep_selected_results.csv",
+        )

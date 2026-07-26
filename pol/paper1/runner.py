@@ -21,6 +21,7 @@ from pol.runtime.recipe import (
     numerical_thread_scope,
 )
 from pol.runtime.path_safety import resolve_safe_run_directory
+from pol.paper1.config import canonical_config_json, load_config_json
 
 from .run_spec import Paper1RunSpec, run_spec_to_resolved_dict
 
@@ -48,16 +49,29 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _canonical_config_sha256(path: Path) -> str:
+    canonical = canonical_config_json(load_config_json(path))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def science_fingerprint(spec: Paper1RunSpec) -> str:
     """Hash only scientific inputs and compute-affecting execution settings."""
     payload = {
         "kind": spec.kind,
-        "experiment_config_sha256": _sha256(spec.experiment_config),
-        "e0_config_sha256": _sha256(spec.e0_config) if spec.e0_config else None,
-        "recipe_protocol": {
-            "e0": "paper1-e0-v2",
-            "e1": "paper1-e1-v2",
-            "e2": "paper1-e2-v3",
+        "experiment_config_sha256": _canonical_config_sha256(
+            spec.experiment_config
+        ),
+        "e0_config_sha256": (
+            _canonical_config_sha256(spec.e0_config) if spec.e0_config else None
+        ),
+        "recipe_protocols": {
+            "e0": ("paper1-e0-v2",),
+            "e1": ("paper1-e0-v2", "paper1-e1-v2"),
+            "e2": (
+                "paper1-e0-v2",
+                "paper1-master-dataset-v1",
+                "paper1-e2-v3",
+            ),
         }[spec.kind],
         "torch_threads": spec.torch_threads,
         "batch_size": spec.batch_size,
@@ -542,10 +556,20 @@ def execute_run(
         _validate_owned_run_directory(run_dir, spec)
         manifest_path = run_dir / "run_manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        expected_fingerprint = science_fingerprint(spec)
-        if manifest.get("science_fingerprint") != expected_fingerprint:
-            raise ValueError("science fingerprint mismatch for --plots-only")
-        _verify_compute_for_plots(spec, steps)
+        try:
+            expected_fingerprint = science_fingerprint(spec)
+            if manifest.get("science_fingerprint") != expected_fingerprint:
+                raise ValueError("science fingerprint mismatch for --plots-only")
+            _verify_compute_for_plots(spec, steps)
+        except Exception as exc:
+            manifest["status"] = "fail"
+            manifest["compute_status"] = "fail"
+            manifest["plot_status"] = "not_run"
+            manifest["plot_tasks"] = []
+            manifest["failure"] = f"{type(exc).__name__}: {exc}"
+            manifest["ended_at"] = _now()
+            _atomic_json(manifest_path, manifest)
+            return 1
         try:
             outcomes = _run_plots(spec, run_dir=run_dir)
             manifest["plot_tasks"] = outcomes
@@ -557,6 +581,7 @@ def execute_run(
             return 0
         except Exception as exc:
             manifest["plot_status"] = "fail"
+            manifest["plot_tasks"] = []
             manifest["failure"] = f"{type(exc).__name__}: {exc}"
             manifest["status"] = "fail" if spec.plots_required else "pass"
             manifest["ended_at"] = _now()

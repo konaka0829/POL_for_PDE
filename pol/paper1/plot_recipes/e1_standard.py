@@ -5,7 +5,8 @@ import csv
 from pathlib import Path
 from typing import Any
 
-from pol.plots.types import PlotContext, PlotRecipe, PlotResult
+from pol.plots.settings import validate_formats_and_dpi
+from pol.plots.types import PlotContext, PlotRecipe, PlotRenderError, PlotResult
 
 
 def _rows(path: Path) -> list[dict[str, Any]]:
@@ -36,23 +37,22 @@ def _render(context: PlotContext) -> PlotResult:
     }
     formats = tuple(context.settings.get("formats", ["png"]))
     dpi = int(context.settings.get("dpi", 160))
-    return PlotResult(
-        tuple(create_e1_plots(context.output_dir, tables, formats=formats, dpi=dpi))
+    records = tuple(
+        create_e1_plots(context.output_dir, tables, formats=formats, dpi=dpi)
     )
+    failures = tuple(item for item in records if item.get("status") != "created")
+    outputs = tuple(item for item in records if item.get("status") == "created")
+    if failures:
+        raise PlotRenderError(
+            "one or more E1 plot formats failed",
+            outputs=outputs,
+            failures=failures,
+        )
+    return PlotResult(outputs)
 
 
 def _validate(settings: dict[str, Any]) -> dict[str, Any]:
-    if set(settings) != {"formats", "dpi"}:
-        raise ValueError("E1 standard plot settings require formats and dpi")
-    formats = settings["formats"]
-    dpi = settings["dpi"]
-    if not isinstance(formats, list) or not formats or any(
-        item not in {"png", "pdf", "svg"} for item in formats
-    ):
-        raise ValueError("formats must be a non-empty png/pdf/svg array")
-    if isinstance(dpi, bool) or not isinstance(dpi, int) or dpi <= 0:
-        raise ValueError("dpi must be a positive integer")
-    return {"formats": list(formats), "dpi": dpi}
+    return validate_formats_and_dpi(settings)
 
 
 RECIPE = PlotRecipe(

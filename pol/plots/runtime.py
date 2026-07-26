@@ -11,11 +11,33 @@ from typing import Any, Iterable
 from pol.runtime.io import file_sha256
 
 from .registry import get_plot_recipe
-from .types import PlotContext, PlotTaskSpec
+from .types import PlotContext, PlotRenderError, PlotTaskSpec
 
 
 PLOT_MANIFEST_SCHEMA = "pol-plot-task-v1"
 PLOT_RUNTIME_VERSION = "1"
+
+
+def _safe_directory(path: Path, *, parent: Path | None = None) -> Path:
+    """Validate a plot-owned lexical directory without following its final link."""
+    lexical = path.absolute()
+    if parent is not None and lexical.parent != parent:
+        raise ValueError(f"unsafe plot directory outside its parent: {lexical}")
+    if lexical.is_symlink():
+        raise ValueError(f"plot directory must not be a symlink: {lexical}")
+    if lexical.exists() and not lexical.is_dir():
+        raise ValueError(f"plot directory is not a directory: {lexical}")
+    expected = lexical.parent.resolve() / lexical.name
+    if lexical.resolve(strict=False) != expected:
+        raise ValueError(f"plot directory escapes its lexical parent: {lexical}")
+    return lexical
+
+
+def _remove_plot_directory(path: Path, *, parent: Path) -> None:
+    """Remove one validated plot-owned child directory."""
+    target = _safe_directory(path, parent=parent)
+    if target.exists():
+        shutil.rmtree(target)
 
 
 def _atomic_json(path: Path, value: object) -> None:
@@ -47,6 +69,8 @@ def _canonical_settings(value: object) -> object:
 
 
 def _input_records(input_dir: Path, names: Iterable[str]) -> list[dict[str, Any]]:
+    if input_dir.is_symlink() or not input_dir.is_dir():
+        raise ValueError(f"unsafe or missing plot input directory: {input_dir}")
     records = []
     for name in names:
         path = input_dir / name
@@ -114,7 +138,9 @@ def execute_plot_tasks(
 ) -> list[dict[str, Any]]:
     """Execute or reuse registered plot tasks without changing compute artifacts."""
     outcomes: list[dict[str, Any]] = []
+    figures_dir = _safe_directory(figures_dir)
     figures_dir.mkdir(parents=True, exist_ok=True)
+    figures_dir = _safe_directory(figures_dir)
     for task in tasks:
         recipe = get_plot_recipe(task.recipe_id)
         if experiment_kind not in recipe.supported_experiment_kinds:
@@ -127,11 +153,11 @@ def execute_plot_tasks(
         fingerprint = _fingerprint(
             recipe.recipe_id, recipe.version, settings, inputs
         )
-        output_dir = figures_dir / recipe.recipe_id
+        output_dir = _safe_directory(
+            figures_dir / recipe.recipe_id, parent=figures_dir
+        )
         reused = _reusable(output_dir, fingerprint) if output_dir.is_dir() else None
         if reused is not None:
-            reused["executed_or_reused"] = "reused"
-            _atomic_json(output_dir / "plot_manifest.json", reused)
             outcomes.append(
                 {
                     "recipe_id": recipe.recipe_id,
@@ -142,9 +168,11 @@ def execute_plot_tasks(
                 }
             )
             continue
-        staging = figures_dir / f".{recipe.recipe_id}.staging"
+        staging = _safe_directory(
+            figures_dir / f".{recipe.recipe_id}.staging", parent=figures_dir
+        )
         if staging.exists():
-            shutil.rmtree(staging)
+            _remove_plot_directory(staging, parent=figures_dir)
         staging.mkdir(parents=True)
         try:
             result = recipe.render(
@@ -190,7 +218,7 @@ def execute_plot_tasks(
             }
             _atomic_json(staging / "plot_manifest.json", manifest)
             if output_dir.exists():
-                shutil.rmtree(output_dir)
+                _remove_plot_directory(output_dir, parent=figures_dir)
             os.replace(staging, output_dir)
             outcomes.append(
                 {
@@ -202,12 +230,60 @@ def execute_plot_tasks(
                 }
             )
         except Exception as exc:
-            if staging.exists():
-                shutil.rmtree(staging)
-            failure_dir = figures_dir / f".{recipe.recipe_id}.failure"
+            partial_outputs: list[dict[str, Any]] = []
+            format_failures: list[dict[str, Any]] = []
+            if isinstance(exc, PlotRenderError):
+                for item in exc.failures:
+                    record = dict(item)
+                    relative = str(record.get("relative_path", ""))
+                    relative_path = Path(relative)
+                    if (
+                        not relative
+                        or relative_path.is_absolute()
+                        or ".." in relative_path.parts
+                    ):
+                        raise ValueError(
+                            f"unsafe failed plot output: {relative}"
+                        ) from exc
+                    failed_path = staging / relative
+                    if failed_path.exists() and not failed_path.is_symlink():
+                        failed_path.unlink()
+                    format_failures.append(record)
+                for item in exc.outputs:
+                    record = dict(item)
+                    relative = str(record["relative_path"])
+                    relative_path = Path(relative)
+                    path = staging / relative
+                    if (
+                        relative_path.is_absolute()
+                        or ".." in relative_path.parts
+                        or path.is_symlink()
+                        or not path.is_file()
+                        or path.stat().st_size <= 0
+                    ):
+                        raise ValueError(
+                            f"invalid partial plot output: {relative}"
+                        ) from exc
+                    partial_outputs.append(
+                        {
+                            **record,
+                            "relative_path": relative,
+                            "size_bytes": path.stat().st_size,
+                            "sha256": file_sha256(path),
+                        }
+                    )
+            elif staging.exists():
+                _remove_plot_directory(staging, parent=figures_dir)
+            failure_dir = _safe_directory(
+                figures_dir / f".{recipe.recipe_id}.failure",
+                parent=figures_dir,
+            )
             if failure_dir.exists():
-                shutil.rmtree(failure_dir)
-            failure_dir.mkdir()
+                _remove_plot_directory(failure_dir, parent=figures_dir)
+            if isinstance(exc, PlotRenderError):
+                os.replace(staging, failure_dir)
+            else:
+                failure_dir.mkdir()
             _atomic_json(
                 failure_dir / "plot_manifest.json",
                 {
@@ -219,17 +295,18 @@ def execute_plot_tasks(
                     "plot_fingerprint": fingerprint,
                     "inputs": inputs,
                     "settings": settings,
-                    "outputs": [],
+                    "outputs": partial_outputs,
+                    "format_failures": format_failures,
                     "executed_or_reused": "executed",
                     "failure": f"{type(exc).__name__}: {exc}",
                 },
             )
             if output_dir.exists():
-                shutil.rmtree(output_dir)
+                _remove_plot_directory(output_dir, parent=figures_dir)
             os.replace(failure_dir, output_dir)
             raise
         except BaseException:
             if staging.exists():
-                shutil.rmtree(staging)
+                _remove_plot_directory(staging, parent=figures_dir)
             raise
     return outcomes

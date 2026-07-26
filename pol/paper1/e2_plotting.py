@@ -10,6 +10,37 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
+def _save_formats(
+    fig: Any,
+    output_dir: Path,
+    stem: str,
+    formats: tuple[str, ...],
+    dpi: int,
+    metadata: dict[str, Any],
+) -> list[dict[str, Any]]:
+    records = []
+    for fmt in formats:
+        path = output_dir / f"{stem}.{fmt}"
+        try:
+            fig.savefig(path, dpi=dpi, bbox_inches="tight")
+            records.append({
+                "status": "created",
+                "relative_path": path.name,
+                "size_bytes": path.stat().st_size,
+                "format": fmt,
+                **metadata,
+            })
+        except Exception as exc:
+            records.append({
+                "status": "fail",
+                "relative_path": path.name,
+                "format": fmt,
+                **metadata,
+                "reason": f"{type(exc).__name__}: {exc}",
+            })
+    return records
+
+
 def create_e2_plots(
     output_dir: Path,
     result: dict[str, Any],
@@ -65,13 +96,13 @@ def create_e2_plots(
     fig.supylabel("test full-reference relative L2")
     fig.tight_layout()
     outputs = []
-    for fmt in formats:
-        path = output_dir / f"e2_parameter_sweeps.{fmt}"; fig.savefig(path, dpi=dpi, bbox_inches="tight")
-        outputs.append({"status": "created", "relative_path": path.name,
-                        "size_bytes": path.stat().st_size,
-                        "format": fmt, "kind": "parameter_sweeps",
-                        "panels": panel_meta})
-    plt.close(fig)
+    try:
+        outputs.extend(_save_formats(
+            fig, output_dir, "e2_parameter_sweeps", formats, dpi,
+            {"kind": "parameter_sweeps", "panels": panel_meta},
+        ))
+    finally:
+        plt.close(fig)
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), sharey=True)
     for ax, family in zip(axes, ("burgers", "reaction_diffusion")):
@@ -98,13 +129,16 @@ def create_e2_plots(
                        label=f"reference={x[-1]}")
         ax.set_yscale("log"); ax.set_xlabel("n_sur"); ax.set_title(family); ax.grid(True, which="both", alpha=.25)
     axes[0].set_ylabel("relative L2 discrepancy"); axes[0].legend(fontsize=8); fig.tight_layout()
-    for fmt in formats:
-        path = output_dir / f"e2_nsur_convergence.{fmt}"; fig.savefig(path, dpi=dpi, bbox_inches="tight")
-        outputs.append({"status": "created", "relative_path": path.name,
-                        "size_bytes": path.stat().st_size,
-                        "format": fmt, "kind": "n_sur_convergence",
-                        "actual_final_pilot_n_sur": result["pilot_n_sur"],
-                        "selection_record_hash": result["selection_record_hash"],
-                        "frozen_plan_hash": result["frozen_plan_hash"]})
-    plt.close(fig)
+    try:
+        outputs.extend(_save_formats(
+            fig, output_dir, "e2_nsur_convergence", formats, dpi,
+            {
+                "kind": "n_sur_convergence",
+                "actual_final_pilot_n_sur": result["pilot_n_sur"],
+                "selection_record_hash": result["selection_record_hash"],
+                "frozen_plan_hash": result["frozen_plan_hash"],
+            },
+        ))
+    finally:
+        plt.close(fig)
     return outputs

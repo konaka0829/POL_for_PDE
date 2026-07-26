@@ -6,7 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from pol.plots.types import PlotContext, PlotRecipe, PlotResult
+from pol.plots.settings import validate_formats_and_dpi
+from pol.plots.types import PlotContext, PlotRecipe, PlotRenderError, PlotResult
 
 
 def _rows(path: Path) -> list[dict[str, Any]]:
@@ -60,23 +61,28 @@ def _render(context: PlotContext) -> PlotResult:
     config = load_config_json(context.input_dir / "resolved_config.json")
     formats = tuple(context.settings.get("formats", ["png", "pdf"]))
     dpi = int(context.settings.get("dpi", 180))
-    return PlotResult(
-        tuple(
-            create_e2_plots(
-                context.output_dir,
-                result,
-                config,
-                formats=formats,
-                dpi=dpi,
-            )
+    records = tuple(
+        create_e2_plots(
+            context.output_dir,
+            result,
+            config,
+            formats=formats,
+            dpi=dpi,
         )
     )
+    failures = tuple(item for item in records if item.get("status") != "created")
+    outputs = tuple(item for item in records if item.get("status") == "created")
+    if failures:
+        raise PlotRenderError(
+            "one or more E2 plot formats failed",
+            outputs=outputs,
+            failures=failures,
+        )
+    return PlotResult(outputs)
 
 
 def _validate(settings: dict[str, Any]) -> dict[str, Any]:
-    from pol.paper1.plot_recipes.e1_standard import _validate as validate_standard
-
-    return validate_standard(settings)
+    return validate_formats_and_dpi(settings)
 
 
 RECIPE = PlotRecipe(

@@ -10,7 +10,7 @@ import pytest
 from pol.paper1.run_spec import load_run_spec
 from pol.plots.registry import get_plot_recipe
 from pol.plots.runtime import execute_plot_tasks
-from pol.plots.types import PlotRecipe, PlotResult, PlotTaskSpec
+from pol.plots.types import PlotRecipe, PlotRenderError, PlotResult, PlotTaskSpec
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -115,6 +115,15 @@ def test_plot_runtime_reuse_output_tamper_and_input_change(
     assert first[0]["executed_or_reused"] == "executed"
     assert second[0]["executed_or_reused"] == "reused"
     assert len(calls) == 1
+    manifest_path = tmp_path / "figures/test.plot.v1/plot_manifest.json"
+    manifest_before_reuse = manifest_path.read_bytes()
+    execute_plot_tasks(
+        experiment_kind="test",
+        input_dir=input_dir,
+        figures_dir=tmp_path / "figures",
+        tasks=(task,),
+    )
+    assert manifest_path.read_bytes() == manifest_before_reuse
 
     output = tmp_path / "figures/test.plot.v1/figure.png"
     output.write_bytes(b"tampered")
@@ -183,3 +192,86 @@ def test_plot_runtime_rejects_unsafe_renderer_output(
             tasks=(PlotTaskSpec("unsafe.v1", {}),),
         )
     assert not (tmp_path / "escape.png").exists()
+
+
+def test_plot_runtime_rejects_symlink_figures_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    input_dir = tmp_path / "compute"
+    input_dir.mkdir()
+    (input_dir / "data").write_text("ok")
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    figures = tmp_path / "figures"
+    try:
+        figures.symlink_to(victim, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+    recipe = PlotRecipe(
+        "safe.v1",
+        "1",
+        ("test",),
+        ("data",),
+        lambda context: PlotResult(()),
+        lambda settings: settings,
+    )
+    monkeypatch.setattr("pol.plots.runtime.get_plot_recipe", lambda _: recipe)
+    with pytest.raises(ValueError, match="must not be a symlink"):
+        execute_plot_tasks(
+            experiment_kind="test",
+            input_dir=input_dir,
+            figures_dir=figures,
+            tasks=(PlotTaskSpec("safe.v1", {}),),
+        )
+    assert list(victim.iterdir()) == []
+
+
+def test_plot_runtime_records_partial_format_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    input_dir = tmp_path / "compute"
+    input_dir.mkdir()
+    (input_dir / "data").write_text("ok")
+
+    def render(context):
+        (context.output_dir / "figure.png").write_bytes(b"png")
+        raise PlotRenderError(
+            "pdf failed",
+            outputs=(
+                {
+                    "relative_path": "figure.png",
+                    "format": "png",
+                    "status": "created",
+                },
+            ),
+            failures=(
+                {
+                    "relative_path": "figure.pdf",
+                    "format": "pdf",
+                    "status": "fail",
+                    "reason": "backend failure",
+                },
+            ),
+        )
+
+    recipe = PlotRecipe(
+        "partial.v1",
+        "1",
+        ("test",),
+        ("data",),
+        render,
+        lambda settings: settings,
+    )
+    monkeypatch.setattr("pol.plots.runtime.get_plot_recipe", lambda _: recipe)
+    with pytest.raises(PlotRenderError, match="pdf failed"):
+        execute_plot_tasks(
+            experiment_kind="test",
+            input_dir=input_dir,
+            figures_dir=tmp_path / "figures",
+            tasks=(PlotTaskSpec("partial.v1", {}),),
+        )
+    manifest = json.loads(
+        (tmp_path / "figures/partial.v1/plot_manifest.json").read_text()
+    )
+    assert manifest["outputs"][0]["format"] == "png"
+    assert manifest["format_failures"][0]["format"] == "pdf"

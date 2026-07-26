@@ -480,8 +480,12 @@ def test_plots_only_rejects_compute_tamper_before_plotting(
         "_run_plots",
         lambda *args, **kwargs: pytest.fail("plot task called"),
     )
-    with pytest.raises(ValueError, match="compute artifact tampered"):
-        execute_run(spec, repo_root=ROOT, force=False, plots_only=True)
+    assert execute_run(spec, repo_root=ROOT, force=False, plots_only=True) == 1
+    saved = json.loads((run_dir / "run_manifest.json").read_text())
+    assert saved["status"] == "fail"
+    assert saved["compute_status"] == "fail"
+    assert saved["plot_status"] == "not_run"
+    assert "compute artifact tampered" in saved["failure"]
 
 
 def test_keyboard_interrupt_records_and_returns_130(tmp_path: Path, monkeypatch) -> None:

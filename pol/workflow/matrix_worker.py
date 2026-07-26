@@ -42,7 +42,10 @@ def execute_matrix_cell(request: dict[str, Any]) -> dict[str, Any]:
             manifest_hash = None
             if result.exit_code == 0:
                 manifest_hash = plugin.validate_cell(
-                    output_dir, cell_plots=request["cell_plots"]
+                    output_dir,
+                    cell_plots=request["cell_plots"],
+                    expected_config_sha256=request["config_sha256"],
+                    expected_config_path=Path(request["config_path"]),
                 )
             record = {
                 "run_index": request["run_index"],

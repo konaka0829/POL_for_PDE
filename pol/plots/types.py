@@ -30,6 +30,21 @@ class PlotResult:
     outputs: tuple[Mapping[str, Any], ...]
 
 
+class PlotRenderError(RuntimeError):
+    """A renderer failure carrying successful outputs and format failures."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        outputs: tuple[Mapping[str, Any], ...] = (),
+        failures: tuple[Mapping[str, Any], ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.outputs = outputs
+        self.failures = failures
+
+
 @dataclass(frozen=True)
 class PlotRecipe:
     """Registered artifact-only plot implementation."""
