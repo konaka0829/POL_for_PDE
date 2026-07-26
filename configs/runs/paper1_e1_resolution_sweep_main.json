@@ -1,0 +1,91 @@
+{
+  "schema_version": "paper1-matrix-run-v1",
+  "run": {
+    "name": "paper1_e1_resolution_sweep_main",
+    "output_root": "outputs/paper1_runs"
+  },
+  "experiment": {
+    "kind": "e1",
+    "base_config": "configs/paper1_e1_main.json"
+  },
+  "prerequisites": {
+    "e0_config": "configs/paper1_e0_main.json"
+  },
+  "matrix": {
+    "invalid_run_policy": "skip",
+    "experiments": [
+      {
+        "name": "full_observation_resolution",
+        "fixed": {},
+        "grid": [
+          {
+            "path": "spatial.target_data_nx",
+            "values": [65, 72, 80, 96, 128, 192, 256, 512]
+          },
+          {
+            "path": "spatial.surrogate_internal_nx",
+            "values": [65, 72, 80, 96, 128, 192, 256, 512]
+          }
+        ],
+        "copy": {
+          "spatial.observation_dim": "spatial.surrogate_internal_nx"
+        }
+      },
+      {
+        "name": "target_observation_grid",
+        "fixed": {
+          "spatial.surrogate_internal_nx": 512
+        },
+        "grid": [
+          {
+            "path": "spatial.target_data_nx",
+            "values": [65, 72, 80, 96, 128, 192, 256, 512]
+          },
+          {
+            "path": "spatial.observation_dim",
+            "values": [65, 72, 80, 96, 128, 192, 256, 512]
+          }
+        ],
+        "copy": {}
+      },
+      {
+        "name": "surrogate_resolution_J65",
+        "fixed": {
+          "spatial.target_data_nx": 256,
+          "spatial.observation_dim": 65
+        },
+        "grid": [
+          {
+            "path": "spatial.surrogate_internal_nx",
+            "values": [65, 80, 96, 128, 192, 256, 512, 1024]
+          }
+        ],
+        "copy": {}
+      },
+      {
+        "name": "surrogate_resolution_J96",
+        "fixed": {
+          "spatial.target_data_nx": 256,
+          "spatial.observation_dim": 96
+        },
+        "grid": [
+          {
+            "path": "spatial.surrogate_internal_nx",
+            "values": [96, 128, 192, 256, 512, 1024]
+          }
+        ],
+        "copy": {}
+      }
+    ],
+    "explicit_runs": []
+  },
+  "execution": {
+    "jobs": 2,
+    "torch_threads_per_job": 1,
+    "resume": true,
+    "cell_plots": false
+  },
+  "aggregation": {
+    "kind": "paper1_e1_resolution_v1"
+  }
+}

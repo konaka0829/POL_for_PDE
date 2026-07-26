@@ -1,0 +1,44 @@
+{
+  "schema_version": "paper1-matrix-run-v1",
+  "run": {
+    "name": "paper1_e1_resolution_sweep_smoke",
+    "output_root": "outputs/paper1_runs"
+  },
+  "experiment": {
+    "kind": "e1",
+    "base_config": "configs/paper1_e1_smoke.json"
+  },
+  "prerequisites": {
+    "e0_config": "configs/paper1_e0_for_e1_smoke.json"
+  },
+  "matrix": {
+    "invalid_run_policy": "error",
+    "experiments": [],
+    "explicit_runs": [
+      {
+        "spatial.target_data_nx": 32,
+        "spatial.surrogate_internal_nx": 32,
+        "spatial.observation_dim": 16
+      },
+      {
+        "spatial.target_data_nx": 16,
+        "spatial.surrogate_internal_nx": 32,
+        "spatial.observation_dim": 32
+      },
+      {
+        "spatial.target_data_nx": 32,
+        "spatial.surrogate_internal_nx": 32,
+        "spatial.observation_dim": 32
+      }
+    ]
+  },
+  "execution": {
+    "jobs": 2,
+    "torch_threads_per_job": 1,
+    "resume": true,
+    "cell_plots": false
+  },
+  "aggregation": {
+    "kind": "paper1_e1_resolution_v1"
+  }
+}

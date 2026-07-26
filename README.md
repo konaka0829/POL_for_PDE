@@ -47,7 +47,24 @@ pol run configs/runs/paper1_e2_main.json --plan
 
 A run name may not be reused unless `--force` is supplied. Main profiles are
 costly, so inspect them with `--plan` first. The runner does not implement
-automatic resume or artifact reuse.
+automatic resume or artifact reuse for scalar runs.
+
+## E1 resolution matrix runner (Phase 3A)
+
+The `paper1-matrix-run-v1` schema expands strict scalar-leaf overrides into
+deduplicated E1 cells. Each cell runs in a spawned Python process, while E0 is
+validated or executed once for the matrix:
+
+```bash
+pol run configs/runs/paper1_e1_resolution_sweep_smoke.json --plan
+pol run configs/runs/paper1_e1_resolution_sweep_smoke.json
+```
+
+The second invocation validates and reuses complete cells. Missing or
+hash-tampered E1 artifacts rerun only their owning cell; aggregate CSV files
+are rebuilt from verified passing cells on every invocation. The older
+`scripts/paper1/run_e1_sweep.py` entry remains as a deprecated compatibility
+wrapper and temporarily retains aggregate plotting until Phase 3B.
 
 ## Phase 1 scientific regression baseline
 

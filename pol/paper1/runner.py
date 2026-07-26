@@ -20,6 +20,7 @@ from pol.runtime.recipe import (
     RecipeUsageError,
     numerical_thread_scope,
 )
+from pol.runtime.path_safety import resolve_safe_run_directory
 
 from .run_spec import Paper1RunSpec, run_spec_to_resolved_dict
 
@@ -64,41 +65,15 @@ def resolve_run_directory(
     spec: Paper1RunSpec, *, repo_root: Path
 ) -> tuple[Path, Path]:
     """Validate and return the resolved output root and lexical run directory."""
-    root = repo_root.resolve()
-    output_root = spec.output_root.resolve()
-    filesystem_root = Path(output_root.anchor).resolve()
-    forbidden_roots = {
-        filesystem_root,
-        Path.home().resolve(),
-        root,
-        root.parent,
-    }
-    if output_root in forbidden_roots:
-        raise ValueError(f"unsafe output root: {output_root}")
-
-    run_dir = output_root / spec.name
-    forbidden_run_dirs = {*forbidden_roots, output_root}
-    if run_dir.parent != output_root or run_dir in forbidden_run_dirs:
-        raise ValueError(f"unsafe run directory: {run_dir}")
-    if run_dir.is_symlink():
-        raise ValueError(f"run directory must not be a symlink: {run_dir}")
-    resolved_target = run_dir.resolve(strict=False)
-    if resolved_target != run_dir or resolved_target.parent != output_root:
-        raise ValueError(f"run directory escapes output root: {run_dir}")
-    protected_paths = {
-        root,
-        Path.home().resolve(),
-        spec.source_path.resolve(),
-        spec.experiment_config.resolve(),
-    }
+    protected_paths = [spec.source_path, spec.experiment_config]
     if spec.e0_config is not None:
-        protected_paths.add(spec.e0_config.resolve())
-    for protected in protected_paths:
-        if protected == run_dir or protected.is_relative_to(run_dir):
-            raise ValueError(
-                f"run directory contains protected path {protected}: {run_dir}"
-            )
-    return output_root, run_dir
+        protected_paths.append(spec.e0_config)
+    return resolve_safe_run_directory(
+        name=spec.name,
+        output_root=spec.output_root,
+        repo_root=repo_root,
+        protected_paths=protected_paths,
+    )
 
 
 def build_plan(spec: Paper1RunSpec, *, repo_root: Path) -> list[PlannedStep]:

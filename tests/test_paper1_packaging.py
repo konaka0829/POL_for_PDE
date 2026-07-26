@@ -38,6 +38,8 @@ def test_wheel_contains_all_pol_packages(tmp_path: Path) -> None:
         "pol/model123_1d",
         "pol/paper1",
         "pol/paper1/recipes",
+        "pol/paper1/matrix_plugins",
         "pol/runtime",
+        "pol/workflow",
     ):
         assert f"{package}/__init__.py" in names

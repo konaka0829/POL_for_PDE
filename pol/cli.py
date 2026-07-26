@@ -88,12 +88,38 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     repo_root = Path(__file__).resolve().parent.parent
     try:
+        source = Path(args.run_spec).resolve()
+        raw = json.loads(source.read_text(encoding="utf-8"))
+        schema = raw.get("schema_version") if isinstance(raw, dict) else None
+        if schema == "paper1-matrix-run-v1":
+            from .workflow.matrix import execute_matrix_run, matrix_plan_to_dict
+            from .workflow.matrix_spec import load_matrix_spec
+
+            matrix_spec = load_matrix_spec(source, repo_root=repo_root)
+            if args.plan:
+                print(
+                    json.dumps(
+                        matrix_plan_to_dict(matrix_spec, repo_root=repo_root),
+                        indent=2,
+                        allow_nan=False,
+                    )
+                )
+                return 0
+            return execute_matrix_run(
+                matrix_spec, repo_root=repo_root, force=args.force
+            )
         from .paper1.run_spec import load_run_spec
         from .paper1.runner import execute_run, plan_to_dict
 
-        spec = load_run_spec(args.run_spec, repo_root=repo_root)
+        spec = load_run_spec(source, repo_root=repo_root)
         if args.plan:
-            print(json.dumps(plan_to_dict(spec, repo_root=repo_root), indent=2, allow_nan=False))
+            print(
+                json.dumps(
+                    plan_to_dict(spec, repo_root=repo_root),
+                    indent=2,
+                    allow_nan=False,
+                )
+            )
             return 0
         return execute_run(spec, repo_root=repo_root, force=args.force)
     except (OSError, ValueError) as exc:
