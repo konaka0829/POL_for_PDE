@@ -8,7 +8,7 @@ from pathlib import Path
 import shutil
 from typing import Any, Iterable, Mapping
 
-from pol.runtime.io import file_sha256
+from pol.runtime.io import file_sha256, write_strict_json
 
 from .registry import get_plot_recipe
 from .types import PlotContext, PlotRenderError, PlotTaskSpec
@@ -41,12 +41,7 @@ def _remove_plot_directory(path: Path, *, parent: Path) -> None:
 
 
 def _atomic_json(path: Path, value: object) -> None:
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(
-        json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
+    write_strict_json(path, value)
 
 
 def _canonical_settings(value: object) -> object:

@@ -1,7 +1,6 @@
 """Import-safe Paper 1 E2 surrogate-parameter/time recipe."""
 from __future__ import annotations
 
-import csv
 import hashlib
 import json
 import os
@@ -15,7 +14,8 @@ from typing import Any
 
 import torch
 
-from pol.runtime.io import file_sha256
+from pol.runtime.io import atomic_torch_save, file_sha256 as sha, write_csv as atomic_write_csv
+from pol.runtime.io import write_strict_json
 from pol.runtime.provenance import git_output
 from pol.runtime.recipe import (
     RecipeInvocation,
@@ -66,7 +66,7 @@ def _load_science_dependencies() -> None:
 
 
 def write_json(path: Path, value: Any) -> None:
-    path.write_text(json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
+    write_strict_json(path, value)
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -76,14 +76,7 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     fields: list[str] = []
     for row in rows:
         fields.extend(key for key in row if key not in fields)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def sha(path: Path) -> str:
-    return file_sha256(path)
+    atomic_write_csv(path, rows, fieldnames=fields)
 
 
 def check(status: bool, value: Any, threshold: Any, message: str) -> dict[str, Any]:
@@ -284,12 +277,11 @@ def run_surrogate_parameter_time(
             "attempts": result["attempt_history"],
         })
         if result["test_evaluated"]:
-            torch.save({
+            atomic_torch_save(stage / "selected_models.pt", {
                 "schema_version": E2_SCHEMA_VERSION,
                 "selection_record_hash": result["selection_record_hash"],
                 "frozen_plan_hash": result["frozen_plan_hash"],
-                "models": result["selected_models"]},
-                stage / "selected_models.pt")
+                "models": result["selected_models"]})
         data_manifest = {"schema_version": "paper1-e2-data-v3", "dataset_hash": dataset.metadata["dataset_hash"],
                          "split_hash": dataset.metadata["split_hash"], "sample_ids_hash": tensor_hash(dataset.sample_ids),
                          "bindings": bindings,

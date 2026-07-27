@@ -8,6 +8,9 @@ from typing import Any, Mapping
 
 
 COMPARISON_POLICY_VERSION = "paper1-scientific-comparison-v1"
+_CROSS_RUNTIME_IGNORED_FIELDS = frozenset(
+    {"selected_models_content_hash", "state_key"}
+)
 
 
 @dataclass(frozen=True)
@@ -49,6 +52,10 @@ DEFAULT_TOLERANCES = {
     # Selection identities are exact elsewhere; the metrics which support the
     # choice use a tighter rule to expose ranking-boundary changes.
     "selection_metric": NumericTolerance(rtol=1e-8, atol=1e-12),
+    # Random draws are intentionally not exact across PyTorch versions.  Only
+    # saved aggregate metrics enter the portable record; identities, seeds,
+    # shapes, and selected candidates remain exact structural fields.
+    "stochastic_aggregate": NumericTolerance(rtol=5e-5, atol=2e-7),
 }
 
 
@@ -139,17 +146,19 @@ def compare_scientific_record(
                     ScientificDifference(path, right, left, "object type mismatch")
                 )
                 return
-            if set(left) != set(right):
+            left_keys = set(left) - _CROSS_RUNTIME_IGNORED_FIELDS
+            right_keys = set(right) - _CROSS_RUNTIME_IGNORED_FIELDS
+            if left_keys != right_keys:
                 differences.append(
                     ScientificDifference(
                         path,
-                        sorted(right),
-                        sorted(left),
+                        sorted(right_keys),
+                        sorted(left_keys),
                         "object key mismatch",
                     )
                 )
                 return
-            for key in sorted(right):
+            for key in sorted(right_keys):
                 compare(left[key], right[key], _path(path, key))
             return
         if isinstance(right, list):

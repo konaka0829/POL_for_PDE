@@ -51,7 +51,9 @@ PROVENANCE_FIELDS = frozenset(
         "tensor_hash",
         "tensor_hashes",
         "runtime_seconds",
+        "selected_models_content_hash",
         "selection_record_hash",
+        "state_key",
         "started_at",
         "ended_at",
     }
@@ -647,30 +649,74 @@ _SELECTION_TOKENS = (
     "objective",
     "best",
 )
+_FLOAT32_TOKEN = re.compile(r"(?:^|[._\-/])float32(?:$|[._\-/])")
+_DTYPE_FIELDS = frozenset({"dtype", "logical_dtype", "sim_dtype", "storage_dtype"})
+_STOCHASTIC_TOKENS = (
+    "noise_summary",
+    "model3_test_aggregate",
+)
 
 
-def _numeric_category(path: str) -> str:
+def _numeric_category(path: str, *, dtype_context: str | None = None) -> str:
+    """Classify one numeric field using its semantic path and dtype context.
+
+    A dtype is context, not a scientific value: JSON objects and tensor
+    descriptors commonly declare it on a sibling field, while E0 check names
+    encode it in the table/JSON path.  Supporting both forms avoids treating
+    every path containing an incidental ``32`` as float32.
+    """
     field = re.split(r"[.\[]", path)[-1].rstrip("]")
     if field in _EXACT_NUMERIC_FIELDS:
         return "exact_numeric"
     lowered = path.lower()
+    float32 = (
+        dtype_context is not None
+        and dtype_context.lower().removeprefix("torch.") == "float32"
+    ) or _FLOAT32_TOKEN.search(lowered) is not None
     if any(token in lowered for token in _ROUND_OFF_TOKENS):
-        return "roundoff_float64"
+        return "roundoff_float32" if float32 else "roundoff_float64"
     if any(token in lowered for token in _SELECTION_TOKENS):
         return "selection_metric"
-    return "scientific_float64"
+    if any(token in lowered for token in _STOCHASTIC_TOKENS):
+        return "stochastic_aggregate"
+    return "scientific_float32" if float32 else "scientific_float64"
 
 
-def _numeric_paths(value: Any, path: str = "$") -> dict[str, str]:
+def _numeric_paths(
+    value: Any,
+    path: str = "$",
+    *,
+    dtype_context: str | None = None,
+) -> dict[str, str]:
     result: dict[str, str] = {}
     if isinstance(value, float):
-        result[path] = _numeric_category(path)
+        result[path] = _numeric_category(path, dtype_context=dtype_context)
     elif isinstance(value, dict):
+        declared_dtype = next(
+            (
+                item
+                for key, item in value.items()
+                if str(key) in _DTYPE_FIELDS and isinstance(item, str)
+            ),
+            dtype_context,
+        )
         for key, item in sorted(value.items()):
-            result.update(_numeric_paths(item, f"{path}.{key}"))
+            result.update(
+                _numeric_paths(
+                    item,
+                    f"{path}.{key}",
+                    dtype_context=declared_dtype,
+                )
+            )
     elif isinstance(value, list):
         for index, item in enumerate(value):
-            result.update(_numeric_paths(item, f"{path}[{index}]"))
+            result.update(
+                _numeric_paths(
+                    item,
+                    f"{path}[{index}]",
+                    dtype_context=dtype_context,
+                )
+            )
     return result
 
 
@@ -691,7 +737,10 @@ def _comparison_policy(record: Mapping[str, Any]) -> dict[str, Any]:
             "exact": "schema, discrete identity, dimensions, row keys, and selections",
             "ignored": sorted(PROVENANCE_FIELDS),
             "scientific_float64": "cross-runtime BLAS/FFT scientific metrics",
+            "scientific_float32": "dtype-scale float32 scientific metrics",
             "roundoff_float64": "absolute dtype-scale diagnostics near theoretical zero",
+            "roundoff_float32": "absolute float32 diagnostics near theoretical zero",
+            "stochastic_aggregate": "stable aggregate of version-sensitive random draws",
             "selection_metric": "tight metrics supporting exact selected identities",
         },
         "numeric_paths": compact_paths,

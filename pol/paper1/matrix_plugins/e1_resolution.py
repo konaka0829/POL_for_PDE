@@ -21,6 +21,33 @@ class E1ResolutionPlugin:
     """E1-specific validation, execution metadata, and aggregate collection."""
 
     plugin_id = "paper1_e1_resolution_v1"
+    experiment_kind = "e1"
+    matrix_protocol_version = "paper1-e1-resolution-matrix-v1"
+    recipe_protocol_versions = ("paper1-e1-v1",)
+    plot_experiment_kind = "e1_matrix"
+
+    def execute_cell(self, request: Mapping[str, Any]):
+        """Run the E1 recipe behind the experiment-owned plugin boundary."""
+        from pol.paper1.recipes.heat_calibration import run_heat_calibration
+
+        invocation = RecipeInvocation(
+            repo_root=Path(str(request["repo_root"])),
+            working_directory=Path(str(request["repo_root"])),
+            command=(
+                "matrix_cell",
+                self.plugin_id,
+                str(request["cell_id"]),
+            ),
+            torch_threads=int(request["torch_threads"]),
+        )
+        return run_heat_calibration(
+            Path(str(request["config_path"])),
+            Path(str(request["e0_dir"])),
+            Path(str(request["output_dir"])),
+            overwrite=True,
+            skip_plots=not bool(request["cell_plots"]),
+            invocation=invocation,
+        )
 
     def load_base(self, path: Path) -> dict[str, Any]:
         """Load a raw E1 base configuration and validate its section."""

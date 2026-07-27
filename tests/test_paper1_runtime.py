@@ -20,6 +20,37 @@ THREAD_VARIABLES = (
 )
 
 
+def test_shared_atomic_io_and_transaction_preserve_previous_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pol.runtime.artifacts import RunTransaction, exact_artifact_tree
+    from pol.runtime.io import write_csv, write_strict_json
+
+    final = tmp_path / "run"
+    final.mkdir()
+    (final / "old.txt").write_text("old", encoding="utf-8")
+    transaction = RunTransaction(final)
+    staging = transaction.begin()
+    write_strict_json(staging / "record.json", {"finite": 1.0})
+    write_csv(staging / "table.csv", [{"id": 1, "value": 2.0}])
+
+    import pol.runtime.artifacts as artifacts
+
+    real_replace = artifacts.os.replace
+
+    def fail_staging(source: Path, destination: Path) -> None:
+        if Path(source) == transaction.staging_dir:
+            raise OSError("fault injection")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(artifacts.os, "replace", fail_staging)
+    with pytest.raises(OSError, match="fault injection"):
+        transaction.publish(
+            lambda root: exact_artifact_tree(root, {"record.json", "table.csv"})
+        )
+    assert (final / "old.txt").read_text(encoding="utf-8") == "old"
+
+
 @pytest.mark.parametrize("failure", [None, RuntimeError, KeyboardInterrupt])
 def test_numerical_thread_scope_sets_and_restores(monkeypatch, failure) -> None:
     previous_torch = torch.get_num_threads()

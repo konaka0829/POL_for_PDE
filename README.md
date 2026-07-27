@@ -29,7 +29,22 @@ or:
 python -m pip install -r requirements.txt
 ```
 
-## Unified Paper 1 runner (Phases 1–2)
+## Refactoring phase map
+
+The repository uses the following phase names:
+
+- Phase 1: unified `pol run <config>` entry point;
+- Phase 2: common runtime, artifact, publication, and cache infrastructure;
+- Phase 3: E2 point evaluation, validation selection, convergence/rerun,
+  frozen-plan, and test-evaluation boundaries;
+- Phase 4: path-override matrix executor and artifact-only plot registry;
+- Phase 5: compatibility-script removal (not performed);
+- Phase 6: legacy Model123 separation (not performed).
+
+Earlier documentation called the matrix and plot work “Phase 3A/3B”. Those
+features are Phase 4 implementation under the phase map above.
+
+## Unified Paper 1 runner (Phase 1)
 
 The unified runner is a thin façade that invokes import-safe E0, dataset,
 E1, and E2 recipes directly in one Python process. The legacy scripts remain
@@ -45,11 +60,13 @@ pol run configs/runs/paper1_e2_smoke.json
 pol run configs/runs/paper1_e2_main.json --plan
 ```
 
-A run name may not be reused unless `--force` is supplied. Main profiles are
-costly, so inspect them with `--plan` first. The runner does not implement
-automatic resume or artifact reuse for scalar runs.
+A complete run with the same canonical science fingerprint is validated and
+reused automatically. The fingerprint excludes plot settings and UI-only
+options. A same-name run with different science is never silently deleted;
+choose another name or use the explicit destructive compatibility option
+`--force`. Main profiles are costly, so inspect them with `--plan` first.
 
-## E1 resolution matrix runner (Phase 3A)
+## E1 resolution matrix runner (Phase 4)
 
 The `paper1-matrix-run-v1` schema expands strict scalar-leaf overrides into
 deduplicated E1 cells. Each cell runs in a spawned Python process, while E0 is
@@ -67,9 +84,9 @@ atomically published with an exact file contract. The matrix compute
 fingerprint includes `torch_threads_per_job`, but excludes scheduling
 (`jobs`), resume, and aggregate plot settings. The older
 `scripts/paper1/run_e1_sweep.py` entry remains as a deprecated compatibility
-wrapper and delegates aggregate plotting to the Phase 3B plot recipe.
+wrapper and delegates aggregate plotting to the Phase 4 plot registry.
 
-## Artifact-only plots (Phase 3B)
+## Artifact-only plots (Phase 4)
 
 Unified E1, E2, and E1 matrix runs execute compute recipes with inline plots
 disabled, then render registered plot tasks under

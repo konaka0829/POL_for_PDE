@@ -15,6 +15,8 @@ from pol.paper1.regression_baseline import (
     semantic_tensor_digest,
     write_phase1_scientific_baseline,
     build_e0_scientific_record,
+    _numeric_category,
+    _numeric_paths,
     _plot_inventory,
     _verify_artifact_manifest,
 )
@@ -73,6 +75,36 @@ def test_field_aware_comparison_absorbs_roundoff_but_detects_change() -> None:
         {"unexpected": 1.0},
         ScientificComparisonPolicy("test", {}, policy.tolerances),
     )[0].reason == "numeric path absent from policy"
+
+
+def test_numeric_category_uses_explicit_float32_path_and_dtype_context() -> None:
+    assert (
+        _numeric_category("$.checks.inverse_roundoff_float32.max_abs")
+        == "roundoff_float32"
+    )
+    assert (
+        _numeric_category("$.table.value", dtype_context="torch.float32")
+        == "scientific_float32"
+    )
+    assert (
+        _numeric_category("$.table.roundoff", dtype_context="float64")
+        == "roundoff_float64"
+    )
+    assert _numeric_category("$.table.value_32") == "scientific_float64"
+
+
+def test_numeric_paths_propagates_sibling_dtype_metadata() -> None:
+    paths = _numeric_paths(
+        {
+            "logical_dtype": "float32",
+            "value": 1.0,
+            "roundoff": 1.0e-7,
+            "selected_zeta": 1.0e-12,
+        }
+    )
+    assert paths["$.value"] == "scientific_float32"
+    assert paths["$.roundoff"] == "roundoff_float32"
+    assert paths["$.selected_zeta"] == "exact_numeric"
 
 
 def test_baseline_writer_is_deterministic_and_requires_overwrite(

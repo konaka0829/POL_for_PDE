@@ -1,8 +1,6 @@
 """Import-safe artifact orchestration for Paper 1 E1."""
 from __future__ import annotations
 
-import csv
-import hashlib
 import json
 import platform
 import shutil
@@ -15,6 +13,8 @@ import numpy as np
 import torch
 
 from pol.runtime.provenance import git_output
+from pol.runtime.io import atomic_torch_save, file_sha256, write_csv as atomic_write_csv
+from pol.runtime.io import write_strict_json
 from pol.runtime.recipe import (
     RecipeInvocation,
     RecipeResult,
@@ -54,23 +54,13 @@ def _load_science_dependencies() -> None:
 
 
 def write_json(path: Path, value: Any) -> None:
-    path.write_text(
-        json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
+    write_strict_json(path, value)
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     if not rows:
         raise ValueError(f"no rows for {path.name}")
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def file_sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    atomic_write_csv(path, rows, fieldnames=list(rows[0]))
 
 
 def check(
@@ -274,9 +264,9 @@ def run_heat_calibration(
         result = run_e1(effective, master)
         for name in TABLE_NAMES:
             write_csv(output_dir / f"{name}.csv", result[name])
-        torch.save(
-            {"schema_version": E1_SCHEMA_VERSION, "models": result["models"]},
+        atomic_torch_save(
             output_dir / "selected_models.pt",
+            {"schema_version": E1_SCHEMA_VERSION, "models": result["models"]},
         )
         result["data_manifest"].update(
             {

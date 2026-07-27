@@ -1,9 +1,7 @@
 """Import-safe artifact orchestration for the Paper 1 E0 gate."""
 from __future__ import annotations
 
-import csv
 from dataclasses import replace
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,7 +11,7 @@ from typing import Any
 
 import torch
 
-from pol.runtime.io import write_e0_json
+from pol.runtime.io import file_sha256, write_csv, write_e0_json
 from pol.runtime.provenance import git_output
 from pol.runtime.recipe import RecipeInvocation, RecipeResult, RecipeUsageError
 
@@ -87,7 +85,7 @@ def run_foundation_validation(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     start = time.perf_counter()
-    config_hash = hashlib.sha256(config_path.read_bytes()).hexdigest()
+    config_hash = file_sha256(config_path)
     summary: dict[str, Any] = {
         "schema_version": E0_SCHEMA_VERSION,
         "status": "fail",
@@ -120,10 +118,7 @@ def run_foundation_validation(
         convergence = run_reference_convergence(config, master, cache=cache)
         reference_state = convergence.pop("_reference_state")
         write_e0_json(output_dir / "reference_convergence.json", convergence)
-        with (output_dir / "reference_convergence.csv").open(
-            "w", newline="", encoding="utf-8"
-        ) as handle:
-            fields = [
+        fields = [
                 "kind",
                 "candidate_nx",
                 "eligible_for_production",
@@ -141,12 +136,9 @@ def run_foundation_validation(
                 "low_mode_relative_l2_mean",
                 "master_hash",
                 "sample_ids",
-            ]
-            writer = csv.DictWriter(handle, fieldnames=fields)
-            writer.writeheader()
-            for row in convergence["rows"]:
-                writer.writerow(
-                    {
+        ]
+        csv_rows = [
+            {
                         "kind": row["kind"],
                         "candidate_nx": row["candidate_nx"],
                         "eligible_for_production": row.get(
@@ -168,8 +160,14 @@ def run_foundation_validation(
                         ],
                         "master_hash": row["master_hash"],
                         "sample_ids": json.dumps(row["sample_ids"]),
-                    }
-                )
+            }
+            for row in convergence["rows"]
+        ]
+        write_csv(
+            output_dir / "reference_convergence.csv",
+            csv_rows,
+            fieldnames=fields,
+        )
         chosen_time = convergence.get("selected_temporal")
         chosen_space = convergence.get("selected_spatial")
         interfaces = run_interface_checks(config, master, reference_state)

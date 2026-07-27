@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import concurrent.futures
-import csv
 import hashlib
 import json
 import multiprocessing
@@ -12,7 +11,7 @@ import shutil
 import time
 from typing import Any
 
-from pol.runtime.io import file_sha256
+from pol.runtime.io import file_sha256, write_csv, write_strict_json
 from pol.runtime.path_safety import resolve_safe_run_directory
 from pol.paper1.config import canonical_config_json, load_config_json
 
@@ -31,12 +30,7 @@ def _canonical_config_sha256(path: Path) -> str:
 
 
 def _atomic_json(path: Path, value: object) -> None:
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(
-        json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
+    write_strict_json(path, value)
 
 
 def _resolved_run_dir(
@@ -70,15 +64,20 @@ def _compute_fingerprint(
     cells: list[MatrixCell],
     *,
     e0_binding: dict[str, Any],
+    plugin: Any | None = None,
 ) -> str:
+    if plugin is None:
+        plugin = get_matrix_plugin(spec.aggregation_kind)
     payload = {
         "schema_version": spec.schema_version,
         "base_config_sha256": _canonical_config_sha256(spec.base_config),
         "e0_config_sha256": _canonical_config_sha256(spec.e0_config),
         "e0_binding": e0_binding,
         "aggregation_kind": spec.aggregation_kind,
-        "aggregation_protocol": "paper1-e1-resolution-matrix-v1",
-        "recipe_protocols": ("paper1-e0-v2", "paper1-e1-v2"),
+        "plugin_id": plugin.plugin_id,
+        "experiment_kind": plugin.experiment_kind,
+        "aggregation_protocol": plugin.matrix_protocol_version,
+        "recipe_protocols": plugin.recipe_protocol_versions,
         "invalid_run_policy": spec.invalid_run_policy,
         "torch_threads_per_job": spec.torch_threads_per_job,
         "cells": [
@@ -211,11 +210,7 @@ def _validate_owned_matrix(run_dir: Path, spec: MatrixRunSpec) -> dict[str, Any]
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
-        writer.writeheader()
-        writer.writerows(rows)
+    write_csv(path, rows, fieldnames=fields)
 
 
 def _validate_aggregate(
@@ -382,14 +377,14 @@ def _reuse_result(
 
 
 def _run_matrix_plots(
-    spec: MatrixRunSpec, run_dir: Path
+    spec: MatrixRunSpec, run_dir: Path, *, plugin: Any
 ) -> list[dict[str, Any]]:
     if not spec.plots_enabled:
         return []
     from pol.plots.runtime import execute_plot_tasks
 
     return execute_plot_tasks(
-        experiment_kind="e1_matrix",
+        experiment_kind=plugin.plot_experiment_kind,
         input_dir=run_dir / "aggregate",
         figures_dir=run_dir / "figures",
         tasks=spec.plot_tasks,
@@ -450,7 +445,7 @@ def execute_matrix_run(
         )
     )
     compute_fingerprint = _compute_fingerprint(
-        spec, cells, e0_binding=e0_binding
+        spec, cells, e0_binding=e0_binding, plugin=plugin
     )
     artifact_fingerprint = _artifact_contract_fingerprint(
         compute_fingerprint, cell_plots=spec.cell_plots
@@ -520,7 +515,7 @@ def execute_matrix_run(
             _atomic_json(run_dir / "matrix_manifest.json", manifest)
             return 1
         try:
-            outcomes = _run_matrix_plots(spec, run_dir)
+            outcomes = _run_matrix_plots(spec, run_dir, plugin=plugin)
             manifest["plot_tasks"] = outcomes
             manifest["plot_status"] = "pass" if outcomes else "disabled"
             manifest["status"] = "pass"
@@ -802,7 +797,7 @@ def execute_matrix_run(
             )
         if not failures:
             try:
-                outcomes = _run_matrix_plots(spec, run_dir)
+                outcomes = _run_matrix_plots(spec, run_dir, plugin=plugin)
                 manifest["plot_tasks"] = outcomes
                 manifest["plot_status"] = "pass" if outcomes else "disabled"
                 _record_matrix_plot_request(

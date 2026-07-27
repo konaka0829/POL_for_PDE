@@ -1,7 +1,6 @@
 """Import-safe Paper 1 master-dataset artifact orchestration."""
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 import platform
 import time
@@ -9,6 +8,7 @@ import time
 import torch
 
 from pol.runtime.provenance import git_output
+from pol.runtime.io import file_sha256
 from pol.runtime.recipe import RecipeInvocation, RecipeResult, RecipeUsageError
 
 def _load_science_dependencies() -> None:
@@ -41,10 +41,6 @@ def _preflight_output_dir(output_dir: Path, *, overwrite: bool) -> None:
         )
 
 
-def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def _source_e0_record(
     e0_dir: Path, master_tensor_hash: str
 ) -> dict[str, object]:
@@ -59,7 +55,7 @@ def _source_e0_record(
         raise ValueError("E0 provenance artifact is missing: " + missing[0])
     return {
         "schema_version": "paper1-dataset-source-e0-v1",
-        "files": {name: _sha256(e0_dir / name) for name in source_files},
+        "files": {name: file_sha256(e0_dir / name) for name in source_files},
         "master_tensor_hash": master_tensor_hash,
     }
 

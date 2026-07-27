@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Protocol
+
+from pol.runtime.recipe import RecipeResult
 
 
 @dataclass(frozen=True)
@@ -32,3 +34,17 @@ class MatrixCellResult:
     artifact_manifest_sha256: str | None
     failure_type: str | None
     failure_message: str | None
+
+
+class MatrixExperimentPlugin(Protocol):
+    """Experiment-owned policy consumed by the generic matrix executor."""
+
+    plugin_id: str
+    experiment_kind: str
+    matrix_protocol_version: str
+    recipe_protocol_versions: tuple[str, ...]
+    plot_experiment_kind: str
+
+    def execute_cell(self, request: Mapping[str, Any]) -> RecipeResult:
+        """Execute one finalized cell without exposing its recipe to core."""
+        ...

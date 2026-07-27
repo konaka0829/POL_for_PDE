@@ -7,7 +7,7 @@ import traceback
 from typing import Any
 
 from pol.runtime.io import write_strict_json
-from pol.runtime.recipe import RecipeInvocation, numerical_thread_scope
+from pol.runtime.recipe import numerical_thread_scope
 
 
 def execute_matrix_cell(request: dict[str, Any]) -> dict[str, Any]:
@@ -17,28 +17,10 @@ def execute_matrix_cell(request: dict[str, Any]) -> dict[str, Any]:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with numerical_thread_scope(request["torch_threads"]):
-            from pol.paper1.recipes.heat_calibration import run_heat_calibration
             from pol.workflow.registry import get_matrix_plugin
 
-            invocation = RecipeInvocation(
-                repo_root=Path(request["repo_root"]),
-                working_directory=Path(request["repo_root"]),
-                command=(
-                    "matrix_cell",
-                    request["plugin_id"],
-                    request["cell_id"],
-                ),
-                torch_threads=request["torch_threads"],
-            )
-            result = run_heat_calibration(
-                Path(request["config_path"]),
-                Path(request["e0_dir"]),
-                output_dir,
-                overwrite=True,
-                skip_plots=not request["cell_plots"],
-                invocation=invocation,
-            )
             plugin = get_matrix_plugin(request["plugin_id"])
+            result = plugin.execute_cell(request)
             manifest_hash = None
             if result.exit_code == 0:
                 manifest_hash = plugin.validate_cell(

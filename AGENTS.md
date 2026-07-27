@@ -41,3 +41,11 @@ Keep scientific computation below import-safe recipes, with legacy CLI wrappers
 and unified runners above them. Do not mix algorithm changes, artifact protocol
 changes, workflow refactors, and legacy cleanup in one phase. Production
 profiles must not be run unless explicitly requested.
+
+## Refactoring phase names
+
+The implementation phase source of truth is: Phase 1 unified runner; Phase 2
+common infrastructure; Phase 3 E2 responsibility split; Phase 4 generic
+matrix and artifact-only plot commonization; Phase 5 compatibility-script
+removal; Phase 6 legacy Model123 separation. The former “Phase 3A/3B”
+matrix/plot labels mean Phase 4. Phase 5 and Phase 6 have not been performed.

@@ -36,7 +36,7 @@ class MatrixRunSpec:
     schema_version: str
     name: str
     output_root: Path
-    kind: Literal["e1"]
+    kind: str
     base_config: Path
     e0_config: Path
     invalid_run_policy: Literal["skip", "error"]
@@ -97,7 +97,9 @@ def _boolean(value: object, path: str) -> bool:
     return value
 
 
-def _plot_block(value: object) -> tuple[bool, bool, tuple[PlotTaskSpec, ...]]:
+def _plot_block(
+    value: object, *, experiment_kind: str
+) -> tuple[bool, bool, tuple[PlotTaskSpec, ...]]:
     plots = _object(value, "$.plots")
     _keys(
         plots,
@@ -129,7 +131,7 @@ def _plot_block(value: object) -> tuple[bool, bool, tuple[PlotTaskSpec, ...]]:
         from pol.plots.registry import get_plot_recipe
 
         registered = get_plot_recipe(recipe_id)
-        if "e1_matrix" not in registered.supported_experiment_kinds:
+        if experiment_kind not in registered.supported_experiment_kinds:
             raise ValueError(f"unsupported plot recipe at {path}.id: {recipe_id}")
         try:
             validated = registered.validate_settings(dict(settings))
@@ -234,8 +236,7 @@ def load_matrix_spec(path: str | Path, *, repo_root: Path) -> MatrixRunSpec:
         required={"kind", "base_config"},
         allowed={"kind", "base_config"},
     )
-    if experiment["kind"] != "e1":
-        raise ValueError("unsupported value at $.experiment.kind")
+    experiment_kind = _string(experiment["kind"], "$.experiment.kind")
     base_config = _repo_path(
         experiment["base_config"], "$.experiment.base_config", root
     )
@@ -298,15 +299,24 @@ def load_matrix_spec(path: str | Path, *, repo_root: Path) -> MatrixRunSpec:
         allowed={"kind"},
     )
     aggregation_kind = _string(aggregation["kind"], "$.aggregation.kind")
+    from pol.workflow.registry import get_matrix_plugin
+
+    plugin = get_matrix_plugin(aggregation_kind)
+    if plugin.experiment_kind != experiment_kind:
+        raise ValueError(
+            "$.experiment.kind does not match $.aggregation.kind plugin"
+        )
     if "plots" in raw:
-        plots_enabled, plots_required, plot_tasks = _plot_block(raw["plots"])
+        plots_enabled, plots_required, plot_tasks = _plot_block(
+            raw["plots"], experiment_kind=plugin.plot_experiment_kind
+        )
     else:
         plots_enabled, plots_required, plot_tasks = False, False, ()
     return MatrixRunSpec(
         "paper1-matrix-run-v1",
         name,
         output_root,
-        "e1",
+        experiment_kind,
         base_config,
         e0_config,
         policy,

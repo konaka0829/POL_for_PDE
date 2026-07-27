@@ -18,6 +18,8 @@ from .config import Paper1Config, canonical_config_json
 from .datasets import Paper1MasterDataset
 from .e2_cache import (
     TensorCache, atomic_json, canonical_object, stable_hash, tensor_hash)
+from .e2_points import SelectionDatasetView, TestDatasetView
+from .e2_selection import assert_validation_only_record, build_selection_bindings
 from .grids import spectral_resample_periodic
 from .interfaces import build_surrogate_initial_state, derive_finite_resolution_data
 from .metrics import aggregate_errors, compare_fields_on_common_grid, samplewise_l2_errors
@@ -586,7 +588,7 @@ def _pretest_failure_result(
     }
 
 
-def run_e2(
+def _run_e2_attempt(
     config: Paper1Config, dataset: Paper1MasterDataset, *, cache_dir: Path, resume: bool,
     pilot_n_sur: int | None = None, auto_reruns_remaining: int | None = None,
     batch_size: int | None = None,
@@ -613,19 +615,33 @@ def run_e2(
         target_output_dim=config.spatial.target_output_dim, domain_length=config.domain.length,
         sample_ids=dataset.sample_ids.to(device))
     assert finite.target_coefficients is not None
-    input_bindings = {
-        **input_bindings,
-        "finite_input_tensor_hashes": {
-            "u0_data": tensor_hash(finite.u0_data),
-            "y_target_data": tensor_hash(finite.y_target_data),
-            "target_coefficients": tensor_hash(finite.target_coefficients),
-        },
-    }
     split = {"train": dataset.train_indices.to(device), "val": dataset.val_indices.to(device), "test": dataset.test_indices.to(device)}
+    # Selection identity deliberately excludes every full-target/test-target
+    # digest.  Full dataset provenance remains in the recipe data manifest,
+    # while this binding contains only inputs and train/validation labels.
+    selection_bindings = build_selection_bindings(
+        input_bindings,
+        train_indices=split["train"],
+        validation_indices=split["val"],
+        u0_data=finite.u0_data,
+        target_coefficients=finite.target_coefficients,
+        target_data=finite.y_target_data,
+        reference=yref,
+    )
     selection_positions = torch.cat((split["train"], split["val"]))
     n_train = split["train"].numel()
     local_train = torch.arange(n_train, device=device)
     local_val = torch.arange(n_train, selection_positions.numel(), device=device)
+    selection_view = SelectionDatasetView(
+        sample_ids=dataset.sample_ids.to(device)[selection_positions],
+        train_indices=local_train,
+        validation_indices=local_val,
+        u0_train_validation=finite.u0_data[selection_positions],
+        target_train=finite.target_coefficients[split["train"]],
+        target_validation=finite.target_coefficients[split["val"]],
+        target_data_validation=finite.y_target_data[split["val"]],
+        reference_validation=yref[split["val"]],
+    )
     cache = TensorCache(cache_dir, resume=resume)
     validation_rows, point_models, point_selections, model3_validation = [], {}, {}, []
     physical_models: dict[tuple[str, float, float, int, str], tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]] = {}
@@ -650,12 +666,12 @@ def run_e2(
                     config, state, state_digest, cache)
                 features = features.to(device)
                 selection_data = TrainValidationData(
-                    x_train=features[local_train],
-                    x_validation=features[local_val],
-                    y_train=finite.target_coefficients[split["train"]],
-                    y_validation=finite.target_coefficients[split["val"]],
-                    target_data_validation=finite.y_target_data[split["val"]],
-                    reference_validation=yref[split["val"]])
+                    x_train=features[selection_view.train_indices],
+                    x_validation=features[selection_view.validation_indices],
+                    y_train=selection_view.target_train,
+                    y_validation=selection_view.target_validation,
+                    target_data_validation=selection_view.target_data_validation,
+                    reference_validation=selection_view.reference_validation)
                 models, selections, provenance = _fit_point(
                     config, selection_data)
                 bundle = {
@@ -778,13 +794,14 @@ def run_e2(
     selection_record = {
         "schema_version": E2_SCHEMA_VERSION,
         "protocol_version": E2_SCHEMA_VERSION,
-        "bindings": input_bindings,
+        "bindings": selection_bindings,
         "representatives": representatives,
         "model_specific_optima": model_specific,
         "point_hyperparameters": {
             str(key): value for key, value in point_selections.items()},
         "test_data_used": False,
     }
+    assert_validation_only_record(selection_record)
     selection_hash = stable_hash(selection_record)
     shared_hyperparameters = {}
     for family, representative in representatives.items():
@@ -856,23 +873,12 @@ def run_e2(
                 "rerun_reason": "selected base exceeds pilot",
                 "test_evaluated": False,
             }
-            rerun = run_e2(
-                config, dataset, cache_dir=cache_dir, resume=True,
-                pilot_n_sur=selected_base,
-                auto_reruns_remaining=auto_reruns_remaining - 1,
-                batch_size=batch_size, freeze_dir=freeze_dir,
-                input_bindings=input_bindings)
-            old_attempts = rerun.get("attempt_history", [])
-            for index, attempt in enumerate(old_attempts, start=1):
-                attempt["attempt_index"] = index
-            rerun["attempt_history"] = [rejected, *old_attempts]
-            rerun["auto_rerun_history"] = [
-                {"from_n_sur": pilot_n_sur, "to_n_sur": selected_base,
-                 "reason": rejected["rerun_reason"]},
-                *rerun.get("auto_rerun_history", [])]
-            rerun["runtime_seconds"] = (
-                attempt_runtime + float(rerun["runtime_seconds"]))
-            return rerun
+            return {
+                "_rerun_request": True,
+                "next_pilot_n_sur": selected_base,
+                "rejected_attempt": rejected,
+                "runtime_seconds": attempt_runtime,
+            }
 
     # Freeze every evaluation-seed map/readout using train data and the common
     # selected candidate. No validation or test choice is made here.
@@ -982,7 +988,7 @@ def run_e2(
             frozen_payload = {
                 "schema_version": E2_SCHEMA_VERSION,
                 "protocol_version": E2_SCHEMA_VERSION,
-                "bindings": input_bindings,
+                "bindings": selection_bindings,
                 "selection_record_hash": selection_hash,
                 "final_pilot_n_sur": pilot_n_sur,
                 "models": complete_models,
@@ -997,7 +1003,7 @@ def run_e2(
                 os.unlink(temporary)
         evaluator = load_frozen_evaluator(
             frozen_path, expected_selection_hash=selection_hash,
-            expected_bindings=input_bindings)
+            expected_bindings=selection_bindings)
         frozen_plan_hash = evaluator.plan_hash
         event_log.append({
             "event": "freeze_read_back", "selection_record_hash": selection_hash,
@@ -1007,8 +1013,16 @@ def run_e2(
         raise ValueError("freeze_dir is required for disk-only test evaluation")
 
     # Test states/features are first generated below, after durable selection freeze.
+    test_view = TestDatasetView(
+        sample_ids=dataset.sample_ids.to(device)[split["test"]],
+        indices=split["test"],
+        u0_test=finite.u0_data[split["test"]],
+        target_coefficients_test=finite.target_coefficients[split["test"]],
+        target_data_test=finite.y_target_data[split["test"]],
+        reference_test=yref[split["test"]],
+    )
     test_rows, model3_test_by_seed, model3_aggregate, saved_models = [], [], [], {}
-    test = split["test"]
+    test = test_view.indices
     for identity in point_order:
         family, axis, nu, T = identity
         bundle, selections = point_models[identity], point_selections[identity]
@@ -1131,6 +1145,74 @@ def run_e2(
                              "status": convergence_summary["status"],
                              "test_evaluated": True}],
     }
+
+
+def run_e2(
+    config: Paper1Config,
+    dataset: Paper1MasterDataset,
+    *,
+    cache_dir: Path,
+    resume: bool,
+    pilot_n_sur: int | None = None,
+    auto_reruns_remaining: int | None = None,
+    batch_size: int | None = None,
+    freeze_dir: Path | None = None,
+    input_bindings: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Orchestrate explicit E2 attempts; rejected attempts never reach test."""
+    if config.e2 is None:
+        raise ValueError("config must contain e2")
+    current_pilot = (
+        config.spatial.surrogate_internal_nx
+        if pilot_n_sur is None
+        else int(pilot_n_sur)
+    )
+    remaining = (
+        config.e2.convergence.max_auto_reruns
+        if auto_reruns_remaining is None
+        else int(auto_reruns_remaining)
+    )
+    rejected: list[dict[str, Any]] = []
+    rerun_history: list[dict[str, Any]] = []
+    rejected_runtime = 0.0
+    while True:
+        result = _run_e2_attempt(
+            config,
+            dataset,
+            cache_dir=cache_dir,
+            resume=resume or bool(rejected),
+            pilot_n_sur=current_pilot,
+            auto_reruns_remaining=remaining,
+            batch_size=batch_size,
+            freeze_dir=freeze_dir,
+            input_bindings=input_bindings,
+        )
+        if not result.pop("_rerun_request", False):
+            attempts = [*rejected, *result.get("attempt_history", [])]
+            for index, attempt in enumerate(attempts):
+                attempt["attempt_index"] = index
+            result["attempt_history"] = attempts
+            result["auto_rerun_history"] = [
+                *rerun_history,
+                *result.get("auto_rerun_history", []),
+            ]
+            result["runtime_seconds"] = (
+                rejected_runtime + float(result["runtime_seconds"])
+            )
+            return result
+        attempt = result["rejected_attempt"]
+        next_pilot = int(result["next_pilot_n_sur"])
+        rejected.append(attempt)
+        rejected_runtime += float(result["runtime_seconds"])
+        rerun_history.append(
+            {
+                "from_n_sur": current_pilot,
+                "to_n_sur": next_pilot,
+                "reason": attempt["rerun_reason"],
+            }
+        )
+        current_pilot = next_pilot
+        remaining -= 1
 
 
 def _convergence(

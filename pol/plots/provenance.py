@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from pol.runtime.io import file_sha256
+from pol.runtime.io import file_sha256, write_strict_json
 
 from .types import PlotTaskSpec
 
@@ -46,9 +46,4 @@ def build_plot_request(
 def write_plot_request(run_dir: Path, request: Mapping[str, Any]) -> None:
     """Atomically write the latest plot request at a run root."""
     path = run_dir / "resolved_plot_spec.json"
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(
-        json.dumps(request, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
+    write_strict_json(path, request)

@@ -14,6 +14,7 @@ import time
 import traceback
 from typing import Any, Literal, Mapping
 
+from pol.runtime.io import file_sha256, write_strict_json
 from pol.runtime.recipe import (
     RecipeInvocation,
     RecipeResult,
@@ -46,7 +47,7 @@ class PlannedStep:
 
 
 def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    return file_sha256(path)
 
 
 def _canonical_config_sha256(path: Path) -> str:
@@ -87,12 +88,7 @@ def _now() -> str:
 
 
 def _atomic_json(path: Path, value: object) -> None:
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(
-        json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
+    write_strict_json(path, value)
 
 
 def resolve_run_directory(
@@ -645,7 +641,40 @@ def execute_run(
             return 1 if spec.plots_required else 0
     if run_dir.exists() or run_dir.is_symlink():
         if not force:
-            raise FileExistsError(f"run directory already exists: {run_dir}; pass --force")
+            _validate_owned_run_directory(run_dir, spec)
+            manifest_path = run_dir / "run_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            expected = science_fingerprint(spec)
+            if manifest.get("science_fingerprint") != expected:
+                raise FileExistsError(
+                    f"run name exists with a different science fingerprint: "
+                    f"{run_dir}; choose another name or pass --force"
+                )
+            if (
+                manifest.get("status") != "pass"
+                or manifest.get("compute_status") != "pass"
+            ):
+                raise FileExistsError(
+                    f"existing run is not a complete pass output: {run_dir}; "
+                    "pass --force"
+                )
+            for step in steps:
+                _verify_step(step)
+            if spec.plots_enabled:
+                outcomes = _run_plots(spec, run_dir=run_dir)
+                manifest["plot_tasks"] = outcomes
+                manifest["plot_status"] = "pass"
+                _record_plot_request(
+                    spec,
+                    run_dir=run_dir,
+                    manifest=manifest,
+                    request_mode="reuse",
+                    status="pass",
+                    outcomes=outcomes,
+                    failure=None,
+                )
+                _atomic_json(manifest_path, manifest)
+            return 0
         _validate_owned_run_directory(run_dir, spec)
         shutil.rmtree(run_dir)
     output_root.mkdir(parents=True, exist_ok=True)
