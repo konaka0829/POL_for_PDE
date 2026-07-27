@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import hashlib
 
 import pytest
 import torch
@@ -13,6 +14,8 @@ from PIL import Image
 
 from pol.paper1.config import canonical_config_json, load_config_json
 from pol.paper1.datasets import load_master_dataset
+from pol.paper1.datasets import save_master_dataset, tensor_hash
+from pol.paper1.schemas import stable_hash_json
 from pol.paper1.regression_baseline import (
     build_e0_scientific_record,
     build_e1_scientific_record,
@@ -161,6 +164,91 @@ def test_e0_direct_and_runner_smoke_parity(tmp_path: Path) -> None:
 
 
 @pytest.mark.slow
+def test_e0_multifile_forge_is_not_silently_reused(tmp_path: Path) -> None:
+    from pol.runtime.artifacts import manifest_records
+    from pol.runtime.io import write_strict_json
+
+    env = _thread_env(1)
+    run_dir = _runner(tmp_path, "e0", env=env)
+    e0_dir = run_dir / "e0"
+    path = e0_dir / "input_interface_checks.json"
+    value = _json(path)
+    value["finite_data_interface"]["status"] = "fail"
+    write_strict_json(path, value)
+    names = {
+        item.name for item in e0_dir.iterdir()
+        if item.name != "artifact_manifest.json"
+    }
+    write_strict_json(
+        e0_dir / "artifact_manifest.json",
+        {
+            "schema_version": "paper1-e0-artifact-manifest-v1",
+            "recipe_protocol": "paper1-e0-v3",
+            "artifacts": manifest_records(e0_dir, names),
+        },
+    )
+    # Forge both mutable runner records to agree with the new byte identity.
+    from pol.paper1.artifact_contracts import _identity
+    forged = _identity("e0", "paper1-e0-v3", e0_dir, names | {"artifact_manifest.json"})
+    manifest = _json(run_dir / "run_manifest.json")
+    manifest["steps"][0]["artifact_identity"] = forged.__dict__
+    write_strict_json(run_dir / "run_manifest.json", manifest)
+    root = _json(run_dir / "run_artifact_manifest.json")
+    root["steps"][0]["artifact_identity"] = forged.__dict__
+    write_strict_json(run_dir / "run_artifact_manifest.json", root)
+
+    result = _run_result(["-m", "pol", "run", str(tmp_path / "e0.json")], env=env)
+    assert result.returncode != 0
+    assert "scientific artifact mismatch" in result.stdout
+
+
+@pytest.mark.slow
+def test_current_config_change_cannot_be_hidden_by_manifest_fingerprint_forge(
+    tmp_path: Path,
+) -> None:
+    from pol.paper1.run_spec import load_run_spec
+    from pol.paper1.runner import science_fingerprint
+    from pol.runtime.io import write_strict_json
+
+    env = _thread_env(1)
+    config_path = tmp_path / "e0-config.json"
+    config = _json(ROOT / "configs/paper1_e0_smoke.json")
+    write_strict_json(config_path, config)
+    spec_path = tmp_path / "stale.json"
+    raw = _json(ROOT / "configs/runs/paper1_e0_smoke.json")
+    raw["run"] = {
+        "name": "stale",
+        "output_root": str(tmp_path / "runs"),
+    }
+    raw["experiment"]["config"] = str(config_path)
+    write_strict_json(spec_path, raw)
+    _run(["-m", "pol", "run", str(spec_path)], env=env)
+    run_dir = tmp_path / "runs/stale"
+
+    config["data"]["seed"] += 1
+    write_strict_json(config_path, config)
+    current = load_run_spec(spec_path, repo_root=ROOT)
+    manifest_path = run_dir / "run_manifest.json"
+    manifest = _json(manifest_path)
+    manifest["science_fingerprint"] = science_fingerprint(current)
+    write_strict_json(manifest_path, manifest)
+    before = {
+        str(path.relative_to(run_dir)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in run_dir.rglob("*")
+        if path.is_file()
+    }
+    result = _run_result(["-m", "pol", "run", str(spec_path)], env=env)
+    after = {
+        str(path.relative_to(run_dir)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in run_dir.rglob("*")
+        if path.is_file()
+    }
+    assert result.returncode != 0
+    assert "resolved run spec does not match current request" in result.stdout
+    assert after == before
+
+
+@pytest.mark.slow
 def test_e1_direct_and_runner_smoke_parity(tmp_path: Path) -> None:
     env = _thread_env(1)
     direct = tmp_path / "direct"
@@ -281,6 +369,17 @@ def test_e2_direct_and_runner_smoke_parity(tmp_path: Path) -> None:
         assert torch.equal(getattr(first, name), getattr(second, name))
 
     direct_out, runner_out = direct / "e2", runner / "e2"
+    direct_summary = _json(direct_out / "e2_summary.json")
+    runner_summary = _json(runner_out / "e2_summary.json")
+    assert direct_summary["selection_record_hash"] == runner_summary[
+        "selection_record_hash"
+    ]
+    assert direct_summary["frozen_plan_hash"] == runner_summary[
+        "frozen_plan_hash"
+    ]
+    assert _json(direct_out / "selection_record.json") == _json(
+        runner_out / "selection_record.json"
+    )
     for name in ("model_specific_optima.json", "shared_representatives.json"):
         assert _json(direct_out / name) == _json(runner_out / name)
     provenance = {
@@ -319,8 +418,6 @@ def test_e2_direct_and_runner_smoke_parity(tmp_path: Path) -> None:
         assert _csv_without(direct_out / name, provenance) == _csv_without(
             runner_out / name, provenance
         )
-    direct_summary = _json(direct_out / "e2_summary.json")
-    runner_summary = _json(runner_out / "e2_summary.json")
     direct_summary["required_checks"]["test_rows_bound_to_frozen_plan"].pop("value")
     runner_summary["required_checks"]["test_rows_bound_to_frozen_plan"].pop("value")
     assert _drop(direct_summary, provenance) == _drop(runner_summary, provenance)
@@ -349,6 +446,67 @@ def test_e2_direct_and_runner_smoke_parity(tmp_path: Path) -> None:
         assert names.index("first_test_state_solve") < names.index(
             "first_test_metric"
         )
+
+    # Re-sign a scientifically valid dataset after changing test labels only.
+    # Selection/freeze must remain identical while final test metrics respond.
+    changed_dataset = load_master_dataset(direct / "master_dataset")
+    changed_dataset.y_target_master = (
+        changed_dataset.y_target_master.clone()
+    )
+    changed_dataset.y_target_master[changed_dataset.test_indices] += 0.25
+    metadata = json.loads(json.dumps(changed_dataset.metadata))
+    metadata["tensor_hashes"]["y_target_master"] = tensor_hash(
+        changed_dataset.y_target_master
+    )
+    metadata["dataset_hash"] = stable_hash_json(
+        {
+            "schema_version": metadata["schema_version"],
+            "config_hash": metadata["config_hash"],
+            "split_hash": metadata["split_hash"],
+            "tensor_hashes": metadata["tensor_hashes"],
+            "y_target_master_generated": True,
+        }
+    )
+    changed_dataset.metadata = metadata
+    changed_dir = tmp_path / "changed/master_dataset"
+    save_master_dataset(changed_dataset, changed_dir, overwrite=True)
+    changed_out = tmp_path / "changed/e2"
+    _run(
+        [
+            "tests/paper1_recipe_driver.py",
+            "e2",
+            "--config",
+            str(ROOT / "configs/paper1_e2_smoke.json"),
+            "--e0-dir",
+            str(direct / "e0"),
+            "--dataset-dir",
+            str(changed_dir),
+            "--output-dir",
+            str(changed_out),
+            "--overwrite",
+            "--torch-threads",
+            "1",
+            "--batch-size",
+            "64",
+        ],
+        env=env,
+    )
+    changed_summary = _json(changed_out / "e2_summary.json")
+    assert changed_summary["selection_record_hash"] == direct_summary[
+        "selection_record_hash"
+    ]
+    assert changed_summary["frozen_plan_hash"] == direct_summary[
+        "frozen_plan_hash"
+    ]
+    assert _json(changed_out / "shared_representatives.json") == _json(
+        direct_out / "shared_representatives.json"
+    )
+    assert _json(changed_out / "model_specific_optima.json") == _json(
+        direct_out / "model_specific_optima.json"
+    )
+    assert _csv_without(changed_out / "test_sweep.csv", provenance) != (
+        _csv_without(direct_out / "test_sweep.csv", provenance)
+    )
 
 
 @pytest.mark.slow

@@ -127,6 +127,17 @@ class E0ArtifactContract:
         self, output_dir: Path, *, expected_config_identity: str | None = None,
         expected_config_path: Path | None = None,
     ) -> ArtifactIdentity:
+        identity, _ = self.validate_with_science(
+            output_dir,
+            expected_config_identity=expected_config_identity,
+            expected_config_path=expected_config_path,
+        )
+        return identity
+
+    def validate_with_science(
+        self, output_dir: Path, *, expected_config_identity: str | None = None,
+        expected_config_path: Path | None = None,
+    ):
         import torch
 
         from .config import canonical_config_json, load_config_json
@@ -175,20 +186,17 @@ class E0ArtifactContract:
                 or file_sha256(path) != record.get("sha256")
             ):
                 raise ValueError(f"E0 artifact byte integrity mismatch: {relative}")
-        summary = json.loads((output_dir / "e0_summary.json").read_text())
         _validate_expected_config(
             output_dir / "resolved_config.json", expected_config_identity,
             expected_config_path,
         )
-        if summary.get("schema_version") != self.protocol_version:
-            raise ValueError("E0 summary protocol mismatch")
-        if summary.get("status") != "pass":
-            raise ValueError("E0 summary status is not pass")
-        checks = summary.get("required_checks")
-        if not isinstance(checks, dict) or set(checks) != E0_REQUIRED_CHECKS or any(
-            value != "pass" for value in checks.values()
-        ):
-            raise ValueError("E0 required checks are not all pass")
+        from .e0_validation import validate_e0_scientific_artifacts
+        scientific = validate_e0_scientific_artifacts(
+            output_dir,
+            expected_config_identity=expected_config_identity,
+            expected_config_path=expected_config_path,
+        )
+        summary = json.loads((output_dir / "e0_summary.json").read_text())
         convergence = json.loads(
             (output_dir / "reference_convergence.json").read_text(encoding="utf-8")
         )
@@ -201,7 +209,7 @@ class E0ArtifactContract:
         selected_time = convergence.get("selected_temporal")
         if not isinstance(selected_space, dict) or not isinstance(selected_time, dict):
             raise ValueError("E0 selected reference records are missing")
-        selected = summary.get("selected_reference")
+        selected = dict(scientific.selected_reference)
         expected_selected = {
             "reference_nx": selected_space.get("candidate_nx"),
             "solver": selected_time.get("solver"),
@@ -262,7 +270,10 @@ class E0ArtifactContract:
             payload = json.loads((output_dir / name).read_text())
             if not isinstance(payload, dict):
                 raise ValueError(f"invalid E0 JSON artifact: {name}")
-        return _identity(self.step_name, self.protocol_version, output_dir, names)
+        return (
+            _identity(self.step_name, self.protocol_version, output_dir, names),
+            scientific,
+        )
 
     def validate_failure(self, output_dir: Path) -> ArtifactIdentity:
         names = {

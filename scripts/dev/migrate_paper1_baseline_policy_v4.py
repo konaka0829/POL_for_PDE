@@ -7,10 +7,10 @@ from pathlib import Path
 
 from pol.paper1.regression_baseline import (
     BASELINE_SCHEMA_VERSION,
-    GENERATOR_VERSION,
     MATRIX_BASELINE_SCHEMA_VERSION,
     _comparison_policy,
 )
+from pol.paper1.protocols import BASELINE_GENERATOR_VERSION
 
 
 def migrate(value: dict[str, object]) -> dict[str, object]:
@@ -23,12 +23,12 @@ def migrate(value: dict[str, object]) -> dict[str, object]:
             for key in ("e0", "e1", "e2")
         }
         migrated["schema_version"] = BASELINE_SCHEMA_VERSION
-        migrated["generator_version"] = GENERATOR_VERSION
+        migrated["generator_version"] = BASELINE_GENERATOR_VERSION
         migrated["comparison_policy"] = _comparison_policy(record)
     elif schema == "paper1-e1-matrix-smoke-baseline-v2":
         record = migrated["record"]
         migrated["schema_version"] = MATRIX_BASELINE_SCHEMA_VERSION
-        migrated["generator_version"] = GENERATOR_VERSION
+        migrated["generator_version"] = BASELINE_GENERATOR_VERSION
         migrated["comparison_policy"] = _comparison_policy(record)
     else:
         raise ValueError(f"unsupported source baseline schema: {schema}")

@@ -6,6 +6,7 @@ import json
 import math
 import os
 from pathlib import Path
+import stat
 import tempfile
 from typing import Any, Callable
 
@@ -72,6 +73,66 @@ class TensorCache:
             "features": {"hits": 0, "misses": 0},
         }
 
+    @staticmethod
+    def _type(path: Path) -> str:
+        try:
+            mode = os.lstat(path).st_mode
+        except FileNotFoundError:
+            return "missing"
+        if stat.S_ISLNK(mode):
+            return "symlink"
+        if stat.S_ISREG(mode):
+            return "file"
+        if stat.S_ISDIR(mode):
+            return "directory"
+        return "special"
+
+    def _safe_directory(self, path: Path, *, create: bool) -> None:
+        kind = self._type(path)
+        if kind == "missing" and create:
+            path.mkdir(parents=True, exist_ok=False)
+            kind = self._type(path)
+        if kind != "directory":
+            raise ValueError(f"unsafe cache directory ({kind}): {path}")
+        if path.resolve(strict=True) != path.absolute():
+            raise ValueError(f"cache directory traverses a symlink: {path}")
+
+    def _safe_unit_type(self, path: Path, *, allow_missing: bool = True) -> str:
+        kind = self._type(path)
+        if kind == "missing" and allow_missing:
+            return kind
+        if kind != "file":
+            raise ValueError(f"unsafe cache unit path ({kind}): {path}")
+        if path.resolve(strict=True).parent != path.parent.resolve(strict=True):
+            raise ValueError(f"cache unit resolves outside expected directory: {path}")
+        return kind
+
+    def _remove_unsafe_unit(self, path: Path) -> None:
+        kind = self._type(path)
+        if kind == "missing":
+            return
+        if kind in {"file", "symlink"}:
+            path.unlink()
+            return
+        if kind == "directory":
+            try:
+                path.rmdir()
+            except OSError as exc:
+                raise ValueError(
+                    f"refusing to remove non-empty unsafe cache directory: {path}"
+                ) from exc
+            return
+        raise ValueError(f"refusing to remove special cache path: {path}")
+
+    def _inspect_unit(self, paths: tuple[Path, ...]) -> tuple[bool, ...]:
+        result = []
+        for path in paths:
+            kind = self._type(path)
+            if kind not in {"missing", "file"}:
+                raise ValueError(f"unsafe cache unit path ({kind}): {path}")
+            result.append(kind == "file")
+        return tuple(result)
+
     @property
     def hits(self) -> int:
         return sum(int(v["hits"]) for v in self.stats.values())
@@ -115,15 +176,32 @@ class TensorCache:
         meta_path = directory / f"{digest}.json"
         complete_path = directory / f"{digest}.complete.json"
         lock_path = directory / f"{digest}.lock"
-        present = (path.exists(), meta_path.exists(), complete_path.exists())
-        if lock_path.exists() and not all(present):
+        self._safe_directory(self.root, create=True)
+        if self._type(directory) == "missing":
+            directory.mkdir()
+        self._safe_directory(directory, create=False)
+        unit_paths = (path, meta_path, complete_path)
+        try:
+            present = self._inspect_unit(unit_paths)
+            lock_kind = self._type(lock_path)
+            if lock_kind not in {"missing", "file"}:
+                raise ValueError(
+                    f"unsafe cache writer lock ({lock_kind}): {lock_path}"
+                )
+        except ValueError:
+            if self.resume:
+                raise
+            for unit_path in (*unit_paths, lock_path):
+                self._remove_unsafe_unit(unit_path)
+            present = (False, False, False)
+            lock_kind = "missing"
+        if lock_kind == "file" and not all(present):
             raise ValueError(f"cache unit has an active/stale writer lock: {lock_path}")
         if len(set(present)) != 1:
             if self.resume:
                 raise ValueError(f"resume cache has incomplete unit: {path}")
-            path.unlink(missing_ok=True)
-            meta_path.unlink(missing_ok=True)
-            complete_path.unlink(missing_ok=True)
+            for unit_path in unit_paths:
+                self._remove_unsafe_unit(unit_path)
         if all(present):
             try:
                 complete = json.loads(complete_path.read_text())
@@ -136,10 +214,13 @@ class TensorCache:
             except Exception as exc:
                 if self.resume:
                     raise ValueError(f"resume cache integrity check failed: {path}: {exc}") from exc
-                path.unlink(missing_ok=True)
-                meta_path.unlink(missing_ok=True)
-                complete_path.unlink(missing_ok=True)
-        directory.mkdir(parents=True, exist_ok=True)
+                for unit_path in unit_paths:
+                    self._remove_unsafe_unit(unit_path)
+        self._safe_directory(self.root, create=False)
+        self._safe_directory(directory, create=False)
+        self._inspect_unit(unit_paths)
+        if self._type(lock_path) != "missing":
+            raise ValueError(f"concurrent cache writer detected: {lock_path}")
         try:
             lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError as exc:
@@ -148,6 +229,8 @@ class TensorCache:
             stream.write(json.dumps({"pid": os.getpid(), "key_sha256": stable_hash(canonical)}))
             stream.flush()
             os.fsync(stream.fileno())
+        self._safe_unit_type(lock_path, allow_missing=False)
+        self._safe_directory(directory, create=False)
         temporary: str | None = None
         try:
             values, solver_metadata = compute()
@@ -178,7 +261,10 @@ class TensorCache:
         finally:
             if temporary is not None and os.path.exists(temporary):
                 os.unlink(temporary)
-            lock_path.unlink(missing_ok=True)
+            if self._type(lock_path) == "file":
+                lock_path.unlink()
+            elif self._type(lock_path) != "missing":
+                raise ValueError(f"cache writer lock changed type: {lock_path}")
         self.stats[kind]["misses"] += 1
         if kind == "states":
             self.stats[kind]["solver_invocations"] += 1

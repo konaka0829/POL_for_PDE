@@ -86,3 +86,44 @@ def test_csv_qa_rejects_duplicate_and_nonfinite(tmp_path):
     with pytest.raises(ValueError,match="duplicate"): validate_csv(path,{"id","value"},("id",))
     path.write_text("id,value\n1,nan\n")
     with pytest.raises(ValueError,match="non-finite"): validate_csv(path,{"id","value"},("id",))
+
+
+@pytest.mark.parametrize(
+    "suffix", [".pt", ".json", ".complete.json", ".lock"]
+)
+def test_cache_never_follows_unit_symlinks(tmp_path, suffix):
+    key = {"x": 7}
+    _, _, digest = TensorCache(tmp_path, resume=False).get_or_compute(
+        "states", key, lambda: (torch.ones(2), {})
+    )
+    unit = tmp_path / "states" / f"{digest}{suffix}"
+    external = tmp_path / f"external{suffix.replace('.', '_')}"
+    if suffix == ".lock":
+        external.write_text("external lock", encoding="utf-8")
+    else:
+        external.write_bytes(unit.read_bytes())
+        unit.unlink()
+    unit.symlink_to(external)
+    before = external.read_bytes()
+    with pytest.raises(ValueError, match="unsafe"):
+        TensorCache(tmp_path, resume=True).get_or_compute(
+            "states", key, lambda: (torch.zeros(2), {})
+        )
+    assert external.read_bytes() == before
+
+
+def test_nonresume_repairs_directory_substitution_without_external_access(tmp_path):
+    key = {"x": 9}
+    _, _, digest = TensorCache(tmp_path, resume=False).get_or_compute(
+        "states", key, lambda: (torch.ones(2), {})
+    )
+    payload = tmp_path / "states" / f"{digest}.pt"
+    payload.unlink()
+    payload.mkdir()
+    calls = []
+    value, _, _ = TensorCache(tmp_path, resume=False).get_or_compute(
+        "states", key,
+        lambda: (calls.append(1) or torch.full((2,), 3.0), {}),
+    )
+    assert calls == [1]
+    assert torch.equal(value, torch.full((2,), 3.0))

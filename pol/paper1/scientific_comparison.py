@@ -6,8 +6,7 @@ import math
 import re
 from typing import Any, Mapping
 
-
-COMPARISON_POLICY_VERSION = "paper1-scientific-comparison-v2"
+from .protocols import COMPARISON_POLICY_VERSION
 _CROSS_RUNTIME_IGNORED_FIELDS = frozenset(
     {"selected_models_content_hash", "state_key"}
 )

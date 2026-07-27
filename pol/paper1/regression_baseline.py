@@ -22,10 +22,10 @@ from .scientific_comparison import (
 
 
 from .protocols import (
+    BASELINE_GENERATOR_VERSION,
     BASELINE_SCHEMA_VERSION,
     MATRIX_BASELINE_SCHEMA_VERSION,
 )
-GENERATOR_VERSION = "paper1-scientific-baseline-generator-v4"
 
 # These fields encode execution location or bindings rather than scientific results.
 PROVENANCE_FIELDS = frozenset(
@@ -787,7 +787,7 @@ def build_phase1_scientific_baseline(
     }
     return {
         "schema_version": BASELINE_SCHEMA_VERSION,
-        "generator_version": GENERATOR_VERSION,
+        "generator_version": BASELINE_GENERATOR_VERSION,
         "comparison_policy": _comparison_policy(record),
         "provenance": {
             "source_revision": source_revision,
@@ -892,7 +892,7 @@ def build_e1_matrix_scientific_baseline(
     }
     return {
         "schema_version": MATRIX_BASELINE_SCHEMA_VERSION,
-        "generator_version": GENERATOR_VERSION,
+        "generator_version": BASELINE_GENERATOR_VERSION,
         "comparison_policy": _comparison_policy(record),
         "provenance": {
             "source_revision": source_revision,

@@ -169,6 +169,10 @@ def validate_e0_prerequisite(e0_dir: str | Path, config: Paper1Config) -> tuple[
     matching_joint_rows = [row for row in convergence.get("rows", []) if row == joint_row]
     if len(matching_joint_rows) != 1:
         raise ValueError("E0 joint row is not uniquely represented in convergence rows")
+    # Preserve specific prerequisite diagnostics above, then require the same
+    # complete byte/tree + recomputable semantic boundary used for E0 reuse.
+    from .artifact_contracts import E0ArtifactContract
+    full_identity, scientific = E0ArtifactContract().validate_with_science(root)
     effective = replace(config, spatial=replace(config.spatial, reference_nx=reference_nx))
     master = load_master_initial_conditions(root / "master_initial_conditions.pt", effective)
     prerequisite = {
@@ -179,6 +183,8 @@ def validate_e0_prerequisite(e0_dir: str | Path, config: Paper1Config) -> tuple[
         "artifacts": artifacts, "master_tensor_hash": actual_hash,
         "master_file_sha256": file_record(root / "master_initial_conditions.pt", root)["sha256"],
         "master_manifest_file_sha256": file_record(root / "master_manifest.json", root)["sha256"],
+        "e0_scientific_identity": scientific.scientific_identity,
+        "e0_provenance_identity": full_identity.content_hash,
     }
     return effective, master, prerequisite
 

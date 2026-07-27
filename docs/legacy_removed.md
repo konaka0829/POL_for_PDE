@@ -1,6 +1,11 @@
-# Removed Legacy Code
+# Removed and retained legacy code
 
-This repository was slimmed to the current 1D time-scaled PDE surrogate operator learning implementation.
+The active first-paper entry point is `pol run`. Phase 5 removed the six
+Paper 1 compatibility scripts formerly under `scripts/paper1`; direct recipes
+remain internal/test APIs.
+
+The Model123 and time-scaled/generator-defect tree is still present for
+compatibility pending Phase 6. Phase 6 has not been performed.
 
 Removed groups:
 

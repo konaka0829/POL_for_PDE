@@ -14,6 +14,24 @@ from pol.runtime.recipe import RecipeInvocation
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _refresh_manifest(output: Path) -> None:
+    from pol.runtime.artifacts import manifest_records
+    from pol.runtime.io import write_strict_json
+
+    names = {
+        path.name for path in output.iterdir()
+        if path.name != "artifact_manifest.json"
+    }
+    write_strict_json(
+        output / "artifact_manifest.json",
+        {
+            "schema_version": "paper1-e0-artifact-manifest-v1",
+            "recipe_protocol": "paper1-e0-v3",
+            "artifacts": manifest_records(output, names),
+        },
+    )
+
+
 @pytest.fixture(scope="module")
 def valid_e0(tmp_path_factory: pytest.TempPathFactory) -> Path:
     output = tmp_path_factory.mktemp("e0-integrity") / "e0"
@@ -108,4 +126,58 @@ def test_e0_rejects_semantic_forge_with_recomputed_manifest(
         },
     )
     with pytest.raises(ValueError, match="selection mismatch"):
+        E0ArtifactContract().validate_complete(output)
+
+
+@pytest.mark.parametrize(
+    "name,mutate",
+    [
+        (
+            "input_interface_checks.json",
+            lambda value: value["finite_data_interface"].update(status="fail"),
+        ),
+        (
+            "resampling_checks.json",
+            lambda value: next(iter(value["checks"].values())).update(
+                max_abs_error=123456.0
+            ),
+        ),
+        (
+            "reference_convergence.json",
+            lambda value: value["rows"][0]["relative_l2"].update(
+                mean=123456.0
+            ),
+        ),
+        (
+            "model1_identity.json",
+            lambda value: value["full_observation"].update(status="fail"),
+        ),
+    ],
+)
+def test_e0_rejects_nested_semantic_tamper_after_manifest_recomputed(
+    valid_e0: Path, tmp_path: Path, name: str, mutate
+) -> None:
+    from pol.runtime.io import write_strict_json
+
+    output = tmp_path / "e0"
+    shutil.copytree(valid_e0, output)
+    path = output / name
+    value = json.loads(path.read_text(encoding="utf-8"))
+    mutate(value)
+    write_strict_json(path, value)
+    _refresh_manifest(output)
+    with pytest.raises(ValueError, match="scientific artifact mismatch"):
+        E0ArtifactContract().validate_complete(output)
+
+
+def test_e0_rejects_reference_csv_json_mismatch_after_manifest_recomputed(
+    valid_e0: Path, tmp_path: Path
+) -> None:
+    output = tmp_path / "e0"
+    shutil.copytree(valid_e0, output)
+    path = output / "reference_convergence.csv"
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text.replace(",pass,", ",fail,", 1), encoding="utf-8")
+    _refresh_manifest(output)
+    with pytest.raises(ValueError, match="reference_convergence.csv"):
         E0ArtifactContract().validate_complete(output)

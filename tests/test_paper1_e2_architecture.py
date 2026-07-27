@@ -4,6 +4,7 @@ import ast
 from pathlib import Path
 
 from pol.paper1.e2_convergence import decide_convergence
+from pol.paper1.e2_evaluation import evaluate_test
 from pol.paper1.e2_points import SelectionDatasetView
 
 
@@ -53,3 +54,92 @@ def test_run_e2_has_no_recursive_self_call() -> None:
         and node.func.id == "run_e2"
         for node in ast.walk(function)
     )
+
+
+def test_production_attempt_calls_responsibility_module_apis() -> None:
+    tree = ast.parse((ROOT / "pol/paper1/e2.py").read_text(encoding="utf-8"))
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_run_e2_attempt"
+    )
+    calls = {
+        node.func.id
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert {
+        "evaluate_validation_points",
+        "select_validation_coordinates",
+        "build_selection_result",
+        "evaluate_convergence",
+        "publish_and_read_back_frozen_plan",
+        "evaluate_test",
+    } <= calls
+
+
+def test_selection_and_convergence_modules_have_no_test_capability() -> None:
+    for name in ("e2_selection.py", "e2_convergence.py"):
+        source = (ROOT / "pol/paper1" / name).read_text(encoding="utf-8")
+        assert "TestDatasetView" not in source
+        assert "Paper1MasterDataset" not in source
+        assert "y_target_master" not in source
+
+
+def test_convergence_callback_cannot_capture_full_dataset() -> None:
+    """The production closure must narrow dataset authority to sample IDs."""
+    tree = ast.parse((ROOT / "pol/paper1/e2.py").read_text(encoding="utf-8"))
+    attempt = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_run_e2_attempt"
+    )
+    convergence_call = next(
+        node
+        for node in ast.walk(attempt)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "evaluate_convergence"
+    )
+    callback = next(
+        keyword.value
+        for keyword in convergence_call.keywords
+        if keyword.arg == "evaluate"
+    )
+    assert isinstance(callback, ast.Lambda)
+    assert not any(
+        isinstance(node, ast.Name) and node.id == "dataset"
+        for node in ast.walk(callback)
+    )
+    assert not any(
+        argument.arg == "dataset"
+        for argument in next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_convergence"
+        ).args.args
+    )
+
+
+def test_test_evaluation_requires_durable_frozen_reference() -> None:
+    with __import__("pytest").raises(
+        TypeError, match="FrozenPlanReference"
+    ):
+        from pol.paper1.e2_evaluation import TestEvaluationContext
+
+        evaluate_test(context=TestEvaluationContext(
+            config=None,
+            frozen=object(),
+            test_view=object(),
+            evaluator=None,
+            point_order=[],
+            point_models={},
+            point_selections={},
+            pilot_n_sur=1,
+            selection_record_hash="x",
+            event_log=[],
+            solve_state=lambda *args: None,
+            build_features=lambda *args: None,
+            metric_row=lambda *args: None,
+        ))

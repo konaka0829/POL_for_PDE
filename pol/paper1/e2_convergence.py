@@ -3,6 +3,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Literal
+from typing import Any, Callable
+
+from .e2_points import SelectionDatasetView
 
 
 @dataclass(frozen=True)
@@ -24,3 +27,18 @@ def decide_convergence(
     if reruns_remaining <= 0:
         return ConvergenceDecision("reject", selected_base, "rerun limit reached")
     return ConvergenceDecision("rerun", selected_base, "selected base exceeds pilot")
+
+
+def evaluate_convergence(
+    *,
+    view: SelectionDatasetView,
+    representatives: dict[str, dict[str, Any]],
+    evaluate: Callable[
+        [SelectionDatasetView, dict[str, dict[str, Any]]],
+        tuple[list[dict[str, Any]], dict[str, Any]],
+    ],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Run convergence with no capability to inspect test labels."""
+    if not isinstance(view, SelectionDatasetView):
+        raise TypeError("convergence requires SelectionDatasetView")
+    return evaluate(view, representatives)

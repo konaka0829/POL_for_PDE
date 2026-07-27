@@ -38,7 +38,7 @@ The repository uses the following phase names:
 - Phase 3: E2 point evaluation, validation selection, convergence/rerun,
   frozen-plan, and test-evaluation boundaries;
 - Phase 4: path-override matrix executor and artifact-only plot registry;
-- Phase 5: compatibility-script removal (not performed);
+- Phase 5: Paper 1 compatibility-script removal (complete);
 - Phase 6: legacy Model123 separation (not performed).
 
 Earlier documentation called the matrix and plot work “Phase 3A/3B”. Those
@@ -46,9 +46,10 @@ features are Phase 4 implementation under the phase map above.
 
 ## Unified Paper 1 runner (Phase 1)
 
-The unified runner is a thin façade that invokes import-safe E0, dataset,
-E1, and E2 recipes directly in one Python process. The legacy scripts remain
-available as thin wrappers around those same recipes. Scientific settings remain in the existing
+The unified runner is the normal Paper 1 entry point and invokes import-safe
+E0, dataset, E1, and E2 recipes directly in one Python process. Direct recipes
+remain internal/test APIs; the removed Paper 1 compatibility scripts are not
+user entry points. Scientific settings remain in the existing
 `configs/paper1_*.json` files; each run spec contains only their paths and the
 minimal execution order.
 
@@ -68,8 +69,10 @@ complete sibling staging directories by atomic replacement, with rollback
 preserving a previously validated pass on computation, validation, or publish
 failure. The fingerprint excludes plot settings and UI-only
 options. A same-name run with different science is never silently deleted;
-choose another name or use the explicit destructive compatibility option
-`--force`. Main profiles are costly, so inspect them with `--plan` first.
+choose another name or use `--force`, which destructively replaces the
+explicit runner-owned run directory. This is distinct from recipe-level
+transactional rollback. Main profiles are costly, so inspect them with
+`--plan` first.
 
 ## E1 resolution matrix runner (Phase 4)
 
@@ -119,7 +122,7 @@ and compute fingerprint are not rewritten when only plot settings change.
 ## Phase 1 scientific regression baseline
 
 The checked-in semantic baseline is generated only from already completed,
-passing legacy-wrapper artifacts. The generator does not run experiments:
+passing direct-recipe artifacts. The generator does not run experiments:
 
 ```bash
 python scripts/dev/generate_paper1_phase1_scientific_baseline.py \
@@ -132,8 +135,8 @@ python scripts/dev/generate_paper1_phase1_scientific_baseline.py \
 
 Regeneration requires an explicit source revision and `--overwrite` when
 replacing an existing expectation. Review the scientific-core diff and verify
-legacy-wrapper versus unified-runner exact parity before accepting an update.
-Regression has two deliberately separate layers: same-runtime wrapper/runner
+direct-recipe versus unified-runner exact parity before accepting an update.
+Regression has two deliberately separate layers: same-runtime direct/runner
 and matrix scheduling parity remains byte/tensor/pixel exact, while comparison
 policy v2 / generator v4 uses explicit field-aware tolerances for cross-runtime
 BLAS/FFT/LAPACK drift. Discrete selections, row keys, dimensions, dtypes, and

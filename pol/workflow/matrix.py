@@ -400,7 +400,9 @@ def execute_matrix_run(
         {
             "plugin_id": plugin.plugin_id,
             "matrix_protocol_version": plugin.matrix_protocol_version,
-            "base_config_sha256": file_sha256(spec.base_config),
+            "base_config_sha256": _canonical_config_sha256(
+                spec.base_config, plugin=plugin
+            ),
             "cells": [
                 {"cell_id": cell.cell_id, "config_sha256": cell.config_sha256}
                 for cell in cells

@@ -37,8 +37,9 @@ Paper 1 workflow or scientific modules.
 
 ## Change discipline
 
-Keep scientific computation below import-safe recipes, with legacy CLI wrappers
-and unified runners above them. Do not mix algorithm changes, artifact protocol
+Keep scientific computation below import-safe recipes, with the unified runner
+above them. Do not restore the Paper 1 compatibility scripts removed in Phase
+5. Do not mix algorithm changes, artifact protocol
 changes, workflow refactors, and legacy cleanup in one phase. Production
 profiles must not be run unless explicitly requested.
 

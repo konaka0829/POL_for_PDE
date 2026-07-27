@@ -19,7 +19,7 @@ dependencies = [
 pol = "pol.cli:main"
 
 [project.optional-dependencies]
-test = ["pytest>=7.0"]
+test = ["pytest>=7.0", "build>=1.2"]
 
 [tool.setuptools.packages.find]
 where = ["."]

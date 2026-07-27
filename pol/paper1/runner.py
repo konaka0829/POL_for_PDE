@@ -26,10 +26,12 @@ from pol.paper1.config import canonical_config_json, load_config_json
 
 from .run_spec import Paper1RunSpec, run_spec_to_resolved_dict
 from .protocols import (
+    RUN_ARTIFACT_MANIFEST_SCHEMA_VERSION,
     RUN_MANIFEST_SCHEMA_VERSION,
     RUN_PLAN_SCHEMA_VERSION,
     recipe_protocols,
 )
+from pol.runtime.hashing import stable_object_hash
 
 
 @dataclass(frozen=True)
@@ -329,6 +331,106 @@ def _validate_current_request_binding(
     expected = _resolved_run_record(spec, steps, run_dir=run_dir)
     if saved != expected:
         raise ValueError("resolved run spec does not match current request")
+
+
+def _plan_identity(steps: list[PlannedStep]) -> str:
+    """Path-independent identity of the planned scientific recipe chain."""
+    from .artifact_contracts import canonical_config_identity
+
+    return stable_object_hash(
+        [
+            {
+                "name": step.name,
+                "recipe_id": step.recipe_id,
+                "recipe_callable": step.recipe_callable,
+                "config_identity": (
+                    canonical_config_identity(step.config_path)
+                    if step.config_path.is_file()
+                    else "produced-by-e0"
+                ),
+            }
+            for step in steps
+        ]
+    )
+
+
+def _scientific_dependencies(run_dir: Path) -> dict[str, str]:
+    from .e0_validation import validate_e0_scientific_artifacts
+
+    e0 = validate_e0_scientific_artifacts(run_dir / "e0")
+    result = {"e0": e0.scientific_identity}
+    dataset_manifest = run_dir / "master_dataset/manifest.json"
+    if dataset_manifest.is_file():
+        manifest = json.loads(dataset_manifest.read_text(encoding="utf-8"))
+        result["master_dataset"] = stable_object_hash(
+            {
+                "schema_version": manifest.get("schema_version"),
+                "sample_ids": manifest.get("sample_ids"),
+                "split": manifest.get("split"),
+                "tensor_hashes": manifest.get("tensor_hashes"),
+                "config": manifest.get("config"),
+            }
+        )
+    return result
+
+
+def _root_artifact_record(
+    spec: Paper1RunSpec,
+    steps: list[PlannedStep],
+    *,
+    run_dir: Path,
+    identities: list[object],
+) -> dict[str, Any]:
+    from .artifact_contracts import canonical_config_identity
+
+    dependencies = _scientific_dependencies(run_dir)
+    rows = []
+    for step, identity in zip(steps, identities):
+        dependency_identities: dict[str, str] = {}
+        if step.name != "e0":
+            dependency_identities["e0"] = dependencies["e0"]
+        if step.name == "e2":
+            dependency_identities["master_dataset"] = dependencies["master_dataset"]
+        rows.append(
+            {
+                "name": step.name,
+                "expected_config_identity": canonical_config_identity(
+                    step.config_path
+                ),
+                "dependency_scientific_identities": dependency_identities,
+                "artifact_identity": identity.__dict__,
+            }
+        )
+    return {
+        "schema_version": RUN_ARTIFACT_MANIFEST_SCHEMA_VERSION,
+        "run_name": spec.name,
+        "experiment_kind": spec.kind,
+        "science_fingerprint": science_fingerprint(spec),
+        "resolved_run_spec_sha256": file_sha256(
+            run_dir / "resolved_run_spec.json"
+        ),
+        "plan_identity": _plan_identity(steps),
+        "protocol_chain": list(recipe_protocols(spec.kind)),
+        "steps": rows,
+    }
+
+
+def _validate_root_artifact_record(
+    spec: Paper1RunSpec,
+    steps: list[PlannedStep],
+    *,
+    run_dir: Path,
+    identities: list[object],
+) -> None:
+    path = run_dir / "run_artifact_manifest.json"
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("missing or unsafe runner root artifact manifest")
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    expected = _root_artifact_record(
+        spec, steps, run_dir=run_dir, identities=identities
+    )
+    if saved != expected:
+        raise ValueError("runner root artifact manifest/current request mismatch")
 
 
 def _manifest(
@@ -633,8 +735,10 @@ def execute_run(
                     "pass --force"
                 )
             _validate_current_request_binding(spec, steps, run_dir=run_dir)
+            identities = []
             for index, step in enumerate(steps):
                 identity = _verify_step(step)
+                identities.append(identity)
                 recorded = manifest.get("steps", [])[index].get(
                     "artifact_identity"
                 )
@@ -642,6 +746,9 @@ def execute_run(
                     raise ValueError(
                         f"runner/step artifact identity mismatch: {step.name}"
                     )
+            _validate_root_artifact_record(
+                spec, steps, run_dir=run_dir, identities=identities
+            )
             if spec.plots_enabled:
                 outcomes = _run_plots(spec, run_dir=run_dir)
                 manifest["plot_tasks"] = outcomes
@@ -669,6 +776,7 @@ def execute_run(
 
     current_step_index: int | None = None
     current_started_monotonic: float | None = None
+    completed_identities: list[object] = []
     try:
         for index, step in enumerate(steps):
             current_step_index = index
@@ -699,6 +807,7 @@ def execute_run(
                     identity = _verify_step(step)
                     if identity is not None:
                         record["artifact_identity"] = identity.__dict__
+                        completed_identities.append(identity)
                 except BaseException as exc:
                     if isinstance(exc, RecipeUsageError):
                         record["returncode"] = 2
@@ -714,6 +823,18 @@ def execute_run(
             current_step_index = None
             current_started_monotonic = None
         manifest["compute_status"] = "pass"
+        # Production contracts always return identities.  Some unit tests use
+        # deliberately artifact-free fake recipes; they do not exercise reuse.
+        if len(completed_identities) == len(steps):
+            write_strict_json(
+                run_dir / "run_artifact_manifest.json",
+                _root_artifact_record(
+                    spec,
+                    steps,
+                    run_dir=run_dir,
+                    identities=completed_identities,
+                ),
+            )
         try:
             outcomes = _run_plots(spec, run_dir=run_dir)
             manifest["plot_tasks"] = outcomes

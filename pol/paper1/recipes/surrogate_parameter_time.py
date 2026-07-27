@@ -120,6 +120,8 @@ def prerequisite(config: Any, e0_dir: Path, dataset_dir: Path) -> tuple[Any, dic
     if source_e0.get("files") != expected_source_files:
         raise ValueError("dataset source_e0 hash chain mismatch")
     e0_report = {"schema_version": "paper1-e2-e0-prerequisite-v3", "status": "pass",
+                 "e0_scientific_identity": strict_e0["e0_scientific_identity"],
+                 "e0_provenance_identity": strict_e0["e0_provenance_identity"],
                  "e0_summary_sha256": sha(e0_dir / "e0_summary.json"),
                  "accepted_config_sha256": sha(accepted_path),
                  "master_file_sha256": sha(e0_dir / "master_initial_conditions.pt"),
@@ -134,6 +136,13 @@ def prerequisite(config: Any, e0_dir: Path, dataset_dir: Path) -> tuple[Any, dic
                       "payload_sha256": sha(dataset_dir / "master_dataset.pt"),
                       "tensor_hashes": dataset.metadata["tensor_hashes"],
                       "source_e0": source_e0}
+    dataset_report["master_dataset_scientific_identity"] = stable_hash({
+        "e0_scientific_identity": strict_e0["e0_scientific_identity"],
+        "config": canonical_config_json(dataset.config),
+        "sample_ids": tensor_hash(dataset.sample_ids),
+        "split_hash": dataset.metadata["split_hash"],
+        "u0_master": dataset.metadata["tensor_hashes"]["u0_master"],
+    })
     return dataset, e0_report, dataset_report
 
 
@@ -231,8 +240,10 @@ def _run_surrogate_parameter_time_staged(
     bindings = {
         "resolved_config_hash": hashlib.sha256(
             canonical_config_json(config).encode()).hexdigest(),
-        "e0_prerequisite_hash": stable_hash(e0_report),
-        "dataset_prerequisite_hash": stable_hash(dataset_report),
+        "e0_scientific_identity": e0_report["e0_scientific_identity"],
+        "master_dataset_scientific_identity": dataset_report[
+            "master_dataset_scientific_identity"
+        ],
         "dataset_hash": dataset.metadata["dataset_hash"],
         "split_hash": dataset.metadata["split_hash"],
         "sample_ids_hash": tensor_hash(dataset.sample_ids),

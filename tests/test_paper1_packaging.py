@@ -57,6 +57,8 @@ def test_wheel_contains_all_pol_packages(tmp_path: Path) -> None:
 
 
 def test_sdist_contains_research_specs_and_is_clean(tmp_path: Path) -> None:
+    cwd = tmp_path / "build-cwd"
+    cwd.mkdir()
     result = subprocess.run(
         [
             sys.executable,
@@ -66,8 +68,9 @@ def test_sdist_contains_research_specs_and_is_clean(tmp_path: Path) -> None:
             "--no-isolation",
             "--outdir",
             str(tmp_path),
+            str(ROOT),
         ],
-        cwd=ROOT,
+        cwd=cwd,
         capture_output=True,
         text=True,
         check=False,
