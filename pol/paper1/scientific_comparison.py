@@ -7,7 +7,7 @@ import re
 from typing import Any, Mapping
 
 
-COMPARISON_POLICY_VERSION = "paper1-scientific-comparison-v1"
+COMPARISON_POLICY_VERSION = "paper1-scientific-comparison-v2"
 _CROSS_RUNTIME_IGNORED_FIELDS = frozenset(
     {"selected_models_content_hash", "state_key"}
 )
@@ -56,6 +56,10 @@ DEFAULT_TOLERANCES = {
     # saved aggregate metrics enter the portable record; identities, seeds,
     # shapes, and selected candidates remain exact structural fields.
     "stochastic_aggregate": NumericTolerance(rtol=5e-5, atol=2e-7),
+    # Raw response-matrix/eigenspectrum diagnostics are useful regression
+    # evidence but can amplify small LAPACK differences in ill-conditioned
+    # directions. Discrete rank/selection/stability identities remain exact.
+    "condition_sensitive": NumericTolerance(rtol=2e-5, atol=5e-10),
 }
 
 

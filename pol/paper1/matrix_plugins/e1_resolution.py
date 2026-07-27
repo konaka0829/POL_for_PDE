@@ -14,7 +14,11 @@ from pol.paper1.config import (
 )
 from pol.runtime.io import write_strict_json
 from pol.runtime.recipe import RecipeInvocation, numerical_thread_scope
-from pol.workflow.types import MatrixCell
+from pol.workflow.types import (
+    DependencySpec,
+    MatrixCell,
+    ResolvedDependencies,
+)
 
 
 class E1ResolutionPlugin:
@@ -22,9 +26,134 @@ class E1ResolutionPlugin:
 
     plugin_id = "paper1_e1_resolution_v1"
     experiment_kind = "e1"
-    matrix_protocol_version = "paper1-e1-resolution-matrix-v1"
-    recipe_protocol_versions = ("paper1-e1-v1",)
+    matrix_protocol_version = "paper1-e1-resolution-matrix-v3"
     plot_experiment_kind = "e1_matrix"
+
+    @property
+    def recipe_protocol_versions(self) -> tuple[str, ...]:
+        from pol.paper1.protocols import E1_SCHEMA_VERSION
+
+        return (E1_SCHEMA_VERSION,)
+
+    def parse_dependencies(
+        self, raw: Mapping[str, Any], *, repo_root: Path
+    ) -> tuple[DependencySpec, ...]:
+        if set(raw) != {"e0_config"}:
+            unknown = sorted(set(raw) - {"e0_config"})
+            if unknown:
+                raise ValueError(f"unknown key at $.prerequisites: {unknown[0]}")
+            raise ValueError("missing required key at $.prerequisites.e0_config")
+        path = Path(str(raw["e0_config"]))
+        path = (path if path.is_absolute() else repo_root / path).resolve()
+        if not path.is_file():
+            raise ValueError(
+                f"file does not exist at $.prerequisites.e0_config: {path}"
+            )
+        from pol.paper1.protocols import E0_SCHEMA_VERSION
+
+        return (
+            DependencySpec(
+                name="foundation",
+                kind="paper1_e0",
+                config_path=path,
+                protocol_version=E0_SCHEMA_VERSION,
+                canonical_config_hash=hashlib.sha256(
+                    canonical_config_json(load_config_json(path)).encode("utf-8")
+                ).hexdigest(),
+            ),
+        )
+
+    def resolve_dependencies(
+        self,
+        specs,
+        *,
+        run_dir: Path,
+        base_config: Path,
+        repo_root: Path,
+        external_paths,
+        allow_execution: bool,
+    ) -> ResolvedDependencies:
+        if len(specs) != 1:
+            raise ValueError("E1 requires exactly one foundation dependency")
+        spec = specs[0]
+        managed = not external_paths
+        # Preserve the legacy on-disk location as a plugin-owned compatibility
+        # detail; generic matrix core treats this path opaquely.
+        output = run_dir / "e0"
+        if external_paths:
+            if len(external_paths) != 1:
+                raise ValueError("E1 accepts one external dependency path")
+            output = Path(external_paths[0]).resolve()
+            disposition = "external_reused"
+        else:
+            try:
+                self.validate_e0(output, base_config)
+                disposition = "reused"
+            except Exception:
+                if not allow_execution:
+                    raise ValueError(
+                        "plots-only requires an existing valid E0 dependency"
+                    )
+                if spec.config_path is None:
+                    raise ValueError("managed E0 dependency requires config_path")
+                self.execute_e0(
+                    spec.config_path,
+                    output,
+                    base_config=base_config,
+                    repo_root=repo_root,
+                )
+                disposition = "executed"
+        self.validate_e0(output, base_config)
+        from pol.paper1.artifact_contracts import E0ArtifactContract
+
+        E0ArtifactContract().validate_complete(output)
+        import torch
+
+        from pol.paper1.datasets import tensor_hash
+        from pol.runtime.hashing import stable_object_hash
+
+        archive = torch.load(
+            output / "master_initial_conditions.pt",
+            map_location="cpu",
+            weights_only=False,
+        )
+        values = archive.get("values") if isinstance(archive, dict) else None
+        if not isinstance(values, torch.Tensor):
+            raise ValueError("E0 dependency master tensor is missing")
+        master_tensor_hash = tensor_hash(values)
+        accepted_config_hash = hashlib.sha256(
+            canonical_config_json(
+                load_config_json(output / "accepted_production_config.json")
+            ).encode("utf-8")
+        ).hexdigest()
+        artifact_identity = stable_object_hash({
+            "protocol_version": spec.protocol_version,
+            "accepted_config_hash": accepted_config_hash,
+            "master_tensor_hash": master_tensor_hash,
+        })
+        identity_record = {
+            "name": spec.name,
+            "kind": spec.kind,
+            "protocol_version": spec.protocol_version,
+            "canonical_config_hash": spec.canonical_config_hash,
+            "artifact_identity": artifact_identity,
+            "accepted_config_hash": accepted_config_hash,
+            "master_tensor_hash": master_tensor_hash,
+            "binding_mode": "managed" if managed else "external",
+        }
+        record = {
+            **identity_record,
+            "status": "pass",
+            "executed_or_reused": disposition,
+            "output_dir": str(output),
+        }
+        return ResolvedDependencies(
+            identities=(identity_record,),
+            request_fields={"e0_dir": str(output)},
+            # The legacy key remains an experiment-owned compatibility field.
+            manifest_records={"e0": record},
+            protected_paths=(output,) if not managed else (),
+        )
 
     def execute_cell(self, request: Mapping[str, Any]):
         """Run the E1 recipe behind the experiment-owned plugin boundary."""

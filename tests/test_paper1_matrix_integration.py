@@ -126,7 +126,7 @@ def test_matrix_resume_reruns_only_missing_or_tampered_cells(
     run_dir = tmp_path / "resume"
     assert _run(["-m", "pol", "run", str(spec)]).returncode == 0
     manifest = json.loads((run_dir / "matrix_manifest.json").read_text())
-    assert manifest["e0"]["executed_or_reused"] == "reused"
+    assert manifest["dependencies"]["e0"]["executed_or_reused"] == "reused"
     assert {cell["executed_or_reused"] for cell in manifest["cells"]} == {"reused"}
 
     first = Path(manifest["cells"][0]["output_dir"])

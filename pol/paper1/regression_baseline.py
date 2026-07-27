@@ -21,9 +21,9 @@ from .scientific_comparison import (
 )
 
 
-BASELINE_SCHEMA_VERSION = "paper1-phase1-scientific-baseline-v3"
-MATRIX_BASELINE_SCHEMA_VERSION = "paper1-e1-matrix-smoke-baseline-v2"
-GENERATOR_VERSION = "paper1-scientific-baseline-generator-v3"
+BASELINE_SCHEMA_VERSION = "paper1-phase1-scientific-baseline-v4"
+MATRIX_BASELINE_SCHEMA_VERSION = "paper1-e1-matrix-smoke-baseline-v3"
+GENERATOR_VERSION = "paper1-scientific-baseline-generator-v4"
 
 # These fields encode execution location or bindings rather than scientific results.
 PROVENANCE_FIELDS = frozenset(
@@ -655,6 +655,13 @@ _STOCHASTIC_TOKENS = (
     "noise_summary",
     "model3_test_aggregate",
 )
+_CONDITION_SENSITIVE_TOKENS = (
+    "effective_response_matrix",
+    "feature_covariance_eigenvalues",
+    "learned_effective_diagonal",
+    "mode_comparison.csv",
+    "regularized_condition_number",
+)
 
 
 def _numeric_category(path: str, *, dtype_context: str | None = None) -> str:
@@ -679,6 +686,8 @@ def _numeric_category(path: str, *, dtype_context: str | None = None) -> str:
         return "selection_metric"
     if any(token in lowered for token in _STOCHASTIC_TOKENS):
         return "stochastic_aggregate"
+    if any(token in lowered for token in _CONDITION_SENSITIVE_TOKENS):
+        return "condition_sensitive"
     return "scientific_float32" if float32 else "scientific_float64"
 
 
@@ -741,6 +750,7 @@ def _comparison_policy(record: Mapping[str, Any]) -> dict[str, Any]:
             "roundoff_float64": "absolute dtype-scale diagnostics near theoretical zero",
             "roundoff_float32": "absolute float32 diagnostics near theoretical zero",
             "stochastic_aggregate": "stable aggregate of version-sensitive random draws",
+            "condition_sensitive": "ill-conditioned raw diagnostic with exact discrete identities",
             "selection_metric": "tight metrics supporting exact selected identities",
         },
         "numeric_paths": compact_paths,

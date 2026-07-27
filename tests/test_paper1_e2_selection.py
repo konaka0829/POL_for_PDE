@@ -6,7 +6,10 @@ import torch
 from pol.paper1.config import load_config_json
 from pol.paper1.datasets import _split_indices
 from pol.paper1.e2 import select_first_with_tolerance, validate_convergence_membership
-from pol.paper1.e2_selection import build_selection_bindings
+from pol.paper1.e2_selection import (
+    assert_validation_only_record,
+    build_selection_bindings,
+)
 
 
 def test_validation_selection_uses_config_order_and_not_test():
@@ -61,3 +64,18 @@ def test_selection_binding_is_independent_of_test_labels() -> None:
     )
     assert first == second
     assert "dataset_hash" not in first
+
+
+def test_nested_test_binding_is_rejected_with_path() -> None:
+    with pytest.raises(
+        ValueError, match=r"\$\.bindings\.nested\[0\]\.test_target_hash"
+    ):
+        assert_validation_only_record(
+            {"bindings": {"nested": [{"test_target_hash": "forbidden"}]}}
+        )
+    with pytest.raises(
+        ValueError, match=r"\$\.bindings\.nested\.dataset_hash"
+    ):
+        assert_validation_only_record(
+            {"bindings": {"nested": {"dataset_hash": "full-dataset"}}}
+        )

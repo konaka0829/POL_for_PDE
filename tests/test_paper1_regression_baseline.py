@@ -107,6 +107,26 @@ def test_numeric_paths_propagates_sibling_dtype_metadata() -> None:
     assert paths["$.selected_zeta"] == "exact_numeric"
 
 
+def test_checked_in_fixture_uses_v4_field_aware_policy() -> None:
+    fixture = json.loads(
+        (
+            Path(__file__).parent
+            / "fixtures/paper1_phase1_scientific_baseline_v3.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert fixture["schema_version"] == "paper1-phase1-scientific-baseline-v4"
+    assert fixture["generator_version"] == "paper1-scientific-baseline-generator-v4"
+    policy = fixture["comparison_policy"]
+    assert policy["version"] == "paper1-scientific-comparison-v2"
+    assert "stochastic_aggregate" in policy["tolerances"]
+    categories = policy["numeric_paths"]
+    assert any(
+        "_float32" in path and category == "scientific_float32"
+        for path, category in categories.items()
+    )
+    assert any(category == "roundoff_float32" for category in categories.values())
+
+
 def test_baseline_writer_is_deterministic_and_requires_overwrite(
     tmp_path: Path,
 ) -> None:

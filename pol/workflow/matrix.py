@@ -13,24 +13,19 @@ from typing import Any
 
 from pol.runtime.io import file_sha256, write_csv, write_strict_json
 from pol.runtime.path_safety import resolve_safe_run_directory
-from pol.paper1.config import canonical_config_json, load_config_json
 
 from .matrix_spec import MatrixRunSpec, expand_matrix
 from .matrix_worker import execute_matrix_cell
-from .registry import get_matrix_plugin
+from .registry import get_matrix_plugin, matrix_plugin_factory_path
 from .types import MatrixCell
 
 
-MATRIX_MANIFEST_SCHEMA = "paper1-matrix-manifest-v1"
+MATRIX_MANIFEST_SCHEMA = "paper1-matrix-manifest-v3"
 
 
-def _canonical_config_sha256(path: Path) -> str:
-    canonical = canonical_config_json(load_config_json(path))
+def _canonical_config_sha256(path: Path, *, plugin: Any) -> str:
+    canonical = plugin.canonical_config(plugin.load_base(path))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _atomic_json(path: Path, value: object) -> None:
-    write_strict_json(path, value)
 
 
 def _resolved_run_dir(
@@ -46,7 +41,7 @@ def _resolved_run_dir(
         protected_paths=(
             spec.source_path,
             spec.base_config,
-            spec.e0_config,
+            *(item.config_path for item in spec.dependencies if item.config_path),
             *extra_protected_paths,
         ),
     )
@@ -63,35 +58,49 @@ def _compute_fingerprint(
     spec: MatrixRunSpec,
     cells: list[MatrixCell],
     *,
-    e0_binding: dict[str, Any],
+    dependency_identities: tuple[dict[str, Any], ...],
     plugin: Any | None = None,
 ) -> str:
+    payload = _compute_fingerprint_payload(
+        spec,
+        cells,
+        dependency_identities=dependency_identities,
+        plugin=plugin,
+    )
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _compute_fingerprint_payload(
+    spec: MatrixRunSpec,
+    cells: list[MatrixCell],
+    *,
+    dependency_identities: tuple[dict[str, Any], ...],
+    plugin: Any | None = None,
+) -> dict[str, Any]:
     if plugin is None:
         plugin = get_matrix_plugin(spec.aggregation_kind)
-    payload = {
+    return {
         "schema_version": spec.schema_version,
-        "base_config_sha256": _canonical_config_sha256(spec.base_config),
-        "e0_config_sha256": _canonical_config_sha256(spec.e0_config),
-        "e0_binding": e0_binding,
+        "base_config_sha256": _canonical_config_sha256(
+            spec.base_config, plugin=plugin
+        ),
+        "dependencies": dependency_identities,
         "aggregation_kind": spec.aggregation_kind,
         "plugin_id": plugin.plugin_id,
         "experiment_kind": plugin.experiment_kind,
         "aggregation_protocol": plugin.matrix_protocol_version,
         "recipe_protocols": plugin.recipe_protocol_versions,
-        "invalid_run_policy": spec.invalid_run_policy,
         "torch_threads_per_job": spec.torch_threads_per_job,
         "cells": [
             {
                 "config_sha256": cell.config_sha256,
-                "memberships": list(cell.experiment_memberships),
             }
             for cell in cells
         ],
     }
-    encoded = json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), allow_nan=False
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _artifact_contract_fingerprint(
@@ -105,47 +114,6 @@ def _artifact_contract_fingerprint(
         payload, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
-
-
-def _internal_e0_binding(spec: MatrixRunSpec) -> dict[str, Any]:
-    return {
-        "mode": "matrix_managed",
-        "e0_config_sha256": _canonical_config_sha256(spec.e0_config),
-    }
-
-
-def _external_e0_binding(
-    e0_dir: Path, *, plugin: Any, base_config: Path
-) -> dict[str, Any]:
-    """Validate and identify an externally managed E0 prerequisite."""
-    plugin.validate_e0(e0_dir, base_config)
-    import torch
-
-    from pol.paper1.datasets import tensor_hash
-
-    archive = torch.load(
-        e0_dir / "master_initial_conditions.pt",
-        map_location="cpu",
-        weights_only=False,
-    )
-    manifest = json.loads(
-        (e0_dir / "master_manifest.json").read_text(encoding="utf-8")
-    )
-    if not isinstance(archive, dict) or not isinstance(
-        archive.get("values"), torch.Tensor
-    ):
-        raise ValueError("external E0 master archive is invalid")
-    actual_hash = tensor_hash(archive["values"])
-    metadata_hash = archive.get("metadata", {}).get("tensor_hash")
-    if actual_hash != metadata_hash or actual_hash != manifest.get("tensor_hash"):
-        raise ValueError("external E0 master tensor identity mismatch")
-    return {
-        "mode": "external",
-        "accepted_config_sha256": _canonical_config_sha256(
-            e0_dir / "accepted_production_config.json"
-        ),
-        "master_tensor_hash": actual_hash,
-    }
 
 
 def matrix_plan_to_dict(
@@ -320,29 +288,6 @@ def _shutdown_process_pool(
             process.join(timeout_seconds)
 
 
-def _run_e0(
-    spec: MatrixRunSpec,
-    *,
-    repo_root: Path,
-    run_dir: Path,
-    plugin: Any,
-) -> str:
-    e0_dir = run_dir / "e0"
-    if e0_dir.exists():
-        try:
-            plugin.validate_e0(e0_dir, spec.base_config)
-            return "reused"
-        except Exception:
-            pass
-    plugin.execute_e0(
-        spec.e0_config,
-        e0_dir,
-        base_config=spec.base_config,
-        repo_root=repo_root,
-    )
-    return "executed"
-
-
 def _reuse_result(
     plugin: Any,
     cell: MatrixCell,
@@ -424,7 +369,7 @@ def execute_matrix_run(
     *,
     repo_root: Path,
     force: bool,
-    existing_e0_dir: Path | None = None,
+    existing_dependency_paths: tuple[Path, ...] = (),
     plots_only: bool = False,
 ) -> int:
     """Execute a matrix with spawned workers, strict resume, and fresh aggregation."""
@@ -433,19 +378,52 @@ def execute_matrix_run(
         spec,
         root,
         extra_protected_paths=(
-            (existing_e0_dir,) if existing_e0_dir is not None else ()
+            tuple(existing_dependency_paths)
         ),
     )
     plugin, cells, invalid, raw_counts = _prepare(spec)
-    e0_binding = (
-        _internal_e0_binding(spec)
-        if existing_e0_dir is None
-        else _external_e0_binding(
-            existing_e0_dir, plugin=plugin, base_config=spec.base_config
-        )
+    old_manifest: dict[str, Any] | None = None
+    if run_dir.exists() or run_dir.is_symlink():
+        old_manifest = _validate_owned_matrix(run_dir, spec)
+        if force and not plots_only:
+            shutil.rmtree(run_dir)
+            old_manifest = None
+        elif not plots_only and not spec.resume:
+            raise FileExistsError(
+                f"matrix run directory exists and resume=false: {run_dir}"
+            )
+    if not plots_only:
+        output_root.mkdir(parents=True, exist_ok=True)
+        for directory in (
+            run_dir,
+            run_dir / "generated_configs",
+            run_dir / "cells",
+            run_dir / "logs",
+        ):
+            directory.mkdir(parents=True, exist_ok=True)
+    dependencies = plugin.resolve_dependencies(
+        spec.dependencies,
+        run_dir=run_dir,
+        base_config=spec.base_config,
+        repo_root=root,
+        external_paths=existing_dependency_paths,
+        allow_execution=not plots_only,
     )
     compute_fingerprint = _compute_fingerprint(
-        spec, cells, e0_binding=e0_binding, plugin=plugin
+        spec,
+        cells,
+        dependency_identities=tuple(
+            dict(item) for item in dependencies.identities
+        ),
+        plugin=plugin,
+    )
+    compute_fingerprint_payload = _compute_fingerprint_payload(
+        spec,
+        cells,
+        dependency_identities=tuple(
+            dict(item) for item in dependencies.identities
+        ),
+        plugin=plugin,
     )
     artifact_fingerprint = _artifact_contract_fingerprint(
         compute_fingerprint, cell_plots=spec.cell_plots
@@ -468,12 +446,6 @@ def execute_matrix_run(
                 raise ValueError(
                     "artifact contract fingerprint mismatch for --plots-only"
                 )
-            recorded_e0 = manifest.get("e0", {}).get("output_dir")
-            e0_validation_dir = (
-                Path(recorded_e0) if isinstance(recorded_e0, str)
-                else run_dir / "e0"
-            )
-            plugin.validate_e0(e0_validation_dir, spec.base_config)
             for cell in cells:
                 plugin.validate_cell(
                     run_dir / "cells" / cell.cell_id,
@@ -512,7 +484,7 @@ def execute_matrix_run(
                 outcomes=[],
                 failure=manifest["failure"],
             )
-            _atomic_json(run_dir / "matrix_manifest.json", manifest)
+            write_strict_json(run_dir / "matrix_manifest.json", manifest)
             return 1
         try:
             outcomes = _run_matrix_plots(spec, run_dir, plugin=plugin)
@@ -530,7 +502,7 @@ def execute_matrix_run(
                 outcomes=outcomes,
                 failure=None,
             )
-            _atomic_json(run_dir / "matrix_manifest.json", manifest)
+            write_strict_json(run_dir / "matrix_manifest.json", manifest)
             return 0
         except Exception as exc:
             manifest["plot_status"] = "fail"
@@ -547,47 +519,29 @@ def execute_matrix_run(
                 outcomes=[],
                 failure=manifest["failure"],
             )
-            _atomic_json(run_dir / "matrix_manifest.json", manifest)
+            write_strict_json(run_dir / "matrix_manifest.json", manifest)
             return 1 if spec.plots_required else 0
-    old_manifest: dict[str, Any] | None = None
-    if run_dir.exists() or run_dir.is_symlink():
-        old_manifest = _validate_owned_matrix(run_dir, spec)
-        if force:
-            shutil.rmtree(run_dir)
-            old_manifest = None
-        elif not spec.resume:
-            raise FileExistsError(
-                f"matrix run directory exists and resume=false: {run_dir}"
-            )
-        elif (
-            old_manifest.get("artifact_contract_fingerprint")
-            != artifact_fingerprint
-        ):
-            raise ValueError("matrix fingerprint mismatch; use a new run name or --force")
-    output_root.mkdir(parents=True, exist_ok=True)
-    for directory in (
-        run_dir,
-        run_dir / "generated_configs",
-        run_dir / "cells",
-        run_dir / "logs",
+    if old_manifest is not None and (
+        old_manifest.get("artifact_contract_fingerprint")
+        != artifact_fingerprint
     ):
-        directory.mkdir(parents=True, exist_ok=True)
+        raise ValueError("matrix fingerprint mismatch; use a new run name or --force")
 
     plan = matrix_plan_to_dict(spec, repo_root=root)
-    _atomic_json(run_dir / "matrix_plan.json", plan)
+    write_strict_json(run_dir / "matrix_plan.json", plan)
     resolved = {
         "schema_version": spec.schema_version,
         "source_path": str(spec.source_path),
         "source_sha256": file_sha256(spec.source_path),
         "base_config": str(spec.base_config),
         "base_config_sha256": file_sha256(spec.base_config),
-        "e0_config": str(spec.e0_config),
-        "e0_config_sha256": file_sha256(spec.e0_config),
+        "dependencies": list(dependencies.identities),
         "run_dir": str(run_dir),
         "matrix_fingerprint": artifact_fingerprint,
         "compute_fingerprint": compute_fingerprint,
+        "compute_fingerprint_payload": compute_fingerprint_payload,
         "artifact_contract_fingerprint": artifact_fingerprint,
-        "e0_binding": e0_binding,
+        "dependency_identities": list(dependencies.identities),
         "execution": {
             "jobs": spec.jobs,
             "torch_threads_per_job": spec.torch_threads_per_job,
@@ -595,7 +549,7 @@ def execute_matrix_run(
             "cell_plots": spec.cell_plots,
         },
     }
-    _atomic_json(run_dir / "resolved_matrix_spec.json", resolved)
+    write_strict_json(run_dir / "resolved_matrix_spec.json", resolved)
     manifest = {
         "schema_version": MATRIX_MANIFEST_SCHEMA,
         "status": "running",
@@ -603,15 +557,16 @@ def execute_matrix_run(
         "run_dir": str(run_dir),
         "matrix_fingerprint": artifact_fingerprint,
         "compute_fingerprint": compute_fingerprint,
+        "compute_fingerprint_payload": compute_fingerprint_payload,
         "artifact_contract_fingerprint": artifact_fingerprint,
         "science_fingerprint": compute_fingerprint,
-        "e0_binding": e0_binding,
+        "dependency_identities": list(dependencies.identities),
         "compute_status": "running",
         "plot_status": "pending" if spec.plots_enabled else "disabled",
         "plot_tasks": [],
         "aggregation_kind": spec.aggregation_kind,
         "raw_run_counts": raw_counts,
-        "e0": {"status": "pending", "executed_or_reused": None},
+        "dependencies": dict(dependencies.manifest_records),
         "cells": [_cell_plan_record(cell, run_dir) | {"status": "pending"} for cell in cells],
         "aggregate_counts": (
             old_manifest.get("aggregate_counts") if old_manifest else None
@@ -621,7 +576,7 @@ def execute_matrix_run(
         ),
         "failure": None,
     }
-    _atomic_json(run_dir / "matrix_manifest.json", manifest)
+    write_strict_json(run_dir / "matrix_manifest.json", manifest)
     _write_csv(
         run_dir / "matrix_invalid_runs.csv",
         [
@@ -645,22 +600,6 @@ def execute_matrix_run(
         ],
     )
     try:
-        if existing_e0_dir is None:
-            e0_disposition = _run_e0(
-                spec, repo_root=root, run_dir=run_dir, plugin=plugin
-            )
-            e0_dir = run_dir / "e0"
-        else:
-            plugin.validate_e0(existing_e0_dir, spec.base_config)
-            e0_dir = existing_e0_dir.resolve()
-            e0_disposition = "external_reused"
-        manifest["e0"] = {
-            "status": "pass",
-            "executed_or_reused": e0_disposition,
-            "output_dir": str(e0_dir),
-        }
-        _atomic_json(run_dir / "matrix_manifest.json", manifest)
-
         results: dict[int, dict[str, Any]] = {}
         requests: list[dict[str, Any]] = []
         for cell in cells:
@@ -682,11 +621,14 @@ def execute_matrix_run(
             requests.append(
                 {
                     "plugin_id": spec.aggregation_kind,
+                    "plugin_factory": matrix_plugin_factory_path(
+                        spec.aggregation_kind
+                    ),
                     "run_index": cell.run_index,
                     "cell_id": cell.cell_id,
                     "config_sha256": cell.config_sha256,
                     "config_path": str(config_path),
-                    "e0_dir": str(e0_dir),
+                    **dict(dependencies.request_fields),
                     "output_dir": str(output_dir),
                     "log_path": str(run_dir / "logs" / f"{cell.cell_id}.log"),
                     "repo_root": str(root),
@@ -709,7 +651,7 @@ def execute_matrix_run(
                     result = future.result()
                     results[int(result["run_index"])] = result
                     manifest["cells"][int(result["run_index"])].update(result)
-                    _atomic_json(run_dir / "matrix_manifest.json", manifest)
+                    write_strict_json(run_dir / "matrix_manifest.json", manifest)
             except KeyboardInterrupt:
                 _shutdown_process_pool(pool, list(future_map))
                 raise
@@ -824,7 +766,7 @@ def execute_matrix_run(
                     outcomes=[],
                     failure=manifest["failure"],
                 )
-        _atomic_json(run_dir / "matrix_manifest.json", manifest)
+        write_strict_json(run_dir / "matrix_manifest.json", manifest)
         return 1 if failures or (
             manifest["plot_status"] == "fail" and spec.plots_required
         ) else 0
@@ -832,11 +774,11 @@ def execute_matrix_run(
         manifest["status"] = "interrupted"
         manifest["compute_status"] = "interrupted"
         manifest["failure"] = "KeyboardInterrupt"
-        _atomic_json(run_dir / "matrix_manifest.json", manifest)
+        write_strict_json(run_dir / "matrix_manifest.json", manifest)
         return 130
     except Exception as exc:
         manifest["status"] = "fail"
         manifest["compute_status"] = "fail"
         manifest["failure"] = f"{type(exc).__name__}: {exc}"
-        _atomic_json(run_dir / "matrix_manifest.json", manifest)
+        write_strict_json(run_dir / "matrix_manifest.json", manifest)
         return 1

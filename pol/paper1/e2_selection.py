@@ -20,23 +20,34 @@ class SelectionResult:
 
 def assert_validation_only_record(record: dict[str, Any]) -> None:
     """Fail closed if a selection record acquires test-label bindings."""
-    serialized_keys = {
-        str(key).lower()
-        for key in record.get("bindings", {})
-    }
     forbidden = {
         "dataset_hash",
         "dataset_prerequisite_hash",
         "input_tensor_hashes",
         "finite_input_tensor_hashes",
         "test_target_hash",
+        "test_labels",
+        "test_target_coefficients",
+        "test_reference_hash",
+        "full_target_hash",
+        "dataset_target_hash",
     }
-    overlap = serialized_keys & forbidden
-    if overlap:
-        raise ValueError(
-            "selection record contains forbidden full/test binding: "
-            + sorted(overlap)[0]
-        )
+
+    def scan(value: Any, path: str) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                normalized = str(key).lower()
+                if normalized in forbidden:
+                    raise ValueError(
+                        "selection record contains forbidden full/test binding "
+                        f"at {path}.{key}"
+                    )
+                scan(item, f"{path}.{key}")
+        elif isinstance(value, (list, tuple)):
+            for index, item in enumerate(value):
+                scan(item, f"{path}[{index}]")
+
+    scan(record.get("bindings", {}), "$.bindings")
 
 
 def build_selection_bindings(

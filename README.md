@@ -60,16 +60,24 @@ pol run configs/runs/paper1_e2_smoke.json
 pol run configs/runs/paper1_e2_main.json --plan
 ```
 
-A complete run with the same canonical science fingerprint is validated and
-reused automatically. The fingerprint excludes plot settings and UI-only
+A complete run with the same canonical science fingerprint is reused only
+after recipe-owned manifest/hash, numeric read-back, symlink, and exact-tree
+validation. A corrupt step is rejected with nonzero status and must be repaired
+with explicit overwrite; it is never silently reused. E0, E1, and E2 publish
+complete sibling staging directories by atomic replacement, with rollback
+preserving a previously validated pass on computation, validation, or publish
+failure. The fingerprint excludes plot settings and UI-only
 options. A same-name run with different science is never silently deleted;
 choose another name or use the explicit destructive compatibility option
 `--force`. Main profiles are costly, so inspect them with `--plan` first.
 
 ## E1 resolution matrix runner (Phase 4)
 
-The `paper1-matrix-run-v1` schema expands strict scalar-leaf overrides into
-deduplicated E1 cells. Each cell runs in a spawned Python process, while E0 is
+The `paper1-matrix-run-v1` schema expands strict path overrides into
+deduplicated cells. Core knows only an importable plugin factory path and
+generic dependency identities; the E1 plugin owns E0 parsing, execution, and
+validation. A plugin with no prerequisites uses the same spawned executor.
+Each E1 cell runs in a spawned Python process, while its E0 dependency is
 validated or executed once for the matrix:
 
 ```bash
@@ -81,7 +89,9 @@ The second invocation validates and reuses complete cells. Missing or
 hash-tampered E1 artifacts rerun only their owning cell; aggregate CSV files
 are rebuilt from verified passing cells in a sibling staging directory and
 atomically published with an exact file contract. The matrix compute
-fingerprint includes `torch_threads_per_job`, but excludes scheduling
+fingerprint includes plugin/matrix and actual cell-recipe protocol versions,
+dependency recipe/config/artifact identities, canonical cells, and
+`torch_threads_per_job`, but excludes scheduling
 (`jobs`), resume, and aggregate plot settings. The older
 `scripts/paper1/run_e1_sweep.py` entry remains as a deprecated compatibility
 wrapper and delegates aggregate plotting to the Phase 4 plot registry.
@@ -126,8 +136,8 @@ Regeneration requires an explicit source revision and `--overwrite` when
 replacing an existing expectation. Review the scientific-core diff and verify
 legacy-wrapper versus unified-runner exact parity before accepting an update.
 Regression has two deliberately separate layers: same-runtime wrapper/runner
-and matrix scheduling parity remains byte/tensor/pixel exact, while the v3
-saved baseline uses explicit field-aware tolerances for cross-runtime
+and matrix scheduling parity remains byte/tensor/pixel exact, while comparison
+policy v2 / generator v4 uses explicit field-aware tolerances for cross-runtime
 BLAS/FFT/LAPACK drift. Discrete selections, row keys, dimensions, dtypes, and
 event order remain exact. Execution paths, timestamps, cache/binding hashes,
 raw CSV/PyTorch/plot hashes, and selected-model weight digests are not
@@ -336,14 +346,20 @@ spectral grid, fixed-\(J\) features, and predictions from a finest-resolution
 frozen readout. Passing family bases and their global maximum are written to
 `e2_handoff.json` for E3 only for a passing run; scientific or procedural
 failure has nonzero exit status and no handoff. Content-addressed state and
-feature caches are separate and shared across Models 1--3. `--resume` accepts
+feature caches are separate and shared across Models 1--3. Unified E2 runs
+place them below `<output-root>/.cache/paper1_e2_v3/`, outside immutable run
+generations. State identity excludes model/readout/q/J settings and includes
+the finite-input tensor and sample shard, surrogate equation and physical
+parameters, time, solver protocol, and `n_sur`; feature identity additionally
+binds J. `--resume` accepts
 only hash-verified complete output/cache artifacts bound to the currently
 supplied canonical config, E0 summary/config/archive, dataset
 manifest/payload, dataset/split and sample IDs, protocol version, and plot
 policy. Relocating identical content is allowed; missing or changed inputs are
 rejected. Partial resume uses only validated cache units. `--overwrite` and
 `--resume` are mutually exclusive.
-Cache keys use canonical JSON and the v2 cache schema; state and fixed-\(J\)
+Cache keys use canonical JSON and the v3 complete-marker/writer-lock schema;
+state and fixed-\(J\)
 feature units are committed atomically and partial/tampered units are rejected
 under `--resume`.
 

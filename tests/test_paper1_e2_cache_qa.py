@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from pol.paper1.e2 import TensorCache
+from pol.paper1.e2_cache import CACHE_SCHEMA_VERSION, stable_hash
 from pol.paper1.e2_qa import validate_csv, validate_resume_output
 
 
@@ -28,7 +29,33 @@ def test_cache_key_tuple_round_trip_across_instances(tmp_path):
     assert calls == []
 
 
-@pytest.mark.parametrize("missing_suffix", [".pt", ".json"])
+def test_cache_compute_failure_releases_writer_lock(tmp_path):
+    cache = TensorCache(tmp_path, resume=False)
+    with pytest.raises(RuntimeError, match="injected"):
+        cache.get_or_compute(
+            "states", {"x": 1},
+            lambda: (_ for _ in ()).throw(RuntimeError("injected")),
+        )
+    assert not list((tmp_path / "states").glob("*.lock"))
+    value, _, _ = cache.get_or_compute(
+        "states", {"x": 1}, lambda: (torch.ones(1), {})
+    )
+    assert torch.equal(value, torch.ones(1))
+
+
+def test_cache_rejects_active_or_stale_writer_lock(tmp_path):
+    cache = TensorCache(tmp_path, resume=False)
+    digest = stable_hash(
+        {"schema": CACHE_SCHEMA_VERSION, "kind": "states", "key": {"x": 1}}
+    )
+    directory = tmp_path / "states"
+    directory.mkdir()
+    (directory / f"{digest}.lock").write_text('{"pid":1}')
+    with pytest.raises(ValueError, match="writer lock"):
+        cache.get_or_compute("states", {"x": 1}, lambda: (torch.ones(1), {}))
+
+
+@pytest.mark.parametrize("missing_suffix", [".pt", ".json", ".complete.json"])
 def test_resume_rejects_half_cache_unit(tmp_path, missing_suffix):
     cache = TensorCache(tmp_path, resume=False)
     _, _, digest = cache.get_or_compute(

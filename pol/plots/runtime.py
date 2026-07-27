@@ -40,10 +40,6 @@ def _remove_plot_directory(path: Path, *, parent: Path) -> None:
         shutil.rmtree(target)
 
 
-def _atomic_json(path: Path, value: object) -> None:
-    write_strict_json(path, value)
-
-
 def _canonical_settings(value: object) -> object:
     if value is None or isinstance(value, (str, bool, int)):
         return value
@@ -361,7 +357,7 @@ def execute_plot_tasks(
                     failures=failures,
                     exc=exc,
                 )
-                _atomic_json(staging / "plot_manifest.json", manifest)
+                write_strict_json(staging / "plot_manifest.json", manifest)
                 _verify_exact_tree(staging, outputs, include_manifest=True)
                 if not previous_complete:
                     _publish_plot_directory(
@@ -384,7 +380,7 @@ def execute_plot_tasks(
                 "executed_or_reused": "executed",
                 "failure": None,
             }
-            _atomic_json(staging / "plot_manifest.json", manifest)
+            write_strict_json(staging / "plot_manifest.json", manifest)
             _verify_exact_tree(staging, outputs, include_manifest=True)
             _publish_plot_directory(staging, output_dir, figures_dir=figures_dir)
             outcomes.append(

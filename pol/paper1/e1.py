@@ -19,7 +19,7 @@ from .readouts import fit_centered_affine_ridge, l2_analysis_matrix, l2_synthesi
 from .schemas import stable_hash_json
 from .target_representation import real_fourier_analysis, real_fourier_synthesis
 
-E1_SCHEMA_VERSION = "paper1-e1-v2"
+from .protocols import E1_SCHEMA_VERSION
 E0_REQUIRED = (
     "e0_summary.json", "resampling_checks.json", "input_interface_checks.json",
     "model1_identity.json", "reference_convergence.json",

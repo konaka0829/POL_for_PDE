@@ -64,7 +64,7 @@ def _preflight(output_dir: Path, overwrite: bool) -> None:
             (output_dir / name).unlink()
 
 
-def run_foundation_validation(
+def _run_foundation_validation_staged(
     config_path: Path,
     output_dir: Path,
     *,
@@ -250,4 +250,35 @@ def run_foundation_validation(
         output_dir=output_dir,
         console_payload=summary,
         summary_path=output_dir / "e0_summary.json",
+    )
+
+
+def run_foundation_validation(
+    config_path: Path,
+    output_dir: Path,
+    *,
+    overwrite: bool,
+    invocation: RecipeInvocation,
+) -> RecipeResult:
+    """Run E0 through rollback-safe directory publication."""
+    if output_dir.is_symlink():
+        raise RecipeUsageError(f"output path must not be a symlink: {output_dir}")
+    if output_dir.exists() and any(output_dir.iterdir()) and not overwrite:
+        raise RecipeUsageError(
+            f"{output_dir} already contains E0 artifacts; pass --overwrite"
+        )
+    from pol.runtime.artifacts import execute_recipe_transaction
+    from pol.paper1.artifact_contracts import E0ArtifactContract
+
+    contract = E0ArtifactContract()
+    return execute_recipe_transaction(
+        output_dir,
+        execute=lambda staging: _run_foundation_validation_staged(
+            config_path,
+            staging,
+            overwrite=True,
+            invocation=invocation,
+        ),
+        validate_complete=contract.validate_complete,
+        validate_failure=contract.validate_failure,
     )

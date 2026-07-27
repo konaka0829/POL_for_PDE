@@ -51,6 +51,33 @@ def test_shared_atomic_io_and_transaction_preserve_previous_output(
     assert (final / "old.txt").read_text(encoding="utf-8") == "old"
 
 
+def test_failed_rerun_archives_exact_diagnostics_and_preserves_pass(
+    tmp_path: Path,
+) -> None:
+    from pol.runtime.artifacts import execute_recipe_transaction, exact_artifact_tree
+    from pol.runtime.recipe import RecipeResult
+
+    final = tmp_path / "run"
+    final.mkdir()
+    (final / "pass.json").write_text('{"status":"pass"}\n')
+
+    def execute(staging: Path) -> RecipeResult:
+        summary = staging / "failure.json"
+        summary.write_text('{"status":"fail"}\n')
+        return RecipeResult("fail", 1, staging, {"status": "fail"}, summary)
+
+    result = execute_recipe_transaction(
+        final,
+        execute=execute,
+        validate_complete=lambda root: exact_artifact_tree(root, {"pass.json"}),
+        validate_failure=lambda root: exact_artifact_tree(root, {"failure.json"}),
+    )
+    assert (final / "pass.json").read_text() == '{"status":"pass"}\n'
+    assert result.output_dir != final
+    assert result.output_dir.is_relative_to(tmp_path / ".failed-attempts")
+    assert result.summary_path == result.output_dir / "failure.json"
+
+
 @pytest.mark.parametrize("failure", [None, RuntimeError, KeyboardInterrupt])
 def test_numerical_thread_scope_sets_and_restores(monkeypatch, failure) -> None:
     previous_torch = torch.get_num_threads()

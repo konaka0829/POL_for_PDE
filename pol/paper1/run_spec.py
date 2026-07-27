@@ -71,65 +71,9 @@ def _positive_int(value: object, path: str) -> int:
 def _plot_block(
     value: object, *, kind: str
 ) -> tuple[bool, bool, tuple[PlotTaskSpec, ...]]:
-    plots = _object(value, "$.plots")
-    _keys(
-        plots,
-        "$.plots",
-        required={"enabled", "required", "recipes"},
-        allowed={"enabled", "required", "recipes"},
-    )
-    enabled = plots["enabled"]
-    required = plots["required"]
-    recipes = plots["recipes"]
-    if not isinstance(enabled, bool):
-        raise ValueError("expected boolean at $.plots.enabled")
-    if not isinstance(required, bool):
-        raise ValueError("expected boolean at $.plots.required")
-    if not isinstance(recipes, list):
-        raise ValueError("expected array at $.plots.recipes")
-    if not enabled and recipes:
-        raise ValueError("$.plots.recipes must be empty when plots are disabled")
-    if required and not enabled:
-        raise ValueError("$.plots.required cannot be true when plots are disabled")
-    if enabled and not recipes:
-        raise ValueError("$.plots.recipes must be non-empty when plots are enabled")
-    supported = {
-        "e1": {"paper1.e1.standard.v1"},
-        "e2": {"paper1.e2.standard.v1"},
-    }.get(kind, set())
-    tasks: list[PlotTaskSpec] = []
-    seen: set[str] = set()
-    for index, item in enumerate(recipes):
-        path = f"$.plots.recipes[{index}]"
-        recipe = _object(item, path)
-        _keys(
-            recipe,
-            path,
-            required={"id", "formats", "dpi"},
-            allowed={"id", "formats", "dpi"},
-        )
-        recipe_id = _string(recipe["id"], f"{path}.id")
-        if recipe_id not in supported:
-            raise ValueError(f"unsupported plot recipe at {path}.id: {recipe_id}")
-        if recipe_id in seen:
-            raise ValueError(f"duplicate plot recipe at {path}.id: {recipe_id}")
-        seen.add(recipe_id)
-        formats = recipe["formats"]
-        if (
-            not isinstance(formats, list)
-            or not formats
-            or any(item not in {"png", "pdf", "svg"} for item in formats)
-            or len(formats) != len(set(formats))
-        ):
-            raise ValueError(f"expected unique png/pdf/svg array at {path}.formats")
-        dpi = _positive_int(recipe["dpi"], f"{path}.dpi")
-        tasks.append(
-            PlotTaskSpec(
-                recipe_id,
-                {"formats": list(formats), "dpi": dpi},
-            )
-        )
-    return enabled, required, tuple(tasks)
+    from pol.plots.spec import parse_plot_block
+
+    return parse_plot_block(value, experiment_kind=kind)
 
 
 def _resolve_repo_path(value: object, path: str, repo_root: Path) -> Path:

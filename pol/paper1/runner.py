@@ -46,10 +46,6 @@ class PlannedStep:
         return ("direct_recipe", self.recipe_callable)
 
 
-def _sha256(path: Path) -> str:
-    return file_sha256(path)
-
-
 def _canonical_config_sha256(path: Path) -> str:
     canonical = canonical_config_json(load_config_json(path))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -85,10 +81,6 @@ def science_fingerprint(spec: Paper1RunSpec) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _atomic_json(path: Path, value: object) -> None:
-    write_strict_json(path, value)
 
 
 def resolve_run_directory(
@@ -309,33 +301,17 @@ def _validate_owned_run_directory(run_dir: Path, spec: Paper1RunSpec) -> None:
 
 
 def _verify_step(step: PlannedStep) -> None:
-    if step.name == "master_dataset":
-        from .datasets import load_master_dataset
+    from .artifact_contracts import validate_step_artifacts
 
-        load_master_dataset(step.output_dir)
+    if step.name != "master_dataset":
+        summary_path = step.output_dir / f"{step.name}_summary.json"
+        if not summary_path.is_file():
+            raise ValueError(f"missing saved output: {summary_path}")
+    validate_step_artifacts(step.name, step.output_dir)
+    if step.name == "master_dataset":
         return
     summary_path = step.output_dir / f"{step.name}_summary.json"
-    if not summary_path.is_file():
-        raise ValueError(f"missing saved output: {summary_path}")
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    if summary.get("status") != "pass":
-        raise ValueError(f"{step.name} summary status is not pass")
-    if step.name == "e0":
-        checks = summary.get("required_checks")
-        if not isinstance(checks, dict) or not checks or any(
-            value != "pass" for value in checks.values()
-        ):
-            raise ValueError("E0 required_checks are not all pass")
-        for name in (
-            "accepted_production_config.json",
-            "master_initial_conditions.pt",
-            "master_manifest.json",
-        ):
-            if not (step.output_dir / name).is_file():
-                raise ValueError(f"missing saved output: {step.output_dir / name}")
-    else:
-        if not (step.output_dir / "artifact_manifest.json").is_file():
-            raise ValueError("missing artifact_manifest.json")
     if step.name == "e2":
         if summary.get("test_evaluated") is not True:
             raise ValueError("E2 test_evaluated is not true")
@@ -368,7 +344,7 @@ def _manifest(
         "status": "running",
         "run_name": spec.name,
         "experiment_kind": spec.kind,
-        "run_spec_sha256": _sha256(spec.source_path),
+        "run_spec_sha256": file_sha256(spec.source_path),
         "git_commit": _git(root, ["rev-parse", "HEAD"]),
         "git_dirty_status": _git(root, ["status", "--porcelain"]),
         "python_executable": sys.executable,
@@ -403,7 +379,7 @@ def _manifest(
                 ),
                 "config_path": str(step.config_path),
                 "config_sha256": (
-                    _sha256(step.config_path) if step.config_path.is_file() else None
+                    file_sha256(step.config_path) if step.config_path.is_file() else None
                 ),
                 "output_dir": str(step.output_dir),
                 "log_path": str(step.log_path),
@@ -486,6 +462,7 @@ def _execute_recipe(
                 skip_plots=True,
                 batch_size=spec.batch_size,
                 invocation=invocation,
+                cache_root=run_dir.parent / ".cache" / "paper1_e2_v3",
             )
         raise ValueError(f"unknown recipe_id: {step.recipe_id}")
 
@@ -602,7 +579,7 @@ def execute_run(
                 outcomes=[],
                 failure=manifest["failure"],
             )
-            _atomic_json(manifest_path, manifest)
+            write_strict_json(manifest_path, manifest)
             return 1
         try:
             outcomes = _run_plots(spec, run_dir=run_dir)
@@ -620,7 +597,7 @@ def execute_run(
                 outcomes=outcomes,
                 failure=None,
             )
-            _atomic_json(manifest_path, manifest)
+            write_strict_json(manifest_path, manifest)
             return 0
         except Exception as exc:
             manifest["plot_status"] = "fail"
@@ -637,7 +614,7 @@ def execute_run(
                 outcomes=[],
                 failure=manifest["failure"],
             )
-            _atomic_json(manifest_path, manifest)
+            write_strict_json(manifest_path, manifest)
             return 1 if spec.plots_required else 0
     if run_dir.exists() or run_dir.is_symlink():
         if not force:
@@ -673,7 +650,7 @@ def execute_run(
                     outcomes=outcomes,
                     failure=None,
                 )
-                _atomic_json(manifest_path, manifest)
+                write_strict_json(manifest_path, manifest)
             return 0
         _validate_owned_run_directory(run_dir, spec)
         shutil.rmtree(run_dir)
@@ -682,9 +659,9 @@ def execute_run(
     resolved = run_spec_to_resolved_dict(spec, run_dir=run_dir)
     resolved.update(
         {
-            "source_run_spec_sha256": _sha256(spec.source_path),
-            "experiment_config_sha256": _sha256(spec.experiment_config),
-            "e0_config_sha256": _sha256(spec.e0_config) if spec.e0_config else None,
+            "source_run_spec_sha256": file_sha256(spec.source_path),
+            "experiment_config_sha256": file_sha256(spec.experiment_config),
+            "e0_config_sha256": file_sha256(spec.e0_config) if spec.e0_config else None,
             "planned_steps": [
                 {
                     "name": step.name,
@@ -704,10 +681,10 @@ def execute_run(
             ],
         }
     )
-    _atomic_json(run_dir / "resolved_run_spec.json", resolved)
+    write_strict_json(run_dir / "resolved_run_spec.json", resolved)
     manifest = _manifest(spec, steps, root, run_dir=run_dir)
     manifest_path = run_dir / "run_manifest.json"
-    _atomic_json(manifest_path, manifest)
+    write_strict_json(manifest_path, manifest)
 
     current_step_index: int | None = None
     current_started_monotonic: float | None = None
@@ -719,8 +696,8 @@ def execute_run(
             record["started_at"] = _now()
             current_started_monotonic = time.monotonic()
             if step.config_path.is_file():
-                record["config_sha256"] = _sha256(step.config_path)
-            _atomic_json(manifest_path, manifest)
+                record["config_sha256"] = file_sha256(step.config_path)
+            write_strict_json(manifest_path, manifest)
             with step.log_path.open("w", encoding="utf-8") as log:
                 try:
                     result = _execute_recipe(
@@ -750,7 +727,7 @@ def execute_run(
             record["duration_seconds"] = (
                 time.monotonic() - current_started_monotonic
             )
-            _atomic_json(manifest_path, manifest)
+            write_strict_json(manifest_path, manifest)
             current_step_index = None
             current_started_monotonic = None
         manifest["compute_status"] = "pass"
@@ -782,12 +759,12 @@ def execute_run(
                 outcomes=[],
                 failure=manifest["failure"],
             )
-            _atomic_json(manifest_path, manifest)
+            write_strict_json(manifest_path, manifest)
             return 1 if spec.plots_required else 0
         manifest["status"] = "pass"
         manifest["ended_at"] = _now()
         manifest["final_result_dir"] = str(run_dir / spec.kind)
-        _atomic_json(manifest_path, manifest)
+        write_strict_json(manifest_path, manifest)
         return 0
     except KeyboardInterrupt:
         manifest["status"] = "interrupted"
@@ -804,7 +781,7 @@ def execute_run(
                 record["duration_seconds"] = (
                     time.monotonic() - current_started_monotonic
                 )
-        _atomic_json(manifest_path, manifest)
+        write_strict_json(manifest_path, manifest)
         return 130
     except Exception as exc:
         manifest["status"] = "fail"
@@ -821,5 +798,5 @@ def execute_run(
                     record["duration_seconds"] = (
                         time.monotonic() - current_started_monotonic
                     )
-        _atomic_json(manifest_path, manifest)
+        write_strict_json(manifest_path, manifest)
         return 1

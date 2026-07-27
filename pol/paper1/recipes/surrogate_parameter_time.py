@@ -150,7 +150,7 @@ def build_surrogate_parameter_time_cost_summary(
     return dry_run_cost_summary(config)
 
 
-def run_surrogate_parameter_time(
+def _run_surrogate_parameter_time_staged(
     config_path: Path,
     e0_dir: Path,
     dataset_dir: Path,
@@ -161,6 +161,7 @@ def run_surrogate_parameter_time(
     skip_plots: bool,
     batch_size: int,
     invocation: RecipeInvocation,
+    cache_root: Path | None = None,
 ) -> RecipeResult:
     """Run E2 artifact orchestration and its existing scientific QA."""
     if overwrite and resume:
@@ -246,7 +247,9 @@ def run_surrogate_parameter_time(
         write_json(stage / "e0_prerequisite.json", e0_report)
         write_json(stage / "dataset_prerequisite.json", dataset_report)
         result = run_e2(
-            config, dataset, cache_dir=final_out / "cache",
+            config, dataset, cache_dir=(
+                final_out / "cache" if cache_root is None else cache_root
+            ),
             resume=resume, batch_size=batch_size,
             freeze_dir=stage, input_bindings=bindings)
         validate_result_cartesian(result, config)
@@ -461,4 +464,64 @@ def run_surrogate_parameter_time(
         final_out,
         summary,
         final_out / "e2_summary.json",
+    )
+
+
+def run_surrogate_parameter_time(
+    config_path: Path,
+    e0_dir: Path,
+    dataset_dir: Path,
+    output_dir: Path,
+    *,
+    overwrite: bool,
+    resume: bool,
+    skip_plots: bool,
+    batch_size: int,
+    invocation: RecipeInvocation,
+    cache_root: Path | None = None,
+) -> RecipeResult:
+    """Run E2 through rollback-safe directory publication."""
+    if output_dir.is_symlink():
+        raise RecipeUsageError(f"output path must not be a symlink: {output_dir}")
+    if resume and output_dir.exists():
+        from pol.paper1.e2_qa import validate_resume_output
+
+        if validate_resume_output(output_dir):
+            return _run_surrogate_parameter_time_staged(
+                config_path,
+                e0_dir,
+                dataset_dir,
+                output_dir,
+                overwrite=False,
+                resume=True,
+                skip_plots=skip_plots,
+                batch_size=batch_size,
+                invocation=invocation,
+                cache_root=cache_root,
+            )
+        raise RecipeUsageError(
+            "incomplete/corrupt E2 output cannot be resumed; use --overwrite"
+        )
+    if output_dir.exists() and any(output_dir.iterdir()) and not overwrite:
+        raise RecipeUsageError(f"{output_dir} is nonempty; pass --overwrite")
+    from pol.runtime.artifacts import execute_recipe_transaction
+    from pol.paper1.artifact_contracts import E2ArtifactContract
+
+    contract = E2ArtifactContract()
+    return execute_recipe_transaction(
+        output_dir,
+        execute=lambda staging: _run_surrogate_parameter_time_staged(
+            config_path,
+            e0_dir,
+            dataset_dir,
+            staging,
+            overwrite=True,
+            resume=False,
+            skip_plots=skip_plots,
+            batch_size=batch_size,
+            invocation=invocation,
+            cache_root=cache_root,
+        ),
+        validate_complete=contract.validate_complete,
+        validate_failure=contract.validate_failure,
     )

@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 import torch
 
-CACHE_SCHEMA_VERSION = "paper1-e2-cache-v2"
+CACHE_SCHEMA_VERSION = "paper1-e2-cache-v3"
 
 
 def canonical_object(value: Any) -> Any:
@@ -111,44 +111,74 @@ class TensorCache:
         canonical = canonical_object(key)
         digest = stable_hash({"schema": CACHE_SCHEMA_VERSION, "kind": kind, "key": canonical})
         directory = self.root / kind
-        path, meta_path = directory / f"{digest}.pt", directory / f"{digest}.json"
-        if path.exists() != meta_path.exists():
+        path = directory / f"{digest}.pt"
+        meta_path = directory / f"{digest}.json"
+        complete_path = directory / f"{digest}.complete.json"
+        lock_path = directory / f"{digest}.lock"
+        present = (path.exists(), meta_path.exists(), complete_path.exists())
+        if lock_path.exists() and not all(present):
+            raise ValueError(f"cache unit has an active/stale writer lock: {lock_path}")
+        if len(set(present)) != 1:
             if self.resume:
                 raise ValueError(f"resume cache has incomplete unit: {path}")
             path.unlink(missing_ok=True)
             meta_path.unlink(missing_ok=True)
-        if path.exists():
+            complete_path.unlink(missing_ok=True)
+        if all(present):
             try:
+                complete = json.loads(complete_path.read_text())
+                if complete != {
+                    "schema_version": CACHE_SCHEMA_VERSION,
+                    "key_sha256": stable_hash(canonical),
+                }:
+                    raise ValueError("cache complete marker mismatch")
                 return self._load(path, meta_path, canonical, digest, kind)
             except Exception as exc:
                 if self.resume:
                     raise ValueError(f"resume cache integrity check failed: {path}: {exc}") from exc
                 path.unlink(missing_ok=True)
                 meta_path.unlink(missing_ok=True)
-        values, solver_metadata = compute()
-        values = values.detach().cpu()
-        if not bool(torch.isfinite(values).all()):
-            raise FloatingPointError("refusing to cache non-finite tensor")
+                complete_path.unlink(missing_ok=True)
         directory.mkdir(parents=True, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(prefix=f".{digest}.", suffix=".pt", dir=directory)
-        os.close(fd)
         try:
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError as exc:
+            raise ValueError(f"concurrent cache writer detected: {lock_path}") from exc
+        with os.fdopen(lock_fd, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps({"pid": os.getpid(), "key_sha256": stable_hash(canonical)}))
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary: str | None = None
+        try:
+            values, solver_metadata = compute()
+            values = values.detach().cpu()
+            if not bool(torch.isfinite(values).all()):
+                raise FloatingPointError("refusing to cache non-finite tensor")
+            fd, temporary = tempfile.mkstemp(
+                prefix=f".{digest}.", suffix=".pt", dir=directory
+            )
+            os.close(fd)
             torch.save({"schema_version": CACHE_SCHEMA_VERSION, "values": values,
                         "solver_metadata": solver_metadata}, temporary)
             with open(temporary, "rb") as stream:
                 os.fsync(stream.fileno())
             os.replace(temporary, path)
+            meta = {
+                "schema_version": CACHE_SCHEMA_VERSION, "key": canonical,
+                "key_sha256": stable_hash(canonical), "tensor_hash": tensor_hash(values),
+                "file_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "shape": list(values.shape), "dtype": str(values.dtype),
+                "solver_metadata": canonical_object(solver_metadata),
+            }
+            atomic_json(meta_path, meta)
+            atomic_json(complete_path, {
+                "schema_version": CACHE_SCHEMA_VERSION,
+                "key_sha256": stable_hash(canonical),
+            })
         finally:
-            if os.path.exists(temporary):
+            if temporary is not None and os.path.exists(temporary):
                 os.unlink(temporary)
-        meta = {
-            "schema_version": CACHE_SCHEMA_VERSION, "key": canonical,
-            "key_sha256": stable_hash(canonical), "tensor_hash": tensor_hash(values),
-            "file_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-            "shape": list(values.shape), "dtype": str(values.dtype),
-            "solver_metadata": canonical_object(solver_metadata),
-        }
-        atomic_json(meta_path, meta)
+            lock_path.unlink(missing_ok=True)
         self.stats[kind]["misses"] += 1
         if kind == "states":
             self.stats[kind]["solver_invocations"] += 1

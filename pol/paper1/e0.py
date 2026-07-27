@@ -19,7 +19,7 @@ from .observations import observe_equispaced_periodic
 from .solvers import BurgersFinalStateResult, effective_inner_step, normalize_burgers_solver_name, solve_burgers_final_state
 from .target_representation import real_fourier_analysis, real_fourier_synthesis
 
-E0_SCHEMA_VERSION = "paper1-e0-v2"
+from .protocols import E0_SCHEMA_VERSION
 MASTER_SCHEMA_VERSION = "paper1-master-initial-conditions-v1"
 
 

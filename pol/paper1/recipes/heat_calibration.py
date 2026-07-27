@@ -207,7 +207,7 @@ def measured_checks(
     }
 
 
-def run_heat_calibration(
+def _run_heat_calibration_staged(
     config_path: Path,
     e0_dir: Path,
     output_dir: Path,
@@ -432,6 +432,12 @@ def run_heat_calibration(
         summary["status"] = "fail"
         summary["failure_reason"] = failures[-1]["error"]
         environment["ended_at"] = datetime.now(timezone.utc).isoformat()
+        # Failure publication has its own exact diagnostic contract. Remove
+        # every partial compute artifact before writing that contract.
+        for partial in tuple(output_dir.iterdir()):
+            if partial.is_symlink() or not partial.is_file():
+                raise ValueError(f"unsafe partial E1 artifact: {partial}")
+            partial.unlink()
         for name, value in (
             ("environment.json", environment),
             ("failed_runs.json", failures),
@@ -449,4 +455,37 @@ def run_heat_calibration(
         output_dir=output_dir,
         console_payload=summary,
         summary_path=output_dir / "e1_summary.json",
+    )
+
+
+def run_heat_calibration(
+    config_path: Path,
+    e0_dir: Path,
+    output_dir: Path,
+    *,
+    overwrite: bool,
+    skip_plots: bool,
+    invocation: RecipeInvocation,
+) -> RecipeResult:
+    """Run E1 through rollback-safe directory publication."""
+    if output_dir.is_symlink():
+        raise RecipeUsageError(f"output path must not be a symlink: {output_dir}")
+    if output_dir.exists() and any(output_dir.iterdir()) and not overwrite:
+        raise RecipeUsageError(f"{output_dir} is nonempty; pass --overwrite")
+    from pol.runtime.artifacts import execute_recipe_transaction
+    from pol.paper1.artifact_contracts import E1ArtifactContract
+
+    contract = E1ArtifactContract()
+    return execute_recipe_transaction(
+        output_dir,
+        execute=lambda staging: _run_heat_calibration_staged(
+            config_path,
+            e0_dir,
+            staging,
+            overwrite=True,
+            skip_plots=skip_plots,
+            invocation=invocation,
+        ),
+        validate_complete=contract.validate_complete,
+        validate_failure=contract.validate_failure,
     )

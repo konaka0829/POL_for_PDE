@@ -17,9 +17,11 @@ def execute_matrix_cell(request: dict[str, Any]) -> dict[str, Any]:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with numerical_thread_scope(request["torch_threads"]):
-            from pol.workflow.registry import get_matrix_plugin
+            from pol.workflow.registry import load_matrix_plugin
 
-            plugin = get_matrix_plugin(request["plugin_id"])
+            plugin = load_matrix_plugin(
+                request["plugin_factory"], expected_id=request["plugin_id"]
+            )
             result = plugin.execute_cell(request)
             manifest_hash = None
             if result.exit_code == 0:

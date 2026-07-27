@@ -8,7 +8,7 @@ import multiprocessing
 import time
 import csv
 
-from pol.workflow.types import MatrixCell
+from pol.workflow.types import MatrixCell, ResolvedDependencies
 
 import pytest
 
@@ -39,13 +39,13 @@ def _spec(tmp_path: Path):
     return load_matrix_spec(path, repo_root=ROOT)
 
 
-def test_failed_e0_starts_no_cell_worker(tmp_path: Path, monkeypatch) -> None:
+def test_failed_dependency_starts_no_cell_worker(tmp_path: Path, monkeypatch) -> None:
     spec = _spec(tmp_path)
     monkeypatch.setattr(
-        matrix_module,
-        "_run_e0",
+        E1ResolutionPlugin,
+        "resolve_dependencies",
         lambda *args, **kwargs: (_ for _ in ()).throw(
-            RuntimeError("simulated E0 failure")
+            RuntimeError("simulated dependency failure")
         ),
     )
     monkeypatch.setattr(
@@ -53,11 +53,8 @@ def test_failed_e0_starts_no_cell_worker(tmp_path: Path, monkeypatch) -> None:
         "ProcessPoolExecutor",
         lambda *args, **kwargs: pytest.fail("cell worker started after E0 failure"),
     )
-    assert execute_matrix_run(spec, repo_root=ROOT, force=False) == 1
-    manifest = json.loads((spec.run_dir / "matrix_manifest.json").read_text())
-    assert manifest["status"] == "fail"
-    assert "simulated E0 failure" in manifest["failure"]
-    assert all(cell["status"] == "pending" for cell in manifest["cells"])
+    with pytest.raises(RuntimeError, match="simulated dependency failure"):
+        execute_matrix_run(spec, repo_root=ROOT, force=False)
 
 
 def test_matrix_worker_failure_is_structured_and_logged(tmp_path: Path) -> None:
@@ -88,7 +85,7 @@ def test_matrix_fingerprint_mismatch_is_rejected_before_execution(
     (spec.run_dir / "matrix_manifest.json").write_text(
         json.dumps(
             {
-                "schema_version": "paper1-matrix-manifest-v1",
+                "schema_version": matrix_module.MATRIX_MANIFEST_SCHEMA,
                 "run_name": spec.name,
                 "run_dir": str(spec.run_dir),
                 "matrix_fingerprint": "different",
@@ -97,9 +94,11 @@ def test_matrix_fingerprint_mismatch_is_rejected_before_execution(
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        matrix_module,
-        "_run_e0",
-        lambda *args, **kwargs: pytest.fail("E0 started before fingerprint check"),
+        E1ResolutionPlugin,
+        "resolve_dependencies",
+        lambda *args, **kwargs: ResolvedDependencies(
+            ({"artifact_identity": "a" * 64},), {}, {}
+        ),
     )
     with pytest.raises(ValueError, match="fingerprint mismatch"):
         execute_matrix_run(spec, repo_root=ROOT, force=False)
@@ -110,19 +109,19 @@ def test_matrix_compute_fingerprint_tracks_threads_not_schedule_or_plots(
 ) -> None:
     spec = _spec(tmp_path)
     _, cells, _, _ = matrix_module._prepare(spec)
-    binding = matrix_module._internal_e0_binding(spec)
+    binding = ({"artifact_identity": "a" * 64},)
     baseline = matrix_module._compute_fingerprint(
-        spec, cells, e0_binding=binding
+        spec, cells, dependency_identities=binding
     )
     assert (
         matrix_module._compute_fingerprint(
-            replace(spec, jobs=spec.jobs + 1), cells, e0_binding=binding
+            replace(spec, jobs=spec.jobs + 1), cells, dependency_identities=binding
         )
         == baseline
     )
     assert (
         matrix_module._compute_fingerprint(
-            replace(spec, resume=not spec.resume), cells, e0_binding=binding
+            replace(spec, resume=not spec.resume), cells, dependency_identities=binding
         )
         == baseline
     )
@@ -130,7 +129,7 @@ def test_matrix_compute_fingerprint_tracks_threads_not_schedule_or_plots(
         matrix_module._compute_fingerprint(
             replace(spec, torch_threads_per_job=spec.torch_threads_per_job + 1),
             cells,
-            e0_binding=binding,
+            dependency_identities=binding,
         )
         != baseline
     )
@@ -139,21 +138,18 @@ def test_matrix_compute_fingerprint_tracks_threads_not_schedule_or_plots(
     ) != matrix_module._artifact_contract_fingerprint(
         baseline, cell_plots=True
     )
-    external = {
-        "mode": "external",
-        "accepted_config_sha256": "a" * 64,
-        "master_tensor_hash": "b" * 64,
-    }
+    external = ({"binding_mode": "external", "artifact_identity": "b" * 64},)
     same_external = matrix_module._compute_fingerprint(
-        spec, cells, e0_binding=dict(external)
+        spec, cells, dependency_identities=external
     )
     assert same_external == matrix_module._compute_fingerprint(
-        spec, cells, e0_binding=dict(external)
+        spec, cells, dependency_identities=external
     )
-    changed_external = dict(external)
-    changed_external["master_tensor_hash"] = "c" * 64
+    changed_external = (
+        {"binding_mode": "external", "artifact_identity": "c" * 64},
+    )
     assert same_external != matrix_module._compute_fingerprint(
-        spec, cells, e0_binding=changed_external
+        spec, cells, dependency_identities=changed_external
     )
 
 
@@ -269,7 +265,15 @@ def test_keyboard_interrupt_cancels_workers_and_records_manifest(
     tmp_path: Path, monkeypatch
 ) -> None:
     spec = _spec(tmp_path)
-    monkeypatch.setattr(matrix_module, "_run_e0", lambda *args, **kwargs: "executed")
+    monkeypatch.setattr(
+        E1ResolutionPlugin,
+        "resolve_dependencies",
+        lambda *args, **kwargs: ResolvedDependencies(
+            ({"artifact_identity": "a" * 64},),
+            {"e0_dir": str(tmp_path / "dependency")},
+            {},
+        ),
+    )
 
     class Future:
         cancelled = False
@@ -340,7 +344,7 @@ def test_force_removes_only_owned_matrix_run_and_keeps_sibling(
     (spec.run_dir / "matrix_manifest.json").write_text(
         json.dumps(
             {
-                "schema_version": "paper1-matrix-manifest-v1",
+                "schema_version": matrix_module.MATRIX_MANIFEST_SCHEMA,
                 "run_name": spec.name,
                 "run_dir": str(spec.run_dir),
             }
@@ -352,13 +356,14 @@ def test_force_removes_only_owned_matrix_run_and_keeps_sibling(
     marker = sibling / "keep"
     marker.write_text("important", encoding="utf-8")
     monkeypatch.setattr(
-        matrix_module,
-        "_run_e0",
+        E1ResolutionPlugin,
+        "resolve_dependencies",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             RuntimeError("stop after safe replacement")
         ),
     )
-    assert execute_matrix_run(spec, repo_root=ROOT, force=True) == 1
+    with pytest.raises(RuntimeError, match="stop after safe replacement"):
+        execute_matrix_run(spec, repo_root=ROOT, force=True)
     assert marker.read_text() == "important"
 
 

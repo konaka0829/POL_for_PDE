@@ -58,6 +58,19 @@ def _run(arguments: list[str], *, env: dict[str, str]) -> None:
     )
 
 
+def _run_result(arguments: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, *arguments],
+        cwd=ROOT,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=env,
+        timeout=600,
+    )
+
+
 def _json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -336,3 +349,27 @@ def test_e2_direct_and_runner_smoke_parity(tmp_path: Path) -> None:
         assert names.index("first_test_state_solve") < names.index(
             "first_test_metric"
         )
+
+
+@pytest.mark.slow
+def test_scalar_e1_tamper_is_never_silently_reused(tmp_path: Path) -> None:
+    env = _thread_env(1)
+    run_dir = _runner(tmp_path, "e1", env=env)
+    artifact = run_dir / "e1/selected_results.csv"
+    artifact.write_bytes(artifact.read_bytes() + b"TAMPER,1\n")
+    result = _run_result(["-m", "pol", "run", str(tmp_path / "e1.json")], env=env)
+    assert result.returncode != 0
+    assert b"TAMPER,1\n" in artifact.read_bytes()
+    assert "error:" in result.stdout.lower()
+
+
+@pytest.mark.slow
+def test_scalar_e2_tamper_is_never_silently_reused(tmp_path: Path) -> None:
+    env = _thread_env(1)
+    run_dir = _runner(tmp_path, "e2", env=env)
+    artifact = run_dir / "e2/test_sweep.csv"
+    artifact.write_bytes(artifact.read_bytes() + b"TAMPER,1\n")
+    result = _run_result(["-m", "pol", "run", str(tmp_path / "e2.json")], env=env)
+    assert result.returncode != 0
+    assert b"TAMPER,1\n" in artifact.read_bytes()
+    assert "integrity" in result.stdout.lower() or "artifact" in result.stdout.lower()

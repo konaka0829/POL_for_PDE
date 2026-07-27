@@ -12,7 +12,7 @@ from typing import Any, Literal, Mapping
 
 from pol.plots.types import PlotTaskSpec
 
-from .types import MatrixCell
+from .types import DependencySpec, MatrixCell
 
 
 _NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
@@ -38,7 +38,7 @@ class MatrixRunSpec:
     output_root: Path
     kind: str
     base_config: Path
-    e0_config: Path
+    dependencies: tuple[DependencySpec, ...]
     invalid_run_policy: Literal["skip", "error"]
     experiments: tuple[Mapping[str, Any], ...]
     explicit_runs: tuple[Mapping[str, Any], ...]
@@ -100,53 +100,15 @@ def _boolean(value: object, path: str) -> bool:
 def _plot_block(
     value: object, *, experiment_kind: str
 ) -> tuple[bool, bool, tuple[PlotTaskSpec, ...]]:
-    plots = _object(value, "$.plots")
-    _keys(
-        plots,
-        "$.plots",
-        required={"enabled", "required", "recipes"},
-        allowed={"enabled", "required", "recipes"},
-    )
-    enabled = _boolean(plots["enabled"], "$.plots.enabled")
-    required = _boolean(plots["required"], "$.plots.required")
-    raw_recipes = plots["recipes"]
-    if not isinstance(raw_recipes, list):
-        raise ValueError("expected array at $.plots.recipes")
-    if enabled != bool(raw_recipes):
-        raise ValueError("$.plots.enabled must match whether recipes are present")
-    if required and not enabled:
-        raise ValueError("$.plots.required cannot be true when plots are disabled")
-    tasks: list[PlotTaskSpec] = []
-    for index, raw in enumerate(raw_recipes):
-        path = f"$.plots.recipes[{index}]"
-        recipe = _object(raw, path)
-        _keys(
-            recipe,
-            path,
-            required={"id", "settings"},
-            allowed={"id", "settings"},
-        )
-        recipe_id = _string(recipe["id"], f"{path}.id")
-        settings = _object(recipe["settings"], f"{path}.settings")
-        from pol.plots.registry import get_plot_recipe
+    from pol.plots.spec import parse_plot_block
 
-        registered = get_plot_recipe(recipe_id)
-        if experiment_kind not in registered.supported_experiment_kinds:
-            raise ValueError(f"unsupported plot recipe at {path}.id: {recipe_id}")
-        try:
-            validated = registered.validate_settings(dict(settings))
-        except ValueError as exc:
-            raise ValueError(f"invalid settings at {path}.settings: {exc}") from exc
-        tasks.append(PlotTaskSpec(recipe_id, validated))
-    if len({task.recipe_id for task in tasks}) != len(tasks):
-        raise ValueError("duplicate plot recipe at $.plots.recipes")
-    return enabled, required, tuple(tasks)
+    return parse_plot_block(value, experiment_kind=experiment_kind)
 
 
 def _repo_path(value: object, path: str, root: Path) -> Path:
     raw = Path(_string(value, path))
     resolved = (raw if raw.is_absolute() else root / raw).resolve()
-    if path.endswith(("base_config", "e0_config")) and not resolved.is_file():
+    if path.endswith("base_config") and not resolved.is_file():
         raise ValueError(f"file does not exist at {path}: {resolved}")
     return resolved
 
@@ -241,15 +203,6 @@ def load_matrix_spec(path: str | Path, *, repo_root: Path) -> MatrixRunSpec:
         experiment["base_config"], "$.experiment.base_config", root
     )
     prerequisites = _object(raw["prerequisites"], "$.prerequisites")
-    _keys(
-        prerequisites,
-        "$.prerequisites",
-        required={"e0_config"},
-        allowed={"e0_config"},
-    )
-    e0_config = _repo_path(
-        prerequisites["e0_config"], "$.prerequisites.e0_config", root
-    )
 
     matrix = _object(raw["matrix"], "$.matrix")
     _keys(
@@ -312,13 +265,14 @@ def load_matrix_spec(path: str | Path, *, repo_root: Path) -> MatrixRunSpec:
         )
     else:
         plots_enabled, plots_required, plot_tasks = False, False, ()
+    dependencies = plugin.parse_dependencies(prerequisites, repo_root=root)
     return MatrixRunSpec(
         "paper1-matrix-run-v1",
         name,
         output_root,
         experiment_kind,
         base_config,
-        e0_config,
+        dependencies,
         policy,
         experiments,
         explicit_runs,

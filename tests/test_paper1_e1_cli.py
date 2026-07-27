@@ -28,3 +28,6 @@ def test_cli_gate_and_saved_qa_fail_nonzero(e0_dir,tmp_path,mutation,reason):
     assert process.returncode!=0
     summary=json.loads((out/"e1_summary.json").read_text())
     assert summary["status"]=="fail" and reason in summary["failure_reason"].lower()
+    assert {path.name for path in out.iterdir()} == {
+        "e1_summary.json", "environment.json", "failed_runs.json"
+    }

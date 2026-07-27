@@ -84,13 +84,26 @@ def _compatibility_spec(args: argparse.Namespace) -> tuple[MatrixRunSpec, dict]:
         }
         for item in old.get("explicit_runs", [])
     )
+    from pol.workflow.registry import get_matrix_plugin
+
+    dependencies = get_matrix_plugin(
+        "paper1_e1_resolution_v1"
+    ).parse_dependencies(
+        {
+            "e0_config": str(
+                Path(args.e0_dir).resolve()
+                / "accepted_production_config.json"
+            )
+        },
+        repo_root=ROOT,
+    )
     spec = MatrixRunSpec(
         "paper1-matrix-run-v1",
         output.name,
         output.parent,
         "e1",
         Path(args.base_config).resolve(),
-        Path(args.base_config).resolve(),
+        dependencies,
         old.get("invalid_run_policy", "skip"),
         experiments,
         explicit,
@@ -157,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
             spec,
             repo_root=ROOT,
             force=args.overwrite,
-            existing_e0_dir=Path(args.e0_dir),
+            existing_dependency_paths=(Path(args.e0_dir),),
         )
         _copy_legacy_aggregates(output)
         if code == 0 and settings.get("enabled", True) and not args.skip_aggregate_plots:
