@@ -52,6 +52,27 @@ class PlannedStep:
         return ("direct_recipe", self.recipe_callable)
 
 
+@dataclass(frozen=True)
+class ComputeRequestIdentity:
+    """Path-independent authority for one scalar scientific computation."""
+
+    experiment_kind: str
+    canonical_scientific_config_hash: str
+    dependency_scientific_identities: tuple[str, ...]
+    protocol_versions: tuple[str, ...]
+    compute_options: tuple[tuple[str, object], ...]
+
+
+@dataclass(frozen=True)
+class PlotRequest:
+    """Presentation request which has no authority over compute artifacts."""
+
+    recipes: tuple[str, ...]
+    settings: tuple[Mapping[str, object], ...]
+    formats: tuple[str, ...]
+    dpi: int | None
+
+
 def _canonical_config_sha256(path: Path) -> str:
     canonical = canonical_config_json(load_config_json(path))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -75,6 +96,31 @@ def science_fingerprint(spec: Paper1RunSpec) -> str:
         payload, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def compute_request_identity(spec: Paper1RunSpec) -> ComputeRequestIdentity:
+    """Return the canonical compute request, excluding paths and plots."""
+    dependency_hashes = (
+        (_canonical_config_sha256(spec.e0_config),)
+        if spec.e0_config is not None
+        else ()
+    )
+    return ComputeRequestIdentity(
+        experiment_kind=spec.kind,
+        canonical_scientific_config_hash=_canonical_config_sha256(
+            spec.experiment_config
+        ),
+        dependency_scientific_identities=dependency_hashes,
+        protocol_versions=recipe_protocols(spec.kind),
+        compute_options=tuple(
+            sorted(
+                {
+                    "torch_threads": spec.torch_threads,
+                    "batch_size": spec.batch_size,
+                }.items()
+            )
+        ),
+    )
 
 
 def _now() -> str:
@@ -328,9 +374,13 @@ def _validate_current_request_binding(
     if path.is_symlink() or not path.is_file():
         raise ValueError("missing or unsafe authoritative resolved run spec")
     saved = json.loads(path.read_text(encoding="utf-8"))
-    expected = _resolved_run_record(spec, steps, run_dir=run_dir)
-    if saved != expected:
+    if saved.get("science_fingerprint") != science_fingerprint(spec):
         raise ValueError("resolved run spec does not match current request")
+    if saved.get("recipe_protocols") != list(recipe_protocols(spec.kind)):
+        raise ValueError("resolved run spec protocol chain does not match current request")
+    experiment = saved.get("experiment")
+    if not isinstance(experiment, dict) or experiment.get("kind") != spec.kind:
+        raise ValueError("resolved run spec experiment does not match current request")
 
 
 def _plan_identity(steps: list[PlannedStep]) -> str:
@@ -355,10 +405,11 @@ def _plan_identity(steps: list[PlannedStep]) -> str:
 
 
 def _scientific_dependencies(run_dir: Path) -> dict[str, str]:
-    from .e0_validation import validate_e0_scientific_artifacts
+    from .e0_validation import e0_scientific_identity_from_artifacts
 
-    e0 = validate_e0_scientific_artifacts(run_dir / "e0")
-    result = {"e0": e0.scientific_identity}
+    result = {
+        "e0": e0_scientific_identity_from_artifacts(run_dir / "e0")
+    }
     dataset_manifest = run_dir / "master_dataset/manifest.json"
     if dataset_manifest.is_file():
         manifest = json.loads(dataset_manifest.read_text(encoding="utf-8"))
@@ -453,7 +504,8 @@ def _manifest(
         "ended_at": None,
         "run_dir": str(run_dir),
         "science_fingerprint": science_fingerprint(spec),
-        "compute_status": "running",
+        "request_status": "accepted",
+        "compute_status": "not_run",
         "plot_status": "pending" if spec.plots_enabled else "disabled",
         "plot_tasks": [],
         "plots": {
@@ -661,10 +713,23 @@ def execute_run(
             expected_fingerprint = science_fingerprint(spec)
             if manifest.get("science_fingerprint") != expected_fingerprint:
                 raise ValueError("science fingerprint mismatch for --plots-only")
+        except Exception as exc:
+            # A rejected request is not evidence that saved compute is bad.
+            _record_plot_request(
+                spec,
+                run_dir=run_dir,
+                manifest=manifest,
+                request_mode="plots_only",
+                status="rejected",
+                outcomes=[],
+                failure=f"{type(exc).__name__}: {exc}",
+            )
+            return 1
+        try:
             _verify_compute_for_plots(spec, steps)
         except Exception as exc:
             manifest["status"] = "fail"
-            manifest["compute_status"] = "fail"
+            manifest["compute_status"] = "invalid"
             manifest["plot_status"] = "not_run"
             manifest["plot_tasks"] = []
             manifest["failure"] = f"{type(exc).__name__}: {exc}"
@@ -872,7 +937,7 @@ def execute_run(
         return 0
     except KeyboardInterrupt:
         manifest["status"] = "interrupted"
-        manifest["compute_status"] = "interrupted"
+        manifest["compute_status"] = "invalid"
         manifest["failure"] = "KeyboardInterrupt"
         manifest["ended_at"] = _now()
         if current_step_index is not None:
@@ -889,7 +954,7 @@ def execute_run(
         return 130
     except Exception as exc:
         manifest["status"] = "fail"
-        manifest["compute_status"] = "fail"
+        manifest["compute_status"] = "invalid"
         manifest["failure"] = f"{type(exc).__name__}: {exc}"
         manifest["ended_at"] = _now()
         if current_step_index is not None:

@@ -33,7 +33,10 @@ E1_MATRIX_PLUGIN_PROTOCOL = "paper1-e1-resolution-matrix-v3"
 
 BASELINE_SCHEMA_VERSION = "paper1-phase1-scientific-baseline-v4"
 MATRIX_BASELINE_SCHEMA_VERSION = "paper1-e1-matrix-smoke-baseline-v3"
-COMPARISON_POLICY_VERSION = "paper1-portable-comparison-policy-v4"
+# Schema versions describe record shape.  The comparison policy describes
+# field taxonomy/tolerances, while the generator version identifies the
+# artifact-only extraction algorithm.  They evolve independently.
+COMPARISON_POLICY_VERSION = "paper1-scientific-comparison-v2"
 BASELINE_GENERATOR_VERSION = "paper1-scientific-baseline-generator-v4"
 
 

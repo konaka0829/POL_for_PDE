@@ -181,3 +181,34 @@ def test_e0_rejects_reference_csv_json_mismatch_after_manifest_recomputed(
     _refresh_manifest(output)
     with pytest.raises(ValueError, match="reference_convergence.csv"):
         E0ArtifactContract().validate_complete(output)
+
+
+def test_normal_e0_validation_never_calls_solvers(
+    valid_e0: Path, monkeypatch
+) -> None:
+    def forbidden(*args, **kwargs):
+        raise AssertionError("solver-backed E0 check called")
+
+    for name in (
+        "run_algebraic_checks",
+        "run_reference_convergence",
+        "run_interface_checks",
+        "run_model1_checks",
+    ):
+        monkeypatch.setattr(f"pol.paper1.e0_validation.{name}", forbidden)
+    E0ArtifactContract().validate_complete(valid_e0)
+
+
+def test_deep_e0_validation_calls_solver_checks(
+    valid_e0: Path, monkeypatch
+) -> None:
+    from pol.paper1.e0_validation import deep_validate_e0_scientific_artifacts
+
+    monkeypatch.setattr(
+        "pol.paper1.e0_validation.run_reference_convergence",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("deep solver marker")
+        ),
+    )
+    with pytest.raises(RuntimeError, match="deep solver marker"):
+        deep_validate_e0_scientific_artifacts(valid_e0)

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pol-pde-surrogate"
 version = "0.1.0"
-description = "Surrogate-PDE feature maps for physics-oriented PDE operator learning"
+description = "Paper 1 surrogate-PDE feature maps for PDE operator learning"
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.0",

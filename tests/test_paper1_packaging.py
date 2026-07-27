@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -11,19 +12,37 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_wheel_contains_all_pol_packages(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    shutil.copytree(
+        ROOT,
+        source,
+        ignore=shutil.ignore_patterns(
+            ".git",
+            ".codex",
+            "build",
+            "dist",
+            "outputs",
+            "outputs_paper1",
+            "tex",
+            "*.egg-info",
+            "__pycache__",
+            "*.pyc",
+        ),
+    )
+    cwd = tmp_path / "build-cwd"
+    cwd.mkdir()
     result = subprocess.run(
         [
             sys.executable,
             "-m",
-            "pip",
-            "wheel",
-            ".",
-            "--no-deps",
-            "--no-build-isolation",
-            "--wheel-dir",
+            "build",
+            "--wheel",
+            "--no-isolation",
+            "--outdir",
             str(tmp_path),
+            str(source.resolve()),
         ],
-        cwd=ROOT,
+        cwd=cwd,
         capture_output=True,
         text=True,
         check=False,
@@ -36,7 +55,7 @@ def test_wheel_contains_all_pol_packages(tmp_path: Path) -> None:
         names = set(archive.namelist())
     for package in (
         "pol",
-        "pol/model123_1d",
+        "pol/numerics",
         "pol/paper1",
         "pol/paper1/recipes",
         "pol/paper1/matrix_plugins",
@@ -54,9 +73,20 @@ def test_wheel_contains_all_pol_packages(tmp_path: Path) -> None:
         for name in names
     )
     assert not any("/scripts/paper1/" in name for name in names)
+    assert not any(
+        fragment in name
+        for name in names
+        for fragment in (
+            "model123",
+            "burgers_spectral_1d.py",
+            "spectral_etdrk4_1d.py",
+        )
+    )
 
 
-def test_sdist_contains_research_specs_and_is_clean(tmp_path: Path) -> None:
+def test_sdist_contains_active_package_and_excludes_repository_material(
+    tmp_path: Path,
+) -> None:
     cwd = tmp_path / "build-cwd"
     cwd.mkdir()
     result = subprocess.run(
@@ -83,13 +113,13 @@ def test_sdist_contains_research_specs_and_is_clean(tmp_path: Path) -> None:
         names = {member.name for member in archive.getmembers()}
     root = next(name.split("/", 1)[0] for name in names)
     for required in (
-        "AGENTS.md",
         "README.md",
-        "configs/runs/paper1_e0_smoke.json",
-        "configs/runs/paper1_e1_smoke.json",
-        "configs/runs/paper1_e2_smoke.json",
-        "configs/runs/paper1_e1_resolution_sweep_smoke.json",
-        "docs/legacy_removed.md",
+        "pol/__init__.py",
+        "pol/numerics/__init__.py",
+        "pol/paper1/__init__.py",
+        "pol/plots/__init__.py",
+        "pol/runtime/__init__.py",
+        "pol/workflow/__init__.py",
     ):
         assert f"{root}/{required}" in names
     assert not any(
@@ -98,6 +128,20 @@ def test_sdist_contains_research_specs_and_is_clean(tmp_path: Path) -> None:
         or "/.pytest_cache/" in name
         or "/outputs_paper1/" in name
         or "/build/" in name
+        or f"{root}/configs/" in name
+        or f"{root}/docs/" in name
+        or f"{root}/scripts/" in name
+        or f"{root}/tests/" in name
         for name in names
     )
-    assert not any("/scripts/paper1/" in name for name in names)
+    assert not any(
+        fragment in name
+        for name in names
+        for fragment in (
+            "model123",
+            "configs/B0_smoke.json",
+            "configs/B1_burgers_grf.json",
+            "burgers_spectral_1d.py",
+            "spectral_etdrk4_1d.py",
+        )
+    )

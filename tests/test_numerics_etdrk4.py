@@ -1,7 +1,16 @@
 import torch
 
-from pol.model123_1d.metrics import dataset_abs_l2h_rmse
-from pol.spectral_etdrk4_1d import cox_matthews_coefficients, cox_matthews_etdrk4_step, simulate_burgers_etdrk4
+from pol.numerics.etdrk4 import (
+    cox_matthews_coefficients,
+    cox_matthews_etdrk4_step,
+    simulate_burgers_etdrk4,
+)
+
+
+def dataset_abs_l2h_rmse(
+    prediction: torch.Tensor, reference: torch.Tensor
+) -> torch.Tensor:
+    return torch.sqrt(torch.mean((prediction - reference) ** 2))
 
 
 def test_l_zero_etdrk4_matches_classical_rk4_one_step():

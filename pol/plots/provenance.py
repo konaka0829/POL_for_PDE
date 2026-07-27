@@ -36,6 +36,9 @@ def build_plot_request(
             for task in tasks
         ],
         "request_mode": request_mode,
+        "request_status": (
+            "rejected" if status == "rejected" else "accepted"
+        ),
         "requested_at": datetime.now(timezone.utc).isoformat(),
         "status": status,
         "outcomes": [dict(outcome) for outcome in outcomes],

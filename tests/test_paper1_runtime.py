@@ -147,8 +147,13 @@ for name in ("pol.model123_1d", "pol.reservoir_1d", "pol.elm"):
     assert result.returncode == 0, result.stderr
 
 
-def test_all_legacy_exports_remain_lazy_compatible() -> None:
+def test_import_pol_has_no_legacy_public_api() -> None:
     import pol
 
-    for name in pol.__all__:
-        assert getattr(pol, name) is not None
+    for name in (
+        "FixedRandomELM",
+        "DatasetConfig",
+        "Reservoir1DSolver",
+        "simulate_burgers_split_step",
+    ):
+        assert not hasattr(pol, name)

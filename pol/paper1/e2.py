@@ -19,6 +19,7 @@ from .e2_cache import (
     TensorCache, atomic_json, canonical_object, stable_hash, tensor_hash)
 from .e2_convergence import (
     ConvergenceDecision,
+    ConvergenceInput,
     decide_convergence,
     evaluate_convergence,
 )
@@ -48,7 +49,7 @@ from .e2_selection import (
 )
 from .grids import spectral_resample_periodic
 from .interfaces import build_surrogate_initial_state, derive_finite_resolution_data
-from .metrics import aggregate_errors, compare_fields_on_common_grid, samplewise_l2_errors
+from .metrics import aggregate_errors, samplewise_l2_errors
 from .model1 import decode_equispaced_point_observation_to_real_fourier
 from .observations import observe_equispaced_periodic
 from .random_features import RandomFeatureMap
@@ -778,20 +779,29 @@ def _run_e2_attempt(
     # train/validation members and completes before a test state, feature or
     # label is generated.  A rejected pilot returns immediately into the next
     # attempt, so rejected attempts cannot evaluate test data.
-    convergence_rows, convergence_summary = evaluate_convergence(
-        view=selection_view,
-        representatives=representatives,
-        evaluate=lambda view, selected: _convergence(
-            config,
-            view,
-            all_sample_ids,
-            selection_positions,
-            cache,
-            selected,
+    convergence_result = evaluate_convergence(
+        ConvergenceInput(
+            config=config,
+            view=selection_view,
+            sample_ids=all_sample_ids,
+            selection_positions=selection_positions,
+            representatives=representatives,
             pilot_n_sur=pilot_n_sur,
             batch_size=batch_size,
-        ),
+            solve_state=lambda u0, family, nu, T, nx, shard: _solve_state(
+                config, u0, all_sample_ids, cache, family, nu, T, nx,
+                batch_size, shard
+            ),
+            build_features=lambda state, digest: _features(
+                config, state, digest, cache
+            ),
+            fit_point=lambda data: _fit_point(config, data),
+            build_fit_data=TrainValidationData,
+            select_ridge=select_ridge,
+        )
     )
+    convergence_rows = list(convergence_result.rows)
+    convergence_summary = convergence_result.summary
     selected_base = convergence_summary["global_n_sur_base"]
     decision: ConvergenceDecision = decide_convergence(
         pilot_n_sur=pilot_n_sur,
@@ -1084,166 +1094,3 @@ def run_e2(
         )
         current_pilot = next_pilot
         remaining -= 1
-
-
-def _convergence(
-    config: Paper1Config,
-    view: SelectionDatasetView,
-    sample_ids: torch.Tensor,
-    selection_positions: torch.Tensor,
-    cache: TensorCache,
-    representatives: dict[str, dict[str, Any]],
-    *,
-    pilot_n_sur: int,
-    batch_size: int | None,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    assert config.e2 is not None
-    conv, L, J = config.e2.convergence, config.domain.length, config.spatial.observation_dim
-    candidates = tuple(nx for nx in conv.n_sur_candidates if nx >= pilot_n_sur)
-    if len(candidates) < 2:
-        return [], {"status": "nonconverged", "global_n_sur_base": None, "families": {},
-                    "reason": "no finer n_sur candidate remains", "sample_ids": list(conv.sample_ids)}
-    position_by_id = {
-        int(sample_id): position
-        for position, sample_id in enumerate(sample_ids.tolist())
-    }
-    conv_positions = torch.tensor(
-        [position_by_id[int(i)] for i in conv.sample_ids],
-        dtype=torch.long, device=view.u0_train_validation.device)
-    selection_lookup = {
-        int(position): local for local, position in enumerate(selection_positions.tolist())}
-    conv_in_selection = torch.tensor(
-        [selection_lookup[int(position)] for position in conv_positions.tolist()],
-        dtype=torch.long, device=view.u0_train_validation.device)
-    local_train = view.train_indices
-    local_val = view.validation_indices
-    rows, summary = [], {"families": {}}
-    bases = []
-    for family, representative in representatives.items():
-        states, features = {}, {}
-        finest = candidates[-1]
-        for nx in candidates:
-            local_shard = (
-                torch.arange(selection_positions.numel(), device=local_train.device)
-                if nx == finest
-                else conv_in_selection
-            )
-            global_shard = selection_positions if nx == finest else conv_positions
-            state, _, digest = _solve_state(
-                config, view.u0_train_validation[local_shard], sample_ids, cache, family,
-                representative["nu_star"], representative["T_star"], nx,
-                batch_size, global_shard)
-            feature, _ = _features(config, state, digest, cache)
-            states[nx] = state.to(view.u0_train_validation.device)
-            features[nx] = feature.to(view.u0_train_validation.device)
-        frozen_models, _, _ = _fit_point(config, TrainValidationData(
-            x_train=features[finest][local_train],
-            x_validation=features[finest][local_val],
-            y_train=view.target_train,
-            y_validation=view.target_validation,
-            target_data_validation=view.target_data_validation,
-            reference_validation=view.reference_validation))
-        frozen2 = frozen_models["model2"]
-        selected3 = frozen_models["model3"]
-        frozen3 = {}
-        for seed in config.e2.model3.evaluation_seeds:
-            random_map = RandomFeatureMap.create(
-                features[finest].shape[1], selected3["width"],
-                activation=config.e2.model3.activation, seed=seed,
-                weight_scale=selected3["weight_scale"],
-                bias_scale=selected3["bias_scale"],
-                dtype=features[finest].dtype,
-                device=features[finest].device)
-            augmented = random_map(features[finest][local_train])
-            readout, _, _ = select_ridge(
-                augmented, view.target_train, augmented,
-                view.target_train, (float(selected3["zeta"]),),
-                tolerance=0.0, svd_rcond=config.e2.ridge.svd_rcond)
-            frozen3[seed] = (random_map, readout)
-        passing = []
-        for nx in candidates:
-            nx_state = states[nx] if nx != finest else states[nx][conv_in_selection]
-            nx_feature = features[nx] if nx != finest else features[nx][conv_in_selection]
-            finest_state = states[finest][conv_in_selection]
-            finest_feature = features[finest][conv_in_selection]
-            terminal = compare_fields_on_common_grid(
-                nx_state, finest_state, common_nx=finest,
-                domain_length=L)["relative_aggregate"]
-            feature_err = samplewise_l2_errors(
-                nx_feature, finest_feature, domain_length=float(J))["relative"]
-            feature = aggregate_errors(feature_err)
-            prediction_sets = []
-            named_prediction = {}
-            for model_name, pred, pred_ref in (
-                ("model1", decode_equispaced_point_observation_to_real_fourier(nx_feature, config.spatial.target_output_dim, domain_length=L),
-                 decode_equispaced_point_observation_to_real_fourier(finest_feature, config.spatial.target_output_dim, domain_length=L)),
-                ("model2", frozen2(nx_feature), frozen2(finest_feature)),
-            ):
-                pred_field = real_fourier_synthesis(pred, config.spatial.reference_nx, domain_length=L)
-                pred_ref_field = real_fourier_synthesis(pred_ref, config.spatial.reference_nx, domain_length=L)
-                evidence = aggregate_errors(samplewise_l2_errors(
-                    pred_field, pred_ref_field,
-                    domain_length=L)["relative"])
-                prediction_sets.append(evidence)
-                named_prediction[model_name] = evidence
-            model3_seed_evidence = {}
-            for seed, (random_map, readout) in frozen3.items():
-                pred = readout(random_map(nx_feature))
-                pred_ref = readout(random_map(finest_feature))
-                pred_field = real_fourier_synthesis(
-                    pred, config.spatial.reference_nx, domain_length=L)
-                pred_ref_field = real_fourier_synthesis(
-                    pred_ref, config.spatial.reference_nx, domain_length=L)
-                evidence = aggregate_errors(samplewise_l2_errors(
-                    pred_field, pred_ref_field,
-                    domain_length=L)["relative"])
-                prediction_sets.append(evidence)
-                model3_seed_evidence[str(seed)] = evidence
-            prediction = {"mean": max(item["mean"] for item in prediction_sets),
-                          "max": max(item["max"] for item in prediction_sets)}
-            worst_seed = max(
-                model3_seed_evidence,
-                key=lambda seed: model3_seed_evidence[seed]["max"])
-            tol = conv.tolerances
-            passed = terminal["mean"] <= tol.terminal_mean and terminal["max"] <= tol.terminal_max and \
-                feature["mean"] <= tol.feature_mean and feature["max"] <= tol.feature_max and \
-                prediction["mean"] <= tol.prediction_mean and prediction["max"] <= tol.prediction_max
-            rows.append({"family": family, "n_sur": nx, "reference_n_sur": finest,
-                         "sample_ids": ",".join(str(i) for i in conv.sample_ids),
-                         "sample_membership": "train_or_validation",
-                         "terminal_relative_l2_mean": terminal["mean"], "terminal_relative_l2_max": terminal["max"],
-                         "feature_relative_l2_mean": feature["mean"], "feature_relative_l2_max": feature["max"],
-                         "prediction_relative_l2_mean": prediction["mean"], "prediction_relative_l2_max": prediction["max"],
-                         "model1_prediction_mean": named_prediction["model1"]["mean"],
-                         "model1_prediction_max": named_prediction["model1"]["max"],
-                         "model1_prediction_pass": (
-                             named_prediction["model1"]["mean"] <= tol.prediction_mean
-                             and named_prediction["model1"]["max"] <= tol.prediction_max),
-                         "model2_prediction_mean": named_prediction["model2"]["mean"],
-                         "model2_prediction_max": named_prediction["model2"]["max"],
-                         "model2_prediction_pass": (
-                             named_prediction["model2"]["mean"] <= tol.prediction_mean
-                             and named_prediction["model2"]["max"] <= tol.prediction_max),
-                         "model3_worst_seed": worst_seed,
-                         "model3_prediction_mean": max(
-                             item["mean"] for item in model3_seed_evidence.values()),
-                         "model3_prediction_max": max(
-                             item["max"] for item in model3_seed_evidence.values()),
-                         "model3_prediction_pass": all(
-                             item["mean"] <= tol.prediction_mean
-                             and item["max"] <= tol.prediction_max
-                             for item in model3_seed_evidence.values()),
-                         "model3_evaluation_seed_evidence":
-                             __import__("json").dumps(model3_seed_evidence, sort_keys=True),
-                         "model3_aggregate_type": "worst_case_over_evaluation_seeds_and_models",
-                         "frozen_readout": "max_of_model1_model2_model3_frozen_at_finest",
-                         "status": "pass" if passed else "fail"})
-            if passed and nx < finest:
-                passing.append(nx)
-        base = min(passing) if passing else None
-        summary["families"][family] = {"n_sur_base": base, "status": "pass" if base is not None else "fail"}
-        if base is not None: bases.append(base)
-    summary["global_n_sur_base"] = max(bases) if len(bases) == len(representatives) else None
-    summary["status"] = "pass" if summary["global_n_sur_base"] is not None else "fail"
-    summary["sample_ids"] = list(conv.sample_ids)
-    return rows, summary

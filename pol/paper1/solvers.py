@@ -5,8 +5,8 @@ import math
 
 import torch
 
-from pol.burgers_spectral_1d import simulate_burgers_split_step
-from pol.spectral_etdrk4_1d import simulate_burgers_etdrk4
+from pol.numerics.burgers import simulate_burgers_split_step
+from pol.numerics.etdrk4 import simulate_burgers_etdrk4
 
 
 def normalize_burgers_solver_name(solver: str) -> str:

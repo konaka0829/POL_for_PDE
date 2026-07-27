@@ -4,7 +4,9 @@ from dataclasses import dataclass
 
 import torch
 
-from pol.model123_1d.initial_conditions import sample_gaussian_random_field_initial_conditions
+from pol.numerics.initial_conditions import (
+    sample_gaussian_random_field_initial_conditions,
+)
 
 from .config import Paper1Config
 from .grids import spectral_resample_periodic

@@ -4,3 +4,4 @@ scipy>=1.9
 h5py>=3.8
 matplotlib>=3.7
 pytest>=7.0
+build>=1.2

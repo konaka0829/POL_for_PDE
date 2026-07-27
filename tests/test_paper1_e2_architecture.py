@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from pol.paper1.e2_convergence import decide_convergence
+from pol.paper1.e2_convergence import ConvergenceInput, decide_convergence
 from pol.paper1.e2_evaluation import evaluate_test
 from pol.paper1.e2_points import SelectionDatasetView
 
@@ -87,38 +87,17 @@ def test_selection_and_convergence_modules_have_no_test_capability() -> None:
         assert "y_target_master" not in source
 
 
-def test_convergence_callback_cannot_capture_full_dataset() -> None:
-    """The production closure must narrow dataset authority to sample IDs."""
-    tree = ast.parse((ROOT / "pol/paper1/e2.py").read_text(encoding="utf-8"))
-    attempt = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "_run_e2_attempt"
-    )
-    convergence_call = next(
-        node
-        for node in ast.walk(attempt)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "evaluate_convergence"
-    )
-    callback = next(
-        keyword.value
-        for keyword in convergence_call.keywords
-        if keyword.arg == "evaluate"
-    )
-    assert isinstance(callback, ast.Lambda)
-    assert not any(
-        isinstance(node, ast.Name) and node.id == "dataset"
-        for node in ast.walk(callback)
-    )
-    assert not any(
-        argument.arg == "dataset"
-        for argument in next(
-            node
-            for node in tree.body
-            if isinstance(node, ast.FunctionDef) and node.name == "_convergence"
-        ).args.args
+def test_convergence_science_is_owned_by_responsibility_module() -> None:
+    orchestration = (ROOT / "pol/paper1/e2.py").read_text(encoding="utf-8")
+    convergence = (
+        ROOT / "pol/paper1/e2_convergence.py"
+    ).read_text(encoding="utf-8")
+    assert "def _convergence(" not in orchestration
+    assert "compare_fields_on_common_grid" not in orchestration
+    assert "compare_fields_on_common_grid" in convergence
+    assert all(
+        "test" not in name.lower()
+        for name in ConvergenceInput.__dataclass_fields__
     )
 
 

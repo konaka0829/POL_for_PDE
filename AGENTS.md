@@ -31,9 +31,9 @@ freeze/read-back, then test evaluation). E3--E7 will be added in later phases.
 - Before refactoring scientific core code, fix a validated regression baseline
   independently of the refactored execution path.
 
-The `pol.model123_1d` and time-scaled/generator-defect experiments are legacy
-compatibility code during migration. They are not the design reference for new
-Paper 1 workflow or scientific modules.
+The Model123 and time-scaled/generator-defect experiments were separated in
+Phase 6 and are recoverable from the archive anchor documented in
+`docs/phase6_legacy_migration.md`. They are not active package dependencies.
 
 ## Change discipline
 
@@ -43,11 +43,13 @@ above them. Do not restore the Paper 1 compatibility scripts removed in Phase
 changes, workflow refactors, and legacy cleanup in one phase. Production
 profiles must not be run unless explicitly requested.
 
+Use `python3 -m pip install -e '.[test]'` for a clean development/test
+installation; the test extra includes the packaging build dependency.
+
 ## Refactoring phase names
 
 The implementation phase source of truth is: Phase 1 unified runner; Phase 2
 common infrastructure; Phase 3 E2 responsibility split; Phase 4 generic
 matrix and artifact-only plot commonization; Phase 5 compatibility-script
-removal; Phase 6 legacy Model123 separation. The former “Phase 3A/3B”
-matrix/plot labels mean Phase 4. Phase 5 is complete; Phase 6 has not been
-performed.
+removal; Phase 6 legacy Model123 separation (complete). The former “Phase 3A/3B”
+matrix/plot labels mean Phase 4. Phases 5 and 6 are complete.

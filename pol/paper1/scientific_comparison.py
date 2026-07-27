@@ -214,6 +214,12 @@ def policy_from_baseline(
     raw = baseline.get("comparison_policy")
     if not isinstance(raw, dict):
         raise ValueError("scientific baseline comparison_policy is missing")
+    version = raw.get("version")
+    if version != COMPARISON_POLICY_VERSION:
+        raise ValueError(
+            "unsupported scientific comparison policy version: "
+            f"{version!r}"
+        )
     numeric_paths = raw.get("numeric_paths")
     if not isinstance(numeric_paths, dict):
         raise ValueError("scientific baseline numeric_paths is missing")
@@ -230,7 +236,7 @@ def policy_from_baseline(
             if path == prefix or path.startswith(prefix + ".") or path.startswith(prefix + "[")
         }
     return ScientificComparisonPolicy(
-        version=str(raw.get("version")),
+        version=str(version),
         numeric_paths=paths,
         tolerances=tolerances,
     )

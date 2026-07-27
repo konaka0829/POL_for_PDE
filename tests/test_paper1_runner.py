@@ -14,6 +14,7 @@ from pol.cli import main
 import pol.paper1.runner as runner_module
 from pol.paper1.run_spec import load_run_spec
 from pol.paper1.runner import build_plan, execute_run, plan_to_dict
+from pol.plots.types import PlotTaskSpec
 from pol.runtime.recipe import RecipeResult, RecipeUsageError
 
 
@@ -430,6 +431,34 @@ def test_plots_only_never_calls_compute_and_records_reuse(
     assert saved["last_plot_request"] == request
 
 
+def test_compute_binding_ignores_plot_settings_and_source_bytes(
+    tmp_path: Path
+) -> None:
+    spec = _temp_spec(tmp_path, "e1")
+    steps = build_plan(spec, repo_root=ROOT)
+    spec.run_dir.mkdir(parents=True)
+    runner_module.write_strict_json(
+        spec.run_dir / "resolved_run_spec.json",
+        runner_module._resolved_run_record(
+            spec, steps, run_dir=spec.run_dir
+        ),
+    )
+    changed = replace(
+        spec,
+        plot_tasks=(
+            PlotTaskSpec(
+                spec.plot_tasks[0].recipe_id,
+                {**dict(spec.plot_tasks[0].settings), "dpi": 120},
+            ),
+        ),
+    )
+    runner_module._validate_current_request_binding(
+        changed,
+        build_plan(changed, repo_root=ROOT),
+        run_dir=spec.run_dir,
+    )
+
+
 def test_plots_only_rejects_disabled_or_empty_plot_request(
     tmp_path: Path,
 ) -> None:
@@ -440,6 +469,52 @@ def test_plots_only_rejects_disabled_or_empty_plot_request(
     )
     with pytest.raises(ValueError, match="enabled plot task"):
         execute_run(spec, repo_root=ROOT, force=False, plots_only=True)
+
+
+def test_malformed_plot_request_records_rejection_without_compute_mutation(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "unit"
+    run_dir.mkdir(parents=True)
+    manifest = {
+        "schema_version": "paper1-run-manifest-v2",
+        "status": "pass",
+        "run_name": "unit",
+        "run_dir": str(run_dir),
+        "science_fingerprint": "saved-compute",
+        "compute_status": "pass",
+    }
+    (run_dir / "run_manifest.json").write_text(json.dumps(manifest))
+    raw = {
+        "schema_version": "paper1-run-v2",
+        "run": {"name": "unit", "output_root": str(tmp_path / "runs")},
+        "experiment": {
+            "kind": "e1",
+            "config": "configs/paper1_e1_smoke.json",
+        },
+        "prerequisites": {
+            "e0_config": "configs/paper1_e0_for_e1_smoke.json"
+        },
+        "execution": {"torch_threads": 1},
+        "plots": {
+            "enabled": True,
+            "required": True,
+            "recipes": [
+                {
+                    "id": "paper1.e1.standard.v1",
+                    "settings": {"formats": ["bad"], "dpi": 80},
+                }
+            ],
+        },
+    }
+    source = tmp_path / "bad-plot.json"
+    source.write_text(json.dumps(raw))
+    assert main(["run", str(source), "--plots-only"]) == 2
+    assert json.loads(
+        (run_dir / "run_manifest.json").read_text()
+    )["compute_status"] == "pass"
+    request = json.loads((run_dir / "resolved_plot_spec.json").read_text())
+    assert request["request_status"] == "rejected"
 
 
 @pytest.mark.parametrize(("required", "expected"), [(True, 1), (False, 0)])
@@ -520,7 +595,7 @@ def test_plots_only_rejects_compute_tamper_before_plotting(
     assert execute_run(spec, repo_root=ROOT, force=False, plots_only=True) == 1
     saved = json.loads((run_dir / "run_manifest.json").read_text())
     assert saved["status"] == "fail"
-    assert saved["compute_status"] == "fail"
+    assert saved["compute_status"] == "invalid"
     assert saved["plot_status"] == "not_run"
     assert "compute artifact tampered" in saved["failure"]
 

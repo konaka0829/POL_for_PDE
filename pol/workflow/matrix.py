@@ -485,6 +485,19 @@ def execute_matrix_run(
                 raise ValueError(
                     "artifact contract fingerprint mismatch for --plots-only"
                 )
+        except Exception as exc:
+            _record_matrix_plot_request(
+                spec,
+                run_dir=run_dir,
+                manifest=manifest,
+                compute_fingerprint=compute_fingerprint,
+                request_mode="plots_only",
+                status="rejected",
+                outcomes=[],
+                failure=f"{type(exc).__name__}: {exc}",
+            )
+            return 1
+        try:
             for cell in cells:
                 plugin.validate_cell(
                     run_dir / "cells" / cell.cell_id,
@@ -509,7 +522,7 @@ def execute_matrix_run(
                     raise ValueError(f"matrix aggregate artifact tampered: {path}")
         except Exception as exc:
             manifest["status"] = "fail"
-            manifest["compute_status"] = "fail"
+            manifest["compute_status"] = "invalid"
             manifest["plot_status"] = "not_run"
             manifest["plot_tasks"] = []
             manifest["failure"] = f"{type(exc).__name__}: {exc}"
@@ -600,9 +613,10 @@ def execute_matrix_run(
         "compute_fingerprint_payload": compute_fingerprint_payload,
         "artifact_contract_fingerprint": artifact_fingerprint,
         "science_fingerprint": compute_fingerprint,
+        "request_status": "accepted",
         "dependency_identities": list(dependencies.identities),
         "planned_ownership_fingerprint": planned_ownership_fingerprint,
-        "compute_status": "running",
+        "compute_status": "not_run",
         "plot_status": "pending" if spec.plots_enabled else "disabled",
         "plot_tasks": [],
         "aggregation_kind": spec.aggregation_kind,
@@ -761,7 +775,7 @@ def execute_matrix_run(
             )
             manifest["aggregate_counts"] = aggregate_counts
             manifest["aggregate_artifacts"] = aggregate_artifacts
-        manifest["compute_status"] = "fail" if failures else "pass"
+        manifest["compute_status"] = "invalid" if failures else "pass"
         manifest["status"] = "fail" if failures else "pass"
         manifest["failure"] = (
             f"{len(failures)} matrix cell(s) failed" if failures else None
@@ -813,13 +827,13 @@ def execute_matrix_run(
         ) else 0
     except KeyboardInterrupt:
         manifest["status"] = "interrupted"
-        manifest["compute_status"] = "interrupted"
+        manifest["compute_status"] = "invalid"
         manifest["failure"] = "KeyboardInterrupt"
         write_strict_json(run_dir / "matrix_manifest.json", manifest)
         return 130
     except Exception as exc:
         manifest["status"] = "fail"
-        manifest["compute_status"] = "fail"
+        manifest["compute_status"] = "invalid"
         manifest["failure"] = f"{type(exc).__name__}: {exc}"
         write_strict_json(run_dir / "matrix_manifest.json", manifest)
         return 1
