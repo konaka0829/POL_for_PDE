@@ -89,7 +89,7 @@ def _runner(tmp_path: Path, kind: str, *, env: dict[str, str]) -> Path:
 def _direct_e0(config: Path, output: Path, *, env: dict[str, str]) -> None:
     _run(
         [
-            "scripts/paper1/run_e0.py",
+            "tests/paper1_recipe_driver.py", "e0",
             "--config",
             str(config),
             "--output-dir",
@@ -171,7 +171,7 @@ def test_e1_direct_and_runner_smoke_parity(tmp_path: Path) -> None:
     )
     _run(
         [
-            "scripts/paper1/run_e1.py",
+            "tests/paper1_recipe_driver.py", "e1",
             "--config",
             str(ROOT / "configs/paper1_e1_smoke.json"),
             "--e0-dir",
@@ -230,7 +230,7 @@ def test_e2_direct_and_runner_smoke_parity(tmp_path: Path) -> None:
     _direct_e0(ROOT / "configs/paper1_e0_smoke.json", direct / "e0", env=env)
     _run(
         [
-            "scripts/paper1/generate_master_dataset.py",
+            "tests/paper1_recipe_driver.py", "dataset",
             "--config",
             str(direct / "e0/accepted_production_config.json"),
             "--master-initial-conditions",
@@ -243,7 +243,7 @@ def test_e2_direct_and_runner_smoke_parity(tmp_path: Path) -> None:
     )
     _run(
         [
-            "scripts/paper1/run_e2.py",
+            "tests/paper1_recipe_driver.py", "e2",
             "--config",
             str(ROOT / "configs/paper1_e2_smoke.json"),
             "--e0-dir",

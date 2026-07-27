@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 from pol.runtime.io import file_sha256, write_csv, write_strict_json
+from pol.runtime.hashing import stable_object_hash
 from pol.runtime.path_safety import resolve_safe_run_directory
 
 from .matrix_spec import MatrixRunSpec, expand_matrix
@@ -382,6 +383,33 @@ def execute_matrix_run(
         ),
     )
     plugin, cells, invalid, raw_counts = _prepare(spec)
+    # This identity is deliberately computable without resolving/materializing
+    # dependencies.  It is the ownership gate that must run before a managed
+    # dependency is allowed to change the filesystem.
+    planned_dependency_payload = [
+        {
+            "name": item.name,
+            "kind": item.kind,
+            "protocol_version": item.protocol_version,
+            "canonical_config_hash": item.canonical_config_hash,
+            "optional": item.optional,
+        }
+        for item in spec.dependencies
+    ]
+    planned_ownership_fingerprint = stable_object_hash(
+        {
+            "plugin_id": plugin.plugin_id,
+            "matrix_protocol_version": plugin.matrix_protocol_version,
+            "base_config_sha256": file_sha256(spec.base_config),
+            "cells": [
+                {"cell_id": cell.cell_id, "config_sha256": cell.config_sha256}
+                for cell in cells
+            ],
+            "dependencies": planned_dependency_payload,
+            "torch_threads_per_job": spec.torch_threads_per_job,
+            "cell_plots": spec.cell_plots,
+        }
+    )
     old_manifest: dict[str, Any] | None = None
     if run_dir.exists() or run_dir.is_symlink():
         old_manifest = _validate_owned_matrix(run_dir, spec)
@@ -391,6 +419,15 @@ def execute_matrix_run(
         elif not plots_only and not spec.resume:
             raise FileExistsError(
                 f"matrix run directory exists and resume=false: {run_dir}"
+            )
+        elif (
+            not force
+            and old_manifest.get("planned_ownership_fingerprint")
+            != planned_ownership_fingerprint
+        ):
+            raise ValueError(
+                "matrix planned ownership fingerprint mismatch; "
+                "use a new run name or --force"
             )
     if not plots_only:
         output_root.mkdir(parents=True, exist_ok=True)
@@ -542,6 +579,7 @@ def execute_matrix_run(
         "compute_fingerprint_payload": compute_fingerprint_payload,
         "artifact_contract_fingerprint": artifact_fingerprint,
         "dependency_identities": list(dependencies.identities),
+        "planned_ownership_fingerprint": planned_ownership_fingerprint,
         "execution": {
             "jobs": spec.jobs,
             "torch_threads_per_job": spec.torch_threads_per_job,
@@ -561,6 +599,7 @@ def execute_matrix_run(
         "artifact_contract_fingerprint": artifact_fingerprint,
         "science_fingerprint": compute_fingerprint,
         "dependency_identities": list(dependencies.identities),
+        "planned_ownership_fingerprint": planned_ownership_fingerprint,
         "compute_status": "running",
         "plot_status": "pending" if spec.plots_enabled else "disabled",
         "plot_tasks": [],

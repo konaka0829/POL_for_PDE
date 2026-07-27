@@ -19,7 +19,7 @@ from .observations import observe_equispaced_periodic
 from .solvers import BurgersFinalStateResult, effective_inner_step, normalize_burgers_solver_name, solve_burgers_final_state
 from .target_representation import real_fourier_analysis, real_fourier_synthesis
 
-from .protocols import E0_SCHEMA_VERSION
+from .protocols import E0_REQUIRED_CHECKS, E0_SCHEMA_VERSION
 MASTER_SCHEMA_VERSION = "paper1-master-initial-conditions-v1"
 
 
@@ -271,7 +271,7 @@ def run_reference_convergence(
         joint_status = "pass" if passes(joint_row) else "fail"
         joint_row["status"] = joint_status
         rows.append(joint_row)
-    return {
+    result = {
         "schema_version": E0_SCHEMA_VERSION, "selection_policy": e0.selection_policy,
         "tolerances": asdict(tol), "rows": rows,
         "spatial_status": "pass" if selected_spatial is not None else "fail",
@@ -280,6 +280,7 @@ def run_reference_convergence(
         "selected_temporal": selected_temporal, "joint_row": joint_row,
         "cache_stats": cache.stats(), "_reference_state": temporal_ref.clone(),
     }
+    return result
 
 
 def run_interface_checks(config: Paper1Config, master: MasterInitialConditions, reference_state: torch.Tensor) -> dict[str, Any]:
@@ -367,7 +368,7 @@ def build_required_checks(
     interfaces: dict[str, Any], model1: dict[str, Any],
 ) -> dict[str, str]:
     """Connect every computed E0 acceptance check to the top-level gate."""
-    return {
+    checks = {
         "resampling": resampling["status"],
         "fourier_projector": projector["status"],
         "reference_spatial_convergence": convergence["spatial_status"],
@@ -380,3 +381,6 @@ def build_required_checks(
         "model1_bandlimited_reduced_j": model1["bandlimited_reduced_j"]["status"],
         "model1_aliasing_counterexample": model1["aliasing_counterexample"]["status"],
     }
+    if set(checks) != E0_REQUIRED_CHECKS:
+        raise AssertionError("E0 required-check implementation/protocol mismatch")
+    return checks

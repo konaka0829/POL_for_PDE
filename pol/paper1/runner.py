@@ -25,11 +25,16 @@ from pol.runtime.path_safety import resolve_safe_run_directory
 from pol.paper1.config import canonical_config_json, load_config_json
 
 from .run_spec import Paper1RunSpec, run_spec_to_resolved_dict
+from .protocols import (
+    RUN_MANIFEST_SCHEMA_VERSION,
+    RUN_PLAN_SCHEMA_VERSION,
+    recipe_protocols,
+)
 
 
 @dataclass(frozen=True)
 class PlannedStep:
-    """One direct recipe invocation and optional legacy reproduction command."""
+    """One direct recipe invocation."""
 
     recipe_id: Literal["e0", "master_dataset", "e1", "e2"]
     recipe_callable: str
@@ -38,7 +43,6 @@ class PlannedStep:
     log_path: Path
     config_path: Path
     parameters: Mapping[str, object]
-    legacy_equivalent_command: tuple[str, ...] | None = None
 
     @property
     def logical_invocation(self) -> tuple[str, ...]:
@@ -61,15 +65,7 @@ def science_fingerprint(spec: Paper1RunSpec) -> str:
         "e0_config_sha256": (
             _canonical_config_sha256(spec.e0_config) if spec.e0_config else None
         ),
-        "recipe_protocols": {
-            "e0": ("paper1-e0-v2",),
-            "e1": ("paper1-e0-v2", "paper1-e1-v2"),
-            "e2": (
-                "paper1-e0-v2",
-                "paper1-master-dataset-v1",
-                "paper1-e2-v3",
-            ),
-        }[spec.kind],
+        "recipe_protocols": recipe_protocols(spec.kind),
         "torch_threads": spec.torch_threads,
         "batch_size": spec.batch_size,
     }
@@ -118,15 +114,6 @@ def build_plan(spec: Paper1RunSpec, *, repo_root: Path) -> list[PlannedStep]:
                 "overwrite": True,
                 "torch_threads": 1,
             },
-            (
-                sys.executable,
-                str(root / "scripts/paper1/run_e0.py"),
-                "--config",
-                str(e0_config),
-                "--output-dir",
-                str(run_dir / "e0"),
-                "--overwrite",
-            ),
         )
     ]
     if spec.kind == "e2":
@@ -149,45 +136,11 @@ def build_plan(spec: Paper1RunSpec, *, repo_root: Path) -> list[PlannedStep]:
                     "generate_target": True,
                     "torch_threads": 1,
                 },
-                (
-                    sys.executable,
-                    str(root / "scripts/paper1/generate_master_dataset.py"),
-                    "--config",
-                    str(accepted),
-                    "--master-initial-conditions",
-                    str(run_dir / "e0/master_initial_conditions.pt"),
-                    "--output-dir",
-                    str(run_dir / "master_dataset"),
-                    "--overwrite",
-                ),
             )
         )
     if spec.kind in {"e1", "e2"}:
         number = "02" if spec.kind == "e1" else "03"
-        script = root / f"scripts/paper1/run_{spec.kind}.py"
         output = run_dir / spec.kind
-        command = [
-            sys.executable,
-            str(script),
-            "--config",
-            str(spec.experiment_config),
-            "--e0-dir",
-            str(run_dir / "e0"),
-        ]
-        if spec.kind == "e2":
-            command.extend(["--dataset-dir", str(run_dir / "master_dataset")])
-        command.extend(
-            [
-                "--output-dir",
-                str(output),
-                "--overwrite",
-                "--torch-threads",
-                str(spec.torch_threads),
-            ]
-        )
-        if spec.kind == "e2":
-            command.extend(["--batch-size", str(spec.batch_size)])
-        command.append("--skip-plots")
         steps.append(
             PlannedStep(
                 spec.kind,
@@ -222,7 +175,6 @@ def build_plan(spec: Paper1RunSpec, *, repo_root: Path) -> list[PlannedStep]:
                         else {}
                     ),
                 },
-                tuple(command),
             )
         )
     return steps
@@ -232,7 +184,7 @@ def plan_to_dict(spec: Paper1RunSpec, *, repo_root: Path) -> dict[str, object]:
     """Return the machine-readable, side-effect-free execution plan."""
     _, run_dir = resolve_run_directory(spec, repo_root=repo_root)
     return {
-        "schema_version": "paper1-run-plan-v1",
+        "schema_version": RUN_PLAN_SCHEMA_VERSION,
         "run_name": spec.name,
         "experiment_kind": spec.kind,
         "run_dir": str(run_dir),
@@ -254,11 +206,6 @@ def plan_to_dict(spec: Paper1RunSpec, *, repo_root: Path) -> dict[str, object]:
                 "config_path": str(step.config_path),
                 "output_dir": str(step.output_dir),
                 "parameters": dict(step.parameters),
-                "legacy_equivalent_command": (
-                    list(step.legacy_equivalent_command)
-                    if step.legacy_equivalent_command
-                    else None
-                ),
             }
             for step in build_plan(spec, repo_root=repo_root)
         ],
@@ -292,7 +239,7 @@ def _validate_owned_run_directory(run_dir: Path, spec: Paper1RunSpec) -> None:
         raise ValueError(f"invalid runner ownership manifest: {manifest_path}: {exc}") from exc
     if not isinstance(manifest, dict):
         raise ValueError(f"runner ownership manifest must be an object: {manifest_path}")
-    if manifest.get("schema_version") != "paper1-run-manifest-v1":
+    if manifest.get("schema_version") != RUN_MANIFEST_SCHEMA_VERSION:
         raise ValueError(f"runner ownership manifest schema mismatch: {manifest_path}")
     if manifest.get("run_name") != spec.name:
         raise ValueError(f"runner ownership manifest run_name mismatch: {manifest_path}")
@@ -300,16 +247,24 @@ def _validate_owned_run_directory(run_dir: Path, spec: Paper1RunSpec) -> None:
         raise ValueError(f"runner ownership manifest run_dir mismatch: {manifest_path}")
 
 
-def _verify_step(step: PlannedStep) -> None:
-    from .artifact_contracts import validate_step_artifacts
+def _verify_step(step: PlannedStep):
+    from .artifact_contracts import (
+        canonical_config_identity,
+        validate_step_artifacts,
+    )
 
     if step.name != "master_dataset":
         summary_path = step.output_dir / f"{step.name}_summary.json"
         if not summary_path.is_file():
             raise ValueError(f"missing saved output: {summary_path}")
-    validate_step_artifacts(step.name, step.output_dir)
+    identity = validate_step_artifacts(
+        step.name,
+        step.output_dir,
+        expected_config_identity=canonical_config_identity(step.config_path),
+        expected_config_path=step.config_path,
+    )
     if step.name == "master_dataset":
-        return
+        return identity
     summary_path = step.output_dir / f"{step.name}_summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     if step.name == "e2":
@@ -330,6 +285,50 @@ def _verify_step(step: PlannedStep) -> None:
         ]
         if positions != sorted(positions) or len(set(positions)) != 3:
             raise ValueError("E2 freeze/test event order is invalid")
+    return identity
+
+
+def _resolved_run_record(
+    spec: Paper1RunSpec, steps: list[PlannedStep], *, run_dir: Path
+) -> dict[str, Any]:
+    """Build the authoritative current-request record deterministically."""
+    resolved = run_spec_to_resolved_dict(spec, run_dir=run_dir)
+    resolved.update(
+        {
+            "source_run_spec_sha256": file_sha256(spec.source_path),
+            "experiment_config_sha256": file_sha256(spec.experiment_config),
+            "e0_config_sha256": (
+                file_sha256(spec.e0_config) if spec.e0_config else None
+            ),
+            "science_fingerprint": science_fingerprint(spec),
+            "recipe_protocols": list(recipe_protocols(spec.kind)),
+            "planned_steps": [
+                {
+                    "name": step.name,
+                    "execution_mode": "direct_recipe",
+                    "recipe_id": step.recipe_id,
+                    "recipe_callable": step.recipe_callable,
+                    "parameters": dict(step.parameters),
+                    "output_dir": str(step.output_dir),
+                    "log_path": str(step.log_path),
+                }
+                for step in steps
+            ],
+        }
+    )
+    return resolved
+
+
+def _validate_current_request_binding(
+    spec: Paper1RunSpec, steps: list[PlannedStep], *, run_dir: Path
+) -> None:
+    path = run_dir / "resolved_run_spec.json"
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("missing or unsafe authoritative resolved run spec")
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    expected = _resolved_run_record(spec, steps, run_dir=run_dir)
+    if saved != expected:
+        raise ValueError("resolved run spec does not match current request")
 
 
 def _manifest(
@@ -340,7 +339,7 @@ def _manifest(
     run_dir: Path,
 ) -> dict[str, Any]:
     return {
-        "schema_version": "paper1-run-manifest-v1",
+        "schema_version": RUN_MANIFEST_SCHEMA_VERSION,
         "status": "running",
         "run_name": spec.name,
         "experiment_kind": spec.kind,
@@ -372,11 +371,6 @@ def _manifest(
                 "recipe_callable": step.recipe_callable,
                 "command": list(step.logical_invocation),
                 "parameters": dict(step.parameters),
-                "legacy_equivalent_command": (
-                    list(step.legacy_equivalent_command)
-                    if step.legacy_equivalent_command
-                    else None
-                ),
                 "config_path": str(step.config_path),
                 "config_sha256": (
                     file_sha256(step.config_path) if step.config_path.is_file() else None
@@ -559,6 +553,9 @@ def execute_run(
         manifest_path = run_dir / "run_manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         try:
+            _validate_current_request_binding(
+                spec, steps, run_dir=run_dir
+            )
             expected_fingerprint = science_fingerprint(spec)
             if manifest.get("science_fingerprint") != expected_fingerprint:
                 raise ValueError("science fingerprint mismatch for --plots-only")
@@ -635,8 +632,16 @@ def execute_run(
                     f"existing run is not a complete pass output: {run_dir}; "
                     "pass --force"
                 )
-            for step in steps:
-                _verify_step(step)
+            _validate_current_request_binding(spec, steps, run_dir=run_dir)
+            for index, step in enumerate(steps):
+                identity = _verify_step(step)
+                recorded = manifest.get("steps", [])[index].get(
+                    "artifact_identity"
+                )
+                if recorded != identity.__dict__:
+                    raise ValueError(
+                        f"runner/step artifact identity mismatch: {step.name}"
+                    )
             if spec.plots_enabled:
                 outcomes = _run_plots(spec, run_dir=run_dir)
                 manifest["plot_tasks"] = outcomes
@@ -656,31 +661,7 @@ def execute_run(
         shutil.rmtree(run_dir)
     output_root.mkdir(parents=True, exist_ok=True)
     (run_dir / "logs").mkdir(parents=True)
-    resolved = run_spec_to_resolved_dict(spec, run_dir=run_dir)
-    resolved.update(
-        {
-            "source_run_spec_sha256": file_sha256(spec.source_path),
-            "experiment_config_sha256": file_sha256(spec.experiment_config),
-            "e0_config_sha256": file_sha256(spec.e0_config) if spec.e0_config else None,
-            "planned_steps": [
-                {
-                    "name": step.name,
-                    "execution_mode": "direct_recipe",
-                    "recipe_id": step.recipe_id,
-                    "recipe_callable": step.recipe_callable,
-                    "parameters": dict(step.parameters),
-                    "legacy_equivalent_command": (
-                        list(step.legacy_equivalent_command)
-                        if step.legacy_equivalent_command
-                        else None
-                    ),
-                    "output_dir": str(step.output_dir),
-                    "log_path": str(step.log_path),
-                }
-                for step in steps
-            ],
-        }
-    )
+    resolved = _resolved_run_record(spec, steps, run_dir=run_dir)
     write_strict_json(run_dir / "resolved_run_spec.json", resolved)
     manifest = _manifest(spec, steps, root, run_dir=run_dir)
     manifest_path = run_dir / "run_manifest.json"
@@ -715,7 +696,9 @@ def execute_run(
                     if result.exit_code != 0:
                         raise RuntimeError(
                             f"step {step.name} exited with code {result.exit_code}")
-                    _verify_step(step)
+                    identity = _verify_step(step)
+                    if identity is not None:
+                        record["artifact_identity"] = identity.__dict__
                 except BaseException as exc:
                     if isinstance(exc, RecipeUsageError):
                         record["returncode"] = 2

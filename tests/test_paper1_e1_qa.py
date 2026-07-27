@@ -27,13 +27,13 @@ def passing_run(tmp_path_factory):
     root = tmp_path_factory.mktemp("e1-qa")
     e0, e1 = root / "e0", root / "e1"
     first = subprocess.run(
-        [sys.executable, "scripts/paper1/run_e0.py", "--config",
+        [sys.executable, "tests/paper1_recipe_driver.py", "e0", "--config",
          "configs/paper1_e0_for_e1_smoke.json", "--output-dir", str(e0), "--overwrite"],
         capture_output=True, text=True,
     )
     assert first.returncode == 0, first.stdout + first.stderr
     second = subprocess.run(
-        [sys.executable, "scripts/paper1/run_e1.py", "--config", "configs/paper1_e1_smoke.json",
+        [sys.executable, "tests/paper1_recipe_driver.py", "e1", "--config", "configs/paper1_e1_smoke.json",
          "--e0-dir", str(e0), "--output-dir", str(e1), "--overwrite", "--skip-plots",
          "--torch-threads", "1"],
         capture_output=True, text=True,

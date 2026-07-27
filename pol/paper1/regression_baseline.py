@@ -21,8 +21,10 @@ from .scientific_comparison import (
 )
 
 
-BASELINE_SCHEMA_VERSION = "paper1-phase1-scientific-baseline-v4"
-MATRIX_BASELINE_SCHEMA_VERSION = "paper1-e1-matrix-smoke-baseline-v3"
+from .protocols import (
+    BASELINE_SCHEMA_VERSION,
+    MATRIX_BASELINE_SCHEMA_VERSION,
+)
 GENERATOR_VERSION = "paper1-scientific-baseline-generator-v4"
 
 # These fields encode execution location or bindings rather than scientific results.

@@ -1,0 +1,7 @@
+include AGENT.md AGENTS.md LICENSE README.md
+recursive-include configs *.json
+recursive-include docs *.md
+prune outputs_paper1
+prune build
+prune dist
+global-exclude __pycache__ *.py[cod] .pytest_cache

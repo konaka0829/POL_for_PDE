@@ -44,31 +44,9 @@ def test_recipe_module_import_is_side_effect_free(
     assert set(tmp_path.iterdir()) == before
 
 
-@pytest.mark.parametrize(
-    "script",
-    (
-        "run_e0.py",
-        "generate_master_dataset.py",
-        "run_e1.py",
-        "run_e2.py",
-    ),
-)
-def test_legacy_recipe_wrapper_help(script: str) -> None:
-    result = subprocess.run(
-        [sys.executable, str(ROOT / "scripts/paper1" / script), "--help"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=60,
-    )
-    assert result.returncode == 0
-    assert "usage:" in result.stdout
-
-
-@pytest.mark.parametrize("script", ("run_e1.py", "run_e2.py"))
+@pytest.mark.parametrize("recipe", ("e1", "e2"))
 def test_recursive_output_recipe_rejects_empty_symlink(
-    tmp_path: Path, script: str
+    tmp_path: Path, recipe: str
 ) -> None:
     target = tmp_path / "target"
     target.mkdir()
@@ -79,11 +57,12 @@ def test_recursive_output_recipe_rejects_empty_symlink(
         pytest.skip(f"symlink creation unavailable: {exc}")
     arguments = [
         sys.executable,
-        str(ROOT / "scripts/paper1" / script),
+        str(ROOT / "tests/paper1_recipe_driver.py"),
+        recipe,
         "--config",
         str(ROOT / (
             "configs/paper1_e1_smoke.json"
-            if script == "run_e1.py"
+            if recipe == "e1"
             else "configs/paper1_e2_smoke.json"
         )),
         "--e0-dir",
@@ -91,7 +70,7 @@ def test_recursive_output_recipe_rejects_empty_symlink(
         "--output-dir",
         str(output),
     ]
-    if script == "run_e2.py":
+    if recipe == "e2":
         arguments.extend(["--dataset-dir", str(tmp_path / "missing-dataset")])
     result = subprocess.run(
         arguments,
@@ -106,23 +85,23 @@ def test_recursive_output_recipe_rejects_empty_symlink(
     assert list(target.iterdir()) == []
 
 
-@pytest.mark.parametrize("script", ("run_e0.py", "generate_master_dataset.py",
-                                     "run_e1.py", "run_e2.py"))
+@pytest.mark.parametrize("recipe", ("e0", "dataset", "e1", "e2"))
 def test_missing_config_is_usage_error_without_output(
-    tmp_path: Path, script: str
+    tmp_path: Path, recipe: str
 ) -> None:
     output = tmp_path / "output"
     arguments = [
         sys.executable,
-        str(ROOT / "scripts/paper1" / script),
+        str(ROOT / "tests/paper1_recipe_driver.py"),
+        recipe,
         "--config",
         str(tmp_path / "missing.json"),
         "--output-dir",
         str(output),
     ]
-    if script == "run_e1.py":
+    if recipe == "e1":
         arguments.extend(["--e0-dir", str(tmp_path / "missing-e0")])
-    elif script == "run_e2.py":
+    elif recipe == "e2":
         arguments.extend([
             "--e0-dir", str(tmp_path / "missing-e0"),
             "--dataset-dir", str(tmp_path / "missing-dataset"),

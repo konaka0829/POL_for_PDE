@@ -92,16 +92,14 @@ atomically published with an exact file contract. The matrix compute
 fingerprint includes plugin/matrix and actual cell-recipe protocol versions,
 dependency recipe/config/artifact identities, canonical cells, and
 `torch_threads_per_job`, but excludes scheduling
-(`jobs`), resume, and aggregate plot settings. The older
-`scripts/paper1/run_e1_sweep.py` entry remains as a deprecated compatibility
-wrapper and delegates aggregate plotting to the Phase 4 plot registry.
+(`jobs`), resume, and aggregate plot settings.
 
 ## Artifact-only plots (Phase 4)
 
 Unified E1, E2, and E1 matrix runs execute compute recipes with inline plots
 disabled, then render registered plot tasks under
 `<run-dir>/figures/<plot-recipe-id>/`. Compute artifact directories remain
-unchanged. Legacy E1/E2 scripts retain their inline-plot behavior.
+unchanged.
 
 ```bash
 pol run configs/runs/paper1_e1_smoke.json --plots-only
@@ -158,10 +156,7 @@ reference convergence, the finite-input interface, and the fixed Model 1
 decoder. Run the short wiring check with:
 
 ```bash
-python scripts/paper1/run_e0.py \
-  --config configs/paper1_e0_smoke.json \
-  --output-dir outputs/paper1_e0_smoke \
-  --overwrite
+pol run configs/runs/paper1_e0_smoke.json
 ```
 
 Run the scientific calibration separately with
@@ -180,15 +175,8 @@ joint-validated reference resolution and time-integration settings; a failed
 E0 never writes this file. The convergence artifact records spatial,
 temporal, and selected-pair joint checks plus per-run solver-cache statistics.
 
-Reuse exactly the same master fields for production data generation with:
-
-```bash
-python scripts/paper1/generate_master_dataset.py \
-  --config outputs/paper1_e0_main/accepted_production_config.json \
-  --master-initial-conditions outputs/paper1_e0_main/master_initial_conditions.pt \
-  --output-dir outputs/paper1_master \
-  --overwrite
-```
+For E2, the unified runner reuses exactly the accepted E0 master fields when
+it creates the managed master-dataset step.
 
 The generator validates sample IDs/count, domain, seed, GRF parameters,
 dtype, maximum resolution, schema, and tensor hash before use. If the selected
@@ -201,11 +189,10 @@ the current Paper 1 E0.
 
 ## Paper 1 E1 heat calibration
 
-Run the prerequisite E0 and the short heat-to-heat calibration with:
+Run the prerequisite E0 and short heat-to-heat calibration as one managed run:
 
 ```bash
-python scripts/paper1/run_e0.py --config configs/paper1_e0_for_e1_smoke.json --output-dir outputs/paper1_e0_for_e1_smoke --overwrite
-python scripts/paper1/run_e1.py --config configs/paper1_e1_smoke.json --e0-dir outputs/paper1_e0_for_e1_smoke --output-dir outputs/paper1_e1_smoke --overwrite --torch-threads 1
+pol run configs/runs/paper1_e1_smoke.json
 ```
 
 E1 records validation-only ridge selection, stable/unstable multiplier and
@@ -247,20 +234,10 @@ and saved-artifact checks passed; failures retain best-effort summary,
 environment, and failure records and return nonzero.
 
 Production reuses the Paper 1 E0 master (it does not create an E1-specific
-master):
+master). Inspect the production plan before explicitly running it:
 
 ```bash
-python3 scripts/paper1/run_e0.py \
-  --config configs/paper1_e0_main.json \
-  --output-dir outputs/paper1_e0_main \
-  --overwrite
-
-python3 scripts/paper1/run_e1.py \
-  --config configs/paper1_e1_main.json \
-  --e0-dir outputs/paper1_e0_main \
-  --output-dir outputs/paper1_e1_main \
-  --overwrite \
-  --torch-threads 1
+pol run configs/runs/paper1_e1_main.json --plan
 ```
 
 For a numeric-only smoke, add `--skip-plots`. Its `plot_manifest.json` has
@@ -297,9 +274,9 @@ fixed `n_tar=256` for `J=65` and `J=96`.
 Run, inspect, or regenerate plots with:
 
 ```bash
-python3 scripts/paper1/run_e1_sweep.py --jobs 2 --torch-threads 1
-python3 scripts/paper1/run_e1_sweep.py --dry-run
-python3 scripts/paper1/run_e1_sweep.py --plot-only
+pol run configs/runs/paper1_e1_resolution_sweep_smoke.json
+pol run configs/runs/paper1_e1_resolution_sweep_smoke.json --plan
+pol run configs/runs/paper1_e1_resolution_sweep_smoke.json --plots-only
 ```
 
 Re-running the normal command resumes from every run whose
@@ -380,30 +357,16 @@ fail rather than being incorporated into the manifest.
 Smoke:
 
 ```bash
-python3 scripts/paper1/run_e0.py \
-  --config configs/paper1_e0_smoke.json \
-  --output-dir outputs/paper1_e0_smoke --overwrite
-python3 scripts/paper1/generate_master_dataset.py \
-  --config outputs/paper1_e0_smoke/accepted_production_config.json \
-  --master-initial-conditions outputs/paper1_e0_smoke/master_initial_conditions.pt \
-  --output-dir outputs/paper1_master_burgers_smoke --overwrite
-python3 scripts/paper1/run_e2.py \
-  --config configs/paper1_e2_smoke.json \
-  --e0-dir outputs/paper1_e0_smoke \
-  --dataset-dir outputs/paper1_master_burgers_smoke \
-  --output-dir outputs/paper1_e2_smoke --overwrite --torch-threads 1 \
-  --batch-size 64
+pol run configs/runs/paper1_e2_smoke.json
 ```
 
-Future production uses the same commands with `paper1_e0_main.json`,
-`paper1_e2_main.json`, and production output directories. The checked-in main
+Future production uses the corresponding unified main run spec. The checked-in main
 parameter grids are initial candidates and must be validated; this repository
 does not treat them as pre-established optima. Inspect structural cost without
 running the production sweep:
 
 ```bash
-python3 scripts/paper1/run_e2.py \
-  --config configs/paper1_e2_main.json --dry-run-cost
+pol run configs/runs/paper1_e2_main.json --plan
 ```
 
 Use the same three-stage E0, master-dataset, E2 sequence for the eventual

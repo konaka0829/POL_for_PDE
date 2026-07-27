@@ -26,7 +26,9 @@ class E1ResolutionPlugin:
 
     plugin_id = "paper1_e1_resolution_v1"
     experiment_kind = "e1"
-    matrix_protocol_version = "paper1-e1-resolution-matrix-v3"
+    from pol.paper1.protocols import (
+        E1_MATRIX_PLUGIN_PROTOCOL as matrix_protocol_version,
+    )
     plot_experiment_kind = "e1_matrix"
 
     @property

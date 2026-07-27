@@ -48,4 +48,5 @@ The implementation phase source of truth is: Phase 1 unified runner; Phase 2
 common infrastructure; Phase 3 E2 responsibility split; Phase 4 generic
 matrix and artifact-only plot commonization; Phase 5 compatibility-script
 removal; Phase 6 legacy Model123 separation. The former “Phase 3A/3B”
-matrix/plot labels mean Phase 4. Phase 5 and Phase 6 have not been performed.
+matrix/plot labels mean Phase 4. Phase 5 is complete; Phase 6 has not been
+performed.

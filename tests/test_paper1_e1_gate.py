@@ -13,7 +13,7 @@ from pol.paper1.e1 import validate_e0_prerequisite
 def passing_e0(tmp_path):
     source = tmp_path / "e0"
     process = subprocess.run(
-        [sys.executable, "scripts/paper1/run_e0.py", "--config",
+        [sys.executable, "tests/paper1_recipe_driver.py", "e0", "--config",
          "configs/paper1_e0_for_e1_smoke.json", "--output-dir", str(source),
          "--overwrite"],
         capture_output=True,

@@ -630,14 +630,22 @@ def _run_e2_attempt(
     auto_reruns_remaining = config.e2.convergence.max_auto_reruns if auto_reruns_remaining is None else auto_reruns_remaining
     dtype, device = config.data.torch_dtype(), torch.device("cpu" if config.data.device == "auto" else config.data.device)
     uref = dataset.u0_master.to(dtype=dtype, device=device)
-    split = {"train": dataset.train_indices.to(device), "val": dataset.val_indices.to(device), "test": dataset.test_indices.to(device)}
-    selection_positions = torch.cat((split["train"], split["val"]))
+    split_cpu = {
+        "train": dataset.train_indices.detach().cpu(),
+        "val": dataset.val_indices.detach().cpu(),
+        "test": dataset.test_indices.detach().cpu(),
+    }
+    split = {name: indices.to(device) for name, indices in split_cpu.items()}
+    selection_positions_cpu = torch.cat(
+        (split_cpu["train"], split_cpu["val"])
+    )
+    selection_positions = selection_positions_cpu.to(device)
     # Materialize only train/validation targets before the durable freeze
     # boundary.  In particular, no finite representation of a test label
     # exists in selection or convergence scope.
-    selection_reference = dataset.y_target_master.to(
-        dtype=dtype, device=device
-    )[selection_positions]
+    selection_reference = dataset.y_target_master[
+        selection_positions_cpu
+    ].to(dtype=dtype, device=device)
     finite = derive_finite_resolution_data(
         uref[selection_positions], selection_reference,
         target_data_nx=config.spatial.target_data_nx,
@@ -1061,24 +1069,28 @@ def _run_e2_attempt(
     else:
         raise ValueError("freeze_dir is required for disk-only test evaluation")
 
-    # Test labels are first materialized below, after durable selection freeze.
-    full_reference = dataset.y_target_master.to(dtype=dtype, device=device)
-    finite_full = derive_finite_resolution_data(
-        uref,
-        full_reference,
+    # Open exactly the test slice below, after durable selection freeze.  A
+    # full target tensor/finite representation never exists in this scope.
+    test_reference = dataset.y_target_master[split_cpu["test"]].to(
+        dtype=dtype, device=device
+    )
+    test_inputs = uref[split["test"]]
+    finite_test = derive_finite_resolution_data(
+        test_inputs,
+        test_reference,
         target_data_nx=config.spatial.target_data_nx,
         target_output_dim=config.spatial.target_output_dim,
         domain_length=config.domain.length,
-        sample_ids=dataset.sample_ids.to(device),
+        sample_ids=dataset.sample_ids[split_cpu["test"]].to(device),
     )
-    assert finite_full.target_coefficients is not None
+    assert finite_test.target_coefficients is not None
     test_view = TestDatasetView(
-        sample_ids=dataset.sample_ids.to(device)[split["test"]],
+        sample_ids=dataset.sample_ids[split_cpu["test"]].to(device),
         indices=split["test"],
-        u0_test=finite_full.u0_data[split["test"]],
-        target_coefficients_test=finite_full.target_coefficients[split["test"]],
-        target_data_test=finite_full.y_target_data[split["test"]],
-        reference_test=full_reference[split["test"]],
+        u0_test=finite_test.u0_data,
+        target_coefficients_test=finite_test.target_coefficients,
+        target_data_test=finite_test.y_target_data,
+        reference_test=test_reference,
     )
     test_rows, model3_test_by_seed, model3_aggregate, saved_models = [], [], [], {}
     test = test_view.indices
@@ -1193,7 +1205,9 @@ def _run_e2_attempt(
         "convergence_summary": convergence_summary, "failed_runs": failed_runs,
         "selected_models": saved_models,
         "cache": {"hits": cache.hits, "misses": cache.misses, **cache.stats},
-        "runtime_seconds": runtime, "finite_data": finite_full,
+        # Retained for internal compatibility; this is intentionally the
+        # train/validation finite view, never a full target materialization.
+        "runtime_seconds": runtime, "finite_data": finite,
         "pilot_n_sur": pilot_n_sur, "auto_rerun_history": [],
         "shared_hyperparameters": shared_hyperparameters,
         "convergence_sample_membership": convergence_membership,

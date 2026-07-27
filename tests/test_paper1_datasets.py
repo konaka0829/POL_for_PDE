@@ -82,7 +82,7 @@ def test_smoke_cli_creates_required_files(tmp_path):
     proc = subprocess.run(
         [
             sys.executable,
-            "scripts/paper1/generate_master_dataset.py",
+            "tests/paper1_recipe_driver.py", "dataset",
             "--config",
             "configs/paper1_smoke.json",
             "--output-dir",
@@ -109,7 +109,7 @@ def test_cli_refuses_overwrite_before_generation(tmp_path):
     proc = subprocess.run(
         [
             sys.executable,
-            "scripts/paper1/generate_master_dataset.py",
+            "tests/paper1_recipe_driver.py", "dataset",
             "--config",
             "configs/paper1_smoke.json",
             "--output-dir",

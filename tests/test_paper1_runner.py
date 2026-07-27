@@ -32,11 +32,6 @@ def test_plans_describe_direct_recipes(kind: str, names: list[str]) -> None:
     assert [step.name for step in plan] == names
     assert all(step.logical_invocation[0] == "direct_recipe" for step in plan)
     assert all(step.recipe_callable.startswith("pol.paper1.recipes.") for step in plan)
-    assert all(
-        step.legacy_equivalent_command
-        and step.legacy_equivalent_command[0] == sys.executable
-        for step in plan
-    )
 
 
 @pytest.mark.parametrize("kind", ["e1", "e2"])
@@ -68,13 +63,21 @@ def test_plan_has_no_filesystem_or_popen(tmp_path: Path, monkeypatch, capsys) ->
     assert not (tmp_path / "out").exists()
     assert {name: os.environ.get(name) for name in variables} == before
     plan = json.loads(capsys.readouterr().out)
-    assert plan["schema_version"] == "paper1-run-plan-v1"
+    assert plan["schema_version"] == "paper1-run-plan-v2"
     assert plan["steps"][0]["execution_mode"] == "direct_recipe"
     assert plan["steps"][0]["recipe_callable"].endswith(
         ".run_foundation_validation"
     )
     assert "command" not in plan["steps"][0]
-    assert plan["steps"][0]["legacy_equivalent_command"]
+    assert set(plan["steps"][0]) == {
+        "name",
+        "execution_mode",
+        "recipe_id",
+        "recipe_callable",
+        "config_path",
+        "output_dir",
+        "parameters",
+    }
 
 
 def test_plan_does_not_require_legacy_wrapper_scripts(
@@ -162,7 +165,7 @@ def _write_owned_manifest(run_dir: Path, run_name: str) -> None:
     (run_dir / "run_manifest.json").write_text(
         json.dumps(
             {
-                "schema_version": "paper1-run-manifest-v1",
+                "schema_version": "paper1-run-manifest-v2",
                 "run_name": run_name,
                 "run_dir": str(run_dir),
             }
@@ -378,7 +381,7 @@ def test_plots_only_never_calls_compute_and_records_reuse(
     run_dir = spec.run_dir
     run_dir.mkdir(parents=True)
     manifest = {
-        "schema_version": "paper1-run-manifest-v1",
+        "schema_version": "paper1-run-manifest-v2",
         "status": "pass",
         "run_name": spec.name,
         "run_dir": str(run_dir),
@@ -394,6 +397,10 @@ def test_plots_only_never_calls_compute_and_records_reuse(
     )
     monkeypatch.setattr(
         runner_module, "_verify_compute_for_plots", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        runner_module, "_validate_current_request_binding",
+        lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
         runner_module,
@@ -443,7 +450,7 @@ def test_plot_failure_does_not_change_compute_status(
     run_dir = spec.run_dir
     run_dir.mkdir(parents=True)
     manifest = {
-        "schema_version": "paper1-run-manifest-v1",
+        "schema_version": "paper1-run-manifest-v2",
         "status": "pass",
         "run_name": spec.name,
         "run_dir": str(run_dir),
@@ -454,6 +461,10 @@ def test_plot_failure_does_not_change_compute_status(
     (run_dir / "run_manifest.json").write_text(json.dumps(manifest))
     monkeypatch.setattr(
         runner_module, "_verify_compute_for_plots", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        runner_module, "_validate_current_request_binding",
+        lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
         runner_module,
@@ -480,7 +491,7 @@ def test_plots_only_rejects_compute_tamper_before_plotting(
     (run_dir / "run_manifest.json").write_text(
         json.dumps(
             {
-                "schema_version": "paper1-run-manifest-v1",
+                "schema_version": "paper1-run-manifest-v2",
                 "status": "pass",
                 "run_name": spec.name,
                 "run_dir": str(run_dir),
@@ -496,6 +507,10 @@ def test_plots_only_rejects_compute_tamper_before_plotting(
         lambda *args, **kwargs: (_ for _ in ()).throw(
             ValueError("compute artifact tampered")
         ),
+    )
+    monkeypatch.setattr(
+        runner_module, "_validate_current_request_binding",
+        lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
         runner_module,

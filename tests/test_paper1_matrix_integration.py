@@ -7,7 +7,6 @@ import subprocess
 import sys
 
 import pytest
-from PIL import Image
 
 from pol.paper1.regression_baseline import (
     build_e1_matrix_scientific_baseline,
@@ -16,8 +15,6 @@ from pol.paper1.scientific_comparison import (
     assert_scientific_record_matches,
     policy_from_baseline,
 )
-from pol.plots.runtime import execute_plot_tasks
-from pol.plots.types import PlotTaskSpec
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -146,83 +143,3 @@ def test_matrix_resume_reruns_only_missing_or_tampered_cells(
         "executed"
     ) == 1
     _assert_baseline(run_dir)
-
-
-@pytest.mark.slow
-def test_legacy_wrapper_uses_matrix_engine_and_preserves_plots(
-    tmp_path: Path,
-) -> None:
-    e0 = tmp_path / "e0"
-    result = _run(
-        [
-            "scripts/paper1/run_e0.py",
-            "--config",
-            "configs/paper1_e0_for_e1_smoke.json",
-            "--output-dir",
-            str(e0),
-            "--overwrite",
-        ]
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    output = tmp_path / "legacy"
-    result = _run(
-        [
-            "scripts/paper1/run_e1_sweep.py",
-            "--base-config",
-            "configs/paper1_e1_smoke.json",
-            "--sweep-spec",
-            "configs/paper1_e1_sweep_smoke.json",
-            "--e0-dir",
-            str(e0),
-            "--output-root",
-            str(output),
-            "--jobs",
-            "2",
-            "--torch-threads",
-            "1",
-        ]
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stderr.count("deprecated") == 1
-    manifest = json.loads((output / "sweep_plot_manifest.json").read_text())
-    plots = sorted(
-        (
-            {
-                "logical_name": Path(record["relative_path"]).stem,
-                "format": record["format"],
-            }
-            for record in manifest["plots"]
-            if record["status"] == "pass"
-        ),
-        key=lambda item: (item["logical_name"], item["format"]),
-    )
-    assert plots == sorted(
-        EXPECTED["record"]["plots"],
-        key=lambda item: (item["logical_name"], item["format"]),
-    )
-    for name in (
-        "sweep_selected_results.csv",
-        "sweep_readout_diagnostics.csv",
-        "sweep_noise_summary.csv",
-    ):
-        assert (output / name).stat().st_size > 0
-    settings = dict(
-        json.loads(
-            (ROOT / "configs/paper1_e1_sweep_smoke.json").read_text()
-        )["aggregate_plots"]
-    )
-    settings.pop("enabled")
-    task = PlotTaskSpec("paper1.e1.resolution_sweep.v1", settings)
-    figures = tmp_path / "artifact_only_figures"
-    execute_plot_tasks(
-        experiment_kind="e1_matrix",
-        input_dir=output,
-        figures_dir=figures,
-        tasks=(task,),
-    )
-    rendered = figures / task.recipe_id
-    for legacy in output.glob("*.png"):
-        left = Image.open(legacy).convert("RGBA")
-        right = Image.open(rendered / legacy.name).convert("RGBA")
-        assert left.size == right.size
-        assert left.tobytes() == right.tobytes()

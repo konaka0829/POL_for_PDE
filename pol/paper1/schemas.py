@@ -5,7 +5,7 @@ import json
 from typing import Any
 
 
-SCHEMA_VERSION = "paper1-master-dataset-v1"
+from .protocols import MASTER_DATASET_SCHEMA_VERSION as SCHEMA_VERSION
 
 
 def canonical_json(data: Any) -> str:

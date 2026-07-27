@@ -51,6 +51,6 @@ def test_generate_dataset_cli_archive_handoff(tmp_path):
     cfg, _, archive = _archive(tmp_path)
     config_path = tmp_path / "production.json"; save_config_json(replace(cfg, e0=None), config_path)
     out = tmp_path / "dataset"
-    proc = subprocess.run([sys.executable, "scripts/paper1/generate_master_dataset.py", "--config", str(config_path), "--master-initial-conditions", str(archive), "--output-dir", str(out), "--no-target", "--overwrite"], capture_output=True, text=True)
+    proc = subprocess.run([sys.executable, "tests/paper1_recipe_driver.py", "dataset", "--config", str(config_path), "--master-initial-conditions", str(archive), "--output-dir", str(out), "--no-target", "--overwrite"], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert (out / "master_dataset.pt").exists()

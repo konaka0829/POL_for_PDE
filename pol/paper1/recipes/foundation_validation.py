@@ -16,6 +16,7 @@ from pol.runtime.provenance import git_output
 from pol.runtime.recipe import RecipeInvocation, RecipeResult, RecipeUsageError
 
 ARTIFACTS = (
+    "artifact_manifest.json",
     "e0_summary.json",
     "reference_convergence.csv",
     "reference_convergence.json",
@@ -243,6 +244,21 @@ def _run_foundation_validation_staged(
         }
         write_e0_json(output_dir / "environment.json", environment)
         write_e0_json(output_dir / "e0_summary.json", summary)
+        if summary["status"] == "pass":
+            from pol.runtime.artifacts import manifest_records
+            from pol.runtime.io import write_strict_json
+
+            write_strict_json(
+                output_dir / "artifact_manifest.json",
+                {
+                    "schema_version": "paper1-e0-artifact-manifest-v1",
+                    "recipe_protocol": E0_SCHEMA_VERSION,
+                    "artifacts": manifest_records(
+                        output_dir,
+                        set(ARTIFACTS) - {"artifact_manifest.json"},
+                    ),
+                },
+            )
     passed = summary["status"] == "pass"
     return RecipeResult(
         status="pass" if passed else "fail",
